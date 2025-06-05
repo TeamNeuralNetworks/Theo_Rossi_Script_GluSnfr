@@ -6,7 +6,7 @@ Created on Sat Nov 20 18:47:34 2021
 """
 
 
-def visualization(name, dataframe, save_path):
+def visualization(name, dataframe):
     
     time = dataframe['Time']
     episodes = dataframe.drop('Time', axis=1)
@@ -22,15 +22,12 @@ def visualization(name, dataframe, save_path):
     dF_F_average = (average - f0_average)/f0_average
     
     fig, ax = plt.subplots(1,3, figsize=(12,4), tight_layout=True)
-    
-    for i in range(episodes.shape[1]):
-        ax[0].plot(time, episodes.iloc[:,i], 'k', alpha=0.3)
-        ax[1].plot(time, dF_F_traces.iloc[:,i], 'k', alpha=0.3)
-        
+    ax[0].plot(time, episodes, 'k', alpha=0.3)
     ax[0].plot(time, average)
     ax[0].set_xlabel('Time (sec)')
     ax[0].set_ylabel('A.U.')
-
+    
+    ax[1].plot(time, dF_F_traces, 'k', alpha=0.3)
     ax[1].set_ylabel('DF/F')
     
     ax[2].plot(time, savgol_filter(dF_F_average, 9, 2))
@@ -53,14 +50,17 @@ def visualization(name, dataframe, save_path):
     print('----------------------')
 
     wb.remove(wb['Sheet'])
-    wb.save(f'{save_path}/{name}_converted.xlsx')
-    print('File saved')
+
+    save_folder = r'E:\AAVDJ.GluSnFR-S72A\Paires_1.5vs4mMCa'
+
+    wb.save('{}\{}_converted_NoFail.xlsx'.format(save_folder, name))
+
     
 
 
 
 
-def traces_selection(name, tab, save_path):
+def traces_selection(name, tab):
     
     '''
     
@@ -83,7 +83,7 @@ def traces_selection(name, tab, save_path):
     
     sg.theme('DarkBlue')
     
-    tab_layout = [[sg.InputText(default_text='2', size=(2,1), key='threshold'), sg.Text('Threshold'), sg.Button('Check_traces')],
+    tab_layout = [[sg.InputText(default_text='3', size=(2,1), key='threshold'), sg.Text('Threshold'), sg.Button('Check_traces')],
                   [sg.Frame(layout=[
                   [sg.Checkbox('ALL', key='all_traces')],
                   [sg.TabGroup([[sg.Tab(sheet, checkbox_list) for sheet, checkbox_list in Checkboxes.items()]])]], title='EPISODES SELECTION', relief=sg.RELIEF_SUNKEN)],
@@ -173,8 +173,9 @@ def traces_selection(name, tab, save_path):
                 print('Traces without Fback')
                 print('------------------')
                 print(df_variables)
-                visualization(name, df_variables, save_path)
-                
+              
+                visualization(name, df_variables)
+             
         except:
             pass
     window.close()
@@ -199,9 +200,7 @@ if __name__ == '__main__':
     sg.theme('DarkBlue')
         
     main_layout = [[sg.Text('File path')],
-                   [sg.InputText(size=(35,1), key='path'), sg.FileBrowse()],
-                   [sg.Text('Saving path')],
-                   [sg.InputText(size=(35,1), key='save'), sg.FolderBrowse()],
+                   [sg.InputText(size=(35,1)), sg.FileBrowse()],
                    [sg.Button('GO')]]
               
     main_window = sg.Window('DF_F_conversion', main_layout, location=(0,0))
@@ -215,16 +214,17 @@ if __name__ == '__main__':
                break
            
            if main_event == 'GO':
-               name = main_value['path'].rsplit('/', 1)[-1].rsplit('.', 1)[0]
+               name = main_value[0].rsplit('/', 1)[-1].rsplit('.', 1)[0]
+               
                Dataset = {}
                
-               traces = pd.read_excel(f"{main_value['path']}", sheet_name='Traces', header=0)
-               f_back = pd.read_excel(f"{main_value['path']}", sheet_name='Data', header=0).iloc[-1,1:]
+               traces = pd.read_excel(f'{main_value[0]}', sheet_name='Traces', header=0)
+               f_back = pd.read_excel(f'{main_value[0]}', sheet_name='Data', header=0).iloc[-1,1:]
                
                Dataset['Traces'] = traces
                Dataset['Fback'] = f_back
                
-               traces_selection(name, Dataset, main_value['save'])
+               traces_selection(name, Dataset)
                
               
        except:
