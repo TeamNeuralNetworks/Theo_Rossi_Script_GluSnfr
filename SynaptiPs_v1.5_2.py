@@ -457,9 +457,7 @@ def Main_window():
                                         [sg.Text('Peak number'),sg.InputText(default_text="3", size=(10, 1)),sg.Text('ISI (ms)'), sg.InputText(default_text="50", size=(10, 1))],
                                         [sg.Button('Remove residuals in current train'), sg.Button('Remove all residuals')]],relief="groove", border_width= 5, size=(200, 10))]]
      
-    window1 = sg.Window('Browse Traces', layout1, location=(0,0), resizable=True)
-    
-    
+    window1 = sg.Window('Browse Traces', layout1, resizable=True, finalize=True)
     
     plt.ion()
     fig = plt.figure('Main Figure')

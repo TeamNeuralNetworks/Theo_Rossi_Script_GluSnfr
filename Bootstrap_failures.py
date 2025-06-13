@@ -122,7 +122,8 @@ def load_xls(file_xls):
         print(f"Colonnes trouvées: {list(df.columns)}")
         print(f"Forme des données: {df.shape}")
         
-        filt = 9
+        #filt = 1  #Smoothing value, before 9. Here 1 because with Antoine script smoothing is already done.
+        #polyorder = 0 #Polyorder must be less thant filt.
         timescale = None
         average = None
         SWEEPS = []
@@ -137,16 +138,17 @@ def load_xls(file_xls):
                 timescale = col_data
                 
             elif 'Average' in str(col_name) or 'average' in str(col_name).lower():
-                if len(col_data) >= filt:
-                    average = savgol_filter(col_data, filt, 2)
-                else:
-                    average = col_data
+                average = col_data
+                # if len(col_data) >= filt:
+                #     average = savgol_filter(col_data, filt, polyorder)
+                # else:
+                #     average = col_data
                     
             else:
-                if len(col_data) >= filt:
-                    sweep = savgol_filter(col_data, filt, 2)
-                else:
-                    sweep = col_data
+                # if len(col_data) >= filt:
+                #     sweep = savgol_filter(col_data, filt, polyorder)
+                # else:
+                sweep = col_data
                 SWEEPS.append(sweep)
         
         if timescale is None or average is None or len(SWEEPS) == 0:
