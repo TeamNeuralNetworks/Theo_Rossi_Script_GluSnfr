@@ -103,21 +103,87 @@ def load_folder(path):
 def load_xls(file_xls):
     global REC
     global TIME
-    df=pd.read_excel (file_xls, sheet_name = 'Traces DF_F0', header = 0)
-    
-    for i in range(len(df.columns)):
-        if 'Time' == df.columns[i]:
-            timescale=df.iloc[:,i].values
-            TIME.append(timescale)
-        else:
-            sweep=df.iloc[:,i].values
-            REC.append(sweep)
-       
-    for i in range(len(REC)-1):    # this to get the same size of matrix between REC and TIME 
-        TIME.append(timescale)
-     
     global sampling
-    sampling=float(TIME[1][1])*1000
+    
+    # Réinitialiser les listes
+    REC = []
+    TIME = []
+    
+    try:
+        df = pd.read_excel(file_xls, sheet_name='Traces DF_F0', header=0)
+        
+        print(f"Colonnes trouvées: {df.columns.tolist()}")
+        print(f"Dimensions du DataFrame: {df.shape}")
+        
+        # Trouver la colonne de temps
+        time_column = None
+        for col in df.columns:
+            if 'Time' in str(col) or 'time' in str(col).lower():
+                time_column = col
+                break
+        
+        if time_column is None:
+            print("Attention: Aucune colonne 'Time' trouvée, utilisation de la première colonne")
+            time_column = df.columns[0]
+        
+        # Extraire le vecteur temps
+        timescale = df[time_column].values
+        print(f"Vecteur temps extrait: {len(timescale)} points")
+        
+        # Ajouter les traces (toutes les colonnes sauf celle du temps)
+        for col in df.columns:
+            if col != time_column:
+                trace = df[col].values
+                # Vérifier que la trace contient des données valides
+                if not np.all(np.isnan(trace)):
+                    REC.append(trace)
+                    TIME.append(timescale.copy())  # Chaque trace a son propre vecteur temps
+                    print(f"Trace ajoutée: {col}, {len(trace)} points")
+                else:
+                    print(f"Trace ignorée (données manquantes): {col}")
+        
+        # Calculer le taux d'échantillonnage
+        if len(timescale) > 1:
+            sampling = float(timescale[1] - timescale[0]) * 1000  # en ms
+            print(f"Taux d'échantillonnage calculé: {sampling} ms")
+        else:
+            sampling = 1.0  # valeur par défaut
+            print("Impossible de calculer le taux d'échantillonnage, utilisation de 1.0 ms")
+        
+        print(f"Chargement terminé: {len(REC)} traces chargées")
+    
+    except Exception as e:
+        print(f"Erreur lors du chargement du fichier Excel: {e}")
+        print("Vérifiez que:")
+        print("1. Le fichier contient une feuille nommée 'Traces DF_F0'")
+        print("2. La première ligne contient les en-têtes")
+        print("3. Une colonne contient 'Time' dans son nom")
+        
+        # En cas d'erreur, essayer de charger avec des paramètres par défaut
+        try:
+            df = pd.read_excel(file_xls)  # Première feuille, sans spécifier le nom
+            print(f"Tentative avec la première feuille: {df.shape}")
+            
+            # Utiliser la première colonne comme temps
+            timescale = df.iloc[:, 0].values
+            
+            # Ajouter toutes les autres colonnes comme traces
+            for i in range(1, len(df.columns)):
+                trace = df.iloc[:, i].values
+                if not np.all(np.isnan(trace)):
+                    REC.append(trace)
+                    TIME.append(timescale.copy())
+            
+            if len(timescale) > 1:
+                sampling = float(timescale[1] - timescale[0]) * 1000
+            else:
+                sampling = 1.0
+                
+            print(f"Chargement de secours réussi: {len(REC)} traces")
+            
+        except Exception as e2:
+            print(f"Échec du chargement de secours: {e2}")
+            return
 #    
 
     
@@ -274,15 +340,15 @@ def Calculate_Amps():
  
     layout3 = [ [sg.Text('FIND PEAKS (Tagged)',font = ('Arial', 14, 'bold') )],
                 [sg.Text('_'*30)], 
-                [sg.Checkbox('Minimum', size=(12, 1), default=True)], 
+                [sg.Checkbox('Minimum', size=(12, 1), default=False)], 
                 [sg.Text('_'*30)],
                 [sg.Button('One Peak from Cursors')],
                 [sg.Text('_'*30)],
                 [sg.Button('All Peaks from Trains')],
                 [sg.Text('ISI (ms)'), sg.InputText(default_text="50", size=(10, 1))],
-                [sg.Text('Peak number'), sg.InputText(default_text="3", size=(10, 1))],
+                [sg.Text('Peak number'), sg.InputText(default_text="10", size=(10, 1))],
                 [sg.Text('_'*30)],
-                [sg.Text('Span for peaks (+/-)'), sg.InputText(default_text="5", size=(10, 1))],
+                [sg.Text('Span for peaks (+/-)'), sg.InputText(default_text="1", size=(10, 1))],
                 [sg.Text('_'*30)],
                 [sg.Text('Save as'),sg.InputText(default_text="Amplitudes", size=(10, 1))],
                 [sg.Text('_'*30)],
@@ -444,7 +510,7 @@ def Main_window():
     layout1 = [ [sg.Frame(' Init ',[[sg.Button('Start'),sg.Button('Previous Trace'),sg.Button('Next Trace'),sg.Button('Clear')],
                                      [sg.Button('Superimposed'),sg.Text('Go To (Push start)'), sg.InputText(default_text="0", size=(10, 1))]],relief="ridge", border_width= 5)],
                 [sg.Frame(' Adjust Traces ',[[sg.Button('Leak Subtraction'), sg.Button('Bleaching correction')],
-                                     [sg.Text('Window (ms)'),sg.InputText(default_text="0", size=(10, 1)),sg.InputText(default_text="10", size=(11, 1)),sg.Button('Undo')]],relief="groove", border_width= 5)],
+                                     [sg.Text('Window (ms)'),sg.InputText(default_text="0", size=(10, 1)),sg.InputText(default_text="900", size=(11, 1)),sg.Button('Undo')]],relief="groove", border_width= 5)],
                 [sg.Frame(' Filter Traces ',[[sg.Button('Smooth Traces'),sg.Text('Odd number'), sg.InputText(default_text="19", size=(12, 1))],
                   [sg.Button('Filter'),sg.Text('Band-Pass(Hz)'),sg.InputText(default_text="0.01", size=(10, 1)),sg.InputText(default_text="2000", size=(10, 1))]],relief="groove", border_width= 5)],
                 [sg.Frame(' Select Traces ',[[sg.Button('Tag'), sg.Button('UnTag'), sg.Button('Tag All'), sg.Button('UnTag All'), sg.Button('Save Tags')]],relief="groove", border_width= 5)],
@@ -480,6 +546,7 @@ def Main_window():
 
         
     episode=0
+    
     
     TAG = np.zeros(len(REC))
     
