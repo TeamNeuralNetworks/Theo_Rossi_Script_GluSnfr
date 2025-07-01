@@ -595,12 +595,13 @@ def Main_window():
                     
             if event == "Smooth Traces": 
                 Saved_REC=[]
-                locals().update(Saved_REC)
+                #locals().update(Saved_REC)
                 
                 for i in range(len(REC)):
                     Saved_REC.append(REC[i])
                 for i in range(len(REC)):
-                    REC[i] = savgol_filter(np.squeeze(REC[i]), int(values[3]), 2) # Filter: window size 19, polynomial order 2   
+                    REC[i][-1] = 0
+                    REC[i] = savgol_filter(np.squeeze(REC[i]),9,2)   #int(values[3]), 2) # Filter: window size 19, polynomial order 2   
                           
             if event == "Undo": 
                 for i in range(len(REC)):

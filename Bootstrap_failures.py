@@ -122,8 +122,8 @@ def load_xls(file_xls):
         print(f"Colonnes trouvées: {list(df.columns)}")
         print(f"Forme des données: {df.shape}")
         
-        #filt = 1  #Smoothing value, before 9. Here 1 because with Antoine script smoothing is already done.
-        #polyorder = 0 #Polyorder must be less thant filt.
+        filt = 9  #Smoothing value, before 9. Here 1 because with Antoine script smoothing is already done.
+        polyorder = 2 #Polyorder must be less thant filt. Before 2.
         timescale = None
         average = None
         SWEEPS = []
@@ -139,16 +139,16 @@ def load_xls(file_xls):
                 
             elif 'Average' in str(col_name) or 'average' in str(col_name).lower():
                 average = col_data
-                # if len(col_data) >= filt:
-                #     average = savgol_filter(col_data, filt, polyorder)
-                # else:
-                #     average = col_data
+                if len(col_data) >= filt:
+                    average = savgol_filter(col_data, filt, polyorder)
+                else:
+                    average = col_data
                     
             else:
-                # if len(col_data) >= filt:
-                #     sweep = savgol_filter(col_data, filt, polyorder)
-                # else:
-                sweep = col_data
+                if len(col_data) >= filt:
+                    sweep = savgol_filter(col_data, filt, polyorder)
+                else:
+                    sweep = col_data
                 SWEEPS.append(sweep)
         
         if timescale is None or average is None or len(SWEEPS) == 0:
@@ -461,7 +461,7 @@ if __name__ == '__main__':
               [sg.Text('Freq (Hz)'), sg.InputText(size=(4,1),default_text='20', key='Frequency')],
               [sg.Text('Num peaks'), sg.InputText(size=(3,1),default_text='10', key='Peaks')],
               [sg.Text('Peak window'), sg.Text('Noise window')],
-              [sg.InputText(size=(5,1),default_text='0.998', key='Peak_start'), sg.InputText(size=(5,1),default_text='1.01', key='Peak_stop'), sg.InputText(size=(5,1),default_text='0.6', key='Noise_start'), sg.InputText(size=(5,1),default_text='0.9', key='Noise_stop'), sg.Text('sec')],
+              [sg.InputText(size=(5,1),default_text='0.998', key='Peak_start'), sg.InputText(size=(5,1),default_text='1.020', key='Peak_stop'), sg.InputText(size=(5,1),default_text='0.6', key='Noise_start'), sg.InputText(size=(5,1),default_text='0.9', key='Noise_stop'), sg.Text('sec')],
               [sg.Checkbox('Show histograms', default=False, key='Fig_histograms')]], title='Windows', relief=sg.RELIEF_SUNKEN), sg.Button('GO')]]
              
                         

@@ -12,8 +12,8 @@ def visualization(name, dataframe):
     episodes = dataframe.drop('Time', axis=1)
     average = np.mean(episodes, axis=1)
     
-    f0_start = np.ravel(np.where(time >= 0.38))[0]
-    f0_stop = np.ravel(np.where(time <= 0.48))[-1]
+    f0_start = np.ravel(np.where(time >= 0.60))[0] # /!\ Valeurs changées. Avant 0.38/0.48, mais moins de points sur mes scan, et départ à 1scd, donc 0.80/0.98.
+    f0_stop = np.ravel(np.where(time <= 0.90))[-1]
     
     f0_episodes = [np.mean(episodes.iloc[:,i][f0_start : f0_stop]) for i in range(len(episodes.columns))]
     f0_average = np.mean(average[f0_start : f0_stop])
@@ -30,7 +30,7 @@ def visualization(name, dataframe):
     ax[1].plot(time, dF_F_traces, 'k', alpha=0.3)
     ax[1].set_ylabel('DF/F')
     
-    ax[2].plot(time, savgol_filter(dF_F_average, 9, 2))
+    ax[2].plot(time, dF_F_average) #savgol_filter(dF_F_average, 9, 2))
     
     df_traces = pd.concat((episodes, pd.DataFrame(average, columns=['Average']), time), axis=1)
     df_DF_F = pd.concat((dF_F_traces, pd.DataFrame(dF_F_average, columns=['Average']), time), axis=1)
@@ -51,7 +51,7 @@ def visualization(name, dataframe):
 
     wb.remove(wb['Sheet'])
 
-    save_folder = r'E:\AAVDJ.GluSnFR-S72A\Paires_1.5vs4mMCa'
+    save_folder = r'C:\Anthime.PERROT\1_Thèse\1_Manip\5_Glusnf_Théo\2_Revision\Longue_fibre\241211_théo8_G14_M1D\fibre_1\Excel_limited'
 
     wb.save('{}\{}_converted_NoFail.xlsx'.format(save_folder, name))
 
@@ -108,10 +108,13 @@ def traces_selection(name, tab):
                 traces_only = tab['Traces'].drop('Time', axis=1)
                 
                 for col in range(len(traces_only.columns)):
-                    df_variables[f'{traces_only.columns[col]}'] = traces_only.iloc[:,col] - tab['Fback'][col]
+                    df_variables[f'{traces_only.columns[col]}'] = traces_only.iloc[:,col] - 64.3186 #tab['Fback'][col]
+                    # baseline_indices = np.where((time >= 0) & (time <= 0.8))[0] 
+                    # baseline_value = np.mean(df_variables[f'{traces_only.columns[col]}'].iloc[baseline_indices])
+                    # df_variables[f'{traces_only.columns[col]}'] = df_variables[f'{traces_only.columns[col]}'] - baseline_value
                 
-                f0_start = np.ravel(np.where(time >= 0.38))[0]
-                f0_stop = np.ravel(np.where(time <= 0.48))[-1]
+                f0_start = np.ravel(np.where(time >= 0.80))[0]
+                f0_stop = np.ravel(np.where(time <= 0.98))[-1]
                 
                 f0_ep = [np.mean(df_variables.iloc[:,i][f0_start : f0_stop]) for i in range(len(df_variables.columns))]
                 f0_mean = np.mean(f0_ep)
@@ -157,7 +160,7 @@ def traces_selection(name, tab):
                     
                     for col in range(len(ep.columns)):
                         
-                        df_variables[f'{ep.columns[col]}'] = ep.iloc[:,col] - tab['Fback'][col]
+                        df_variables[f'{ep.columns[col]}'] = ep.iloc[:,col] - 64.3186 #tab['Fback'][col]
                 
                 for sheet, checkbox_list in Checkboxes.items():
                     
@@ -165,7 +168,7 @@ def traces_selection(name, tab):
                         
                         if value[f'{tab[sheet].columns[item]}'] == True:
                             
-                            df_variables[f'{tab[sheet].columns[item]}'] = tab['Traces'].iloc[:,item] - tab['Fback'][item]                        
+                            df_variables[f'{tab[sheet].columns[item]}'] = tab['Traces'].iloc[:,item] - 64.3186 #tab['Fback'][item]                        
                             
             
                 df_variables['Time'] = tab['Traces']['Time']
@@ -208,6 +211,7 @@ if __name__ == '__main__':
     
     while True:
        main_event, main_value = main_window.read()
+       
        try:
            if main_event in (None, 'Close'):
                plt.close('all')
@@ -218,11 +222,11 @@ if __name__ == '__main__':
                
                Dataset = {}
                
-               traces = pd.read_excel(f'{main_value[0]}', sheet_name='Traces', header=0)
-               f_back = pd.read_excel(f'{main_value[0]}', sheet_name='Data', header=0).iloc[-1,1:]
+               traces = pd.read_excel(f'{main_value[0]}', header=0)
+               #f_back = pd.read_excel(f'{main_value[0]}', sheet_name='Data', header=0).iloc[-1,1:]
                
                Dataset['Traces'] = traces
-               Dataset['Fback'] = f_back
+               #Dataset['Fback'] = f_back #ne sera pas utilisé car valeur unique 64.3186 soustraite, correspondant à la moyenne du pixel le plus faible de tout mes enregistrements.
                
                traces_selection(name, Dataset)
                

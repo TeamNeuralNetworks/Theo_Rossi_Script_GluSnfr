@@ -1,11 +1,11 @@
 % Dossier de sauvegarde
-output_folder = 'C:\Anthime.PERROT\1_Thèse\1_Manip\5_Glusnf_Théo\2_Revision\Longue_fibre\241211_théo8_G14_M1D\fibre_1\Excel_limited';
+output_folder = 'C:\Anthime.PERROT\1_Thèse\1_Manip\5_Glusnf_Théo\2_Revision\Longue_fibre\241212_theo_9\fibre_3\Excel_13';
 if ~exist(output_folder, 'dir')
     mkdir(output_folder);
 end
 
 % Dimensions
-[num_boutons, num_points, num_essais] = size(result);
+[num_boutons, num_points, num_essais] = size(result_Trials);
 
 for bouton = 1:num_boutons
     % Initialiser matrice de 1500 x 12 avec NaN
@@ -13,7 +13,7 @@ for bouton = 1:num_boutons
 
     % Essais (colonnes 1 à 10)
     for essai = 1:min(num_essais, 10)
-        data(:, essai) = result(bouton, :, essai)';
+        data(:, essai) = result_Trials(bouton, :, essai)';
     end
 
     % Temps (colonne 11)
@@ -24,11 +24,11 @@ for bouton = 1:num_boutons
 
     % Écriture des en-têtes numériques (0 à 9, puis Moyenne et Temps)
     headers = [0:9, NaN, NaN];
-    writematrix(headers, filename, 'Sheet', 'Traces', 'Range', 'A1');
+    writematrix(headers, filename, 'Sheet', 'Traces DF_F0', 'Range', 'A1');
 
     % Étiquettes texte pour la colonne 11
-    writecell({'Time'}, filename, 'Sheet', 'Traces', 'Range', 'K1');
+    writecell({'Time'}, filename, 'Sheet', 'Traces DF_F0', 'Range', 'K1');
 
     % Écriture des données
-    writematrix(data, filename, 'Sheet', 'Traces', 'Range', 'A2');
+    writematrix(data, filename, 'Sheet', 'Traces DF_F0', 'Range', 'A2');
 end
