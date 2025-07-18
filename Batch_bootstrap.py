@@ -33,6 +33,8 @@ from openpyxl.utils.dataframe import dataframe_to_rows
 import glob
 from pathlib import Path
 
+filt = 5  #Smoothing value, before 9. Here 1 because with Antoine script smoothing is already done.
+
 
 
 # Toutes vos fonctions existantes (copiées telles quelles)
@@ -142,7 +144,6 @@ def load_xls(file_xls):
         print(f"Colonnes trouvées: {list(df.columns)}")
         print(f"Forme des données: {df.shape}")
         
-        filt = 6  #Smoothing value, before 9. Here 1 because with Antoine script smoothing is already done.
         polyorder = 2 #Polyorder must be less thant filt. Before 2.
         timescale = None
         average = None
@@ -549,27 +550,27 @@ def batch_process():
     sg.theme('DarkBlue')
 
     layout = [
-        [sg.Text('Dossier contenant les fichiers Excel:')],
-        [sg.InputText(size=(50,1), key='input_folder'), sg.FolderBrowse()],
-        [sg.Text('Dossier de sortie:')],
-        [sg.InputText(size=(50,1), key='output_folder'), sg.FolderBrowse()],
-        [sg.Frame('Paramètres de correction', [
-            [sg.Text('Photobleaching:'), sg.InputText('0.01', size=(6,1), key='photo_start'), 
-             sg.Text('à'), sg.InputText('0.45', size=(6,1), key='photo_stop'), sg.Text('sec')],
-            [sg.Text('Leak:'), sg.InputText('0.35', size=(6,1), key='leak_start'), 
-             sg.Text('à'), sg.InputText('0.45', size=(6,1), key='leak_stop'), sg.Text('sec')],
-            [sg.Text('Résiduel:'), sg.InputText('0.49', size=(6,1), key='res_start'), 
-             sg.Text('à'), sg.InputText('0.50', size=(6,1), key='res_stop'), sg.Text('sec')]
-        ])],
-        [sg.Frame('Paramètres d\'analyse', [
-            [sg.Text('Fréquence (Hz):'), sg.InputText('20', size=(4,1), key='frequency'),
-             sg.Text('Nombre de pics:'), sg.InputText('10', size=(4,1), key='n_peaks')],
-            [sg.Text('Fenêtre pic:'), sg.InputText('0.498', size=(6,1), key='peak_start'), 
-             sg.Text('à'), sg.InputText('5.1', size=(6,1), key='peak_stop')],
-            [sg.Text('Fenêtre bruit:'), sg.InputText('0.1', size=(6,1), key='noise_start'), 
-             sg.Text('à'), sg.InputText('0.4', size=(6,1), key='noise_stop')]
-        ])],
-        [sg.Button('Traiter tous les fichiers', size=(20,2)), sg.Button('Quitter')]
+      [sg.Text('Dossier contenant les fichiers Excel:')],
+      [sg.InputText(size=(50,1), key='input_folder'), sg.FolderBrowse()],
+      [sg.Text('Dossier de sortie:')],
+      [sg.InputText(size=(50,1), key='output_folder'), sg.FolderBrowse()],
+      [sg.Frame('Paramètres de correction', [
+          [sg.Text('Photobleaching:'), sg.InputText('0.01', size=(6,1), key='photo_start'), 
+           sg.Text('à'), sg.InputText('0.45', size=(6,1), key='photo_stop'), sg.Text('sec')],
+          [sg.Text('Leak:'), sg.InputText('0.35', size=(6,1), key='leak_start'), 
+           sg.Text('à'), sg.InputText('0.45', size=(6,1), key='leak_stop'), sg.Text('sec')],
+          [sg.Text('Résiduel:'), sg.InputText('0.49', size=(6,1), key='res_start'), 
+           sg.Text('à'), sg.InputText('0.5', size=(6,1), key='res_stop'), sg.Text('sec')]
+      ])],
+      [sg.Frame('Paramètres d\'analyse', [
+          [sg.Text('Fréquence (Hz):'), sg.InputText('20', size=(4,1), key='frequency'),
+           sg.Text('Nombre de pics:'), sg.InputText('2', size=(4,1), key='n_peaks')],
+          [sg.Text('Fenêtre pic:'), sg.InputText('0.498', size=(6,1), key='peak_start'), 
+           sg.Text('à'), sg.InputText('0.51', size=(6,1), key='peak_stop')],
+          [sg.Text('Fenêtre bruit:'), sg.InputText('0.1', size=(6,1), key='noise_start'), 
+           sg.Text('à'), sg.InputText('0.4', size=(6,1), key='noise_stop')]
+      ])],
+      [sg.Button('Traiter tous les fichiers', size=(20,2)), sg.Button('Quitter')]
     ]
 
 

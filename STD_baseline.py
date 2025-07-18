@@ -5,9 +5,9 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 from scipy.signal import savgol_filter
 
-start = 0.38 #0.8
-stop = 0.48 #0.9
-filt = 4
+start = 0.6 #0.6
+stop = 0.9 #0.9
+filt = 5
 
 def analyze_button_std(file_path, return_traces=False):
     """
@@ -27,13 +27,26 @@ def analyze_button_std(file_path, return_traces=False):
         # Trouver la colonne de temps (dernière colonne)
         time_column = df.columns[-1]
         
+        # Ignorer la dernière ligne de toutes les colonnes, parfois un décallage présent du temps
+        df = df.iloc[:-1]
+        
         # Identifier les colonnes de signaux (toutes sauf "Average" et la colonne de temps)
         signal_columns = []
         for col in df.columns[:-1]:  # Exclure la colonne de temps
             if 'Average' not in str(col):
-                signal_columns.append(col)
+                # Vérifier si la colonne ne contient pas de NaN
+                if not df[col].isna().any():
+                    signal_columns.append(col)
+                else:
+                    print(f"Colonne {col} ignorée car elle contient des NaN")
         
-
+        # Vérifier qu'il reste des colonnes à analyser
+        if not signal_columns:
+            print(f"Attention: Aucune colonne valide (sans NaN) trouvée dans {file_path}")
+            if return_traces:
+                return np.nan, None, None
+            return np.nan
+        
         # Filtrer les données pour la période de baseline (0.80s à 0.90s)
         # On prend 100ms avant 0.90s, donc de 0.80s à 0.90s pour avoir une fenêtre
         baseline_mask = (df[time_column] >= start) & (df[time_column] <= stop)
@@ -67,7 +80,7 @@ def analyze_button_std(file_path, return_traces=False):
         mean_std = np.mean(std_values)
         
         if return_traces:
-            # Retourner aussi les données pour la visualisation
+            # Retourner aussi les données pour la visualisation (seulement les colonnes sans NaN)
             traces_data = df[signal_columns]
             time_data = df[time_column]
             return mean_std, traces_data, time_data
