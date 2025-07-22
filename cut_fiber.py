@@ -6,8 +6,8 @@ from scipy.interpolate import interp1d
 # ==============================================
 # PARAMÈTRES À MODIFIER FACILEMENT
 # ==============================================
-TEMPS_DEBUT = 0.4     # Temps de début (X)
-TEMPS_FIN = 1.0      # Temps de fin (Y)
+TEMPS_DEBUT = 0.9     # Temps de début (X) #0.9
+TEMPS_FIN = 1.5      # Temps de fin (Y) #1.5
 NB_POINTS = 1500        # Nombre de points pour l'interpolation (Z)
 # ==============================================
 
