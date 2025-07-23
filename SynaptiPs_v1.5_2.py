@@ -201,8 +201,8 @@ def Make_average(REC,TIME,CursorOn):
             TAGREC.append(REC[i])
     AVERAGE = np.mean(TAGREC,axis = 0)
     if CursorOn == True:
-        min_avg=calc_min_in_trace(AVERAGE, startpos[0], endpos[0], 5)
-        max_avg=calc_max_in_trace(AVERAGE, startpos[0], endpos[0], 5)
+        min_avg, _, _, _ = calc_min_in_trace(AVERAGE, startpos[0], endpos[0], 5)
+        max_avg, _, _, _ = calc_max_in_trace(AVERAGE, startpos[0], endpos[0], 5)
     
     fig2 = plt.figure()
     ax2 = fig2.add_subplot(111)
@@ -310,22 +310,38 @@ def superimposed(episode):
 def calc_min_in_trace(trace, win1, win2, Win_for_extremum):
     start_idx = np.ravel(np.where(TIME[0] >= win1))[0]
     stop_idx = np.ravel(np.where(TIME[0] >= win2))[0]
-    MIN = np.min(trace[start_idx:stop_idx])
     sub_trace=trace[start_idx:stop_idx]
     MIN_sub_trace_idx = np.argmin(sub_trace)
-    MIN = np.mean(trace[start_idx+MIN_sub_trace_idx-Win_for_extremum:start_idx+MIN_sub_trace_idx+Win_for_extremum])
     MIN_idx=start_idx+MIN_sub_trace_idx
-    return MIN, MIN_idx
+    
+    if Win_for_extremum == 1:
+        # Exact point measurement
+        MIN = trace[MIN_idx]
+        return MIN, MIN_idx, MIN_idx, MIN_idx  # value, center_idx, start_idx, end_idx
+    else:
+        # Averaged measurement over span
+        span_start = max(0, MIN_idx - Win_for_extremum)
+        span_end = min(len(trace), MIN_idx + Win_for_extremum + 1)
+        MIN = np.mean(trace[span_start:span_end])
+        return MIN, MIN_idx, span_start, span_end-1  # value, center_idx, start_idx, end_idx
 
 def calc_max_in_trace(trace, win1, win2, Win_for_extremum):
     start_idx = np.ravel(np.where(TIME[0] >= win1))[0]
     stop_idx = np.ravel(np.where(TIME[0] >= win2))[0]
-    MAX = np.max(trace[start_idx:stop_idx])
     sub_trace=trace[start_idx:stop_idx]
     MAX_sub_trace_idx = np.argmax(sub_trace)
-    MAX = np.mean(trace[start_idx+MAX_sub_trace_idx-Win_for_extremum:start_idx+MAX_sub_trace_idx+Win_for_extremum])
     MAX_idx=start_idx+MAX_sub_trace_idx
-    return MAX,MAX_idx
+    
+    if Win_for_extremum == 1:
+        # Exact point measurement
+        MAX = trace[MAX_idx]
+        return MAX, MAX_idx, MAX_idx, MAX_idx  # value, center_idx, start_idx, end_idx
+    else:
+        # Averaged measurement over span
+        span_start = max(0, MAX_idx - Win_for_extremum)
+        span_end = min(len(trace), MAX_idx + Win_for_extremum + 1)
+        MAX = np.mean(trace[span_start:span_end])
+        return MAX, MAX_idx, span_start, span_end-1  # value, center_idx, start_idx, end_idx
 
 
 def Calculate_Amps():
@@ -370,20 +386,83 @@ def Calculate_Amps():
             if event3 == "One Peak from Cursors":
                 amp_dict['AMP1'] = []
                 amp_dict_idx['AMP1'] = []
+                amp_dict_span = {'AMP1': []}  # Store span information
                 locals().update(amp_dict)
                 locals().update(amp_dict_idx)
+                
+                span_value = int(values3[3])
                 
                 for i in range(len(REC)):
                     if values3[0] == True:
                         if TAG[i] == 1:
-                            local_amp, local_amp_idx =calc_min_in_trace(REC[i], startpos[0], endpos[0], int(values3[3]))
+                            local_amp, center_idx, span_start, span_end = calc_min_in_trace(REC[i], startpos[0], endpos[0], span_value)
                             amp_dict['AMP1'].append(local_amp)
-                            amp_dict_idx['AMP1'].append(local_amp_idx)
+                            amp_dict_idx['AMP1'].append(center_idx)
+                            amp_dict_span['AMP1'].append((span_start, span_end))
                     else:
                         if TAG[i] == 1:
-                            local_amp, local_amp_idx =calc_max_in_trace(REC[i], startpos[0], endpos[0], int(values3[3]))
+                            local_amp, center_idx, span_start, span_end = calc_max_in_trace(REC[i], startpos[0], endpos[0], span_value)
                             amp_dict['AMP1'].append(local_amp) 
-                            amp_dict_idx['AMP1'].append(local_amp_idx)
+                            amp_dict_idx['AMP1'].append(center_idx)
+                            amp_dict_span['AMP1'].append((span_start, span_end))
+                
+                # Create a new figure to show measurement points on all tagged traces
+                fig_measurements = plt.figure(figsize=(12, 8))
+                ax_measurements = fig_measurements.add_subplot(111)
+                
+                # Plot all tagged traces with their measurement points
+                tagged_indices = [i for i, tag in enumerate(TAG) if tag == 1]
+                colors = plt.cm.tab10(np.linspace(0, 1, len(tagged_indices)))
+                
+                for idx, trace_idx in enumerate(tagged_indices):
+                    if idx < len(amp_dict['AMP1']):
+                        # Plot the trace
+                        ax_measurements.plot(TIME[trace_idx], REC[trace_idx], 
+                                           color=colors[idx], alpha=0.7, 
+                                           label=f'Episode {trace_idx}')
+                        
+                        # Get measurement information
+                        center_idx = amp_dict_idx['AMP1'][idx]
+                        span_start, span_end = amp_dict_span['AMP1'][idx]
+                        x_center = TIME[trace_idx][center_idx]
+                        y_measurement = amp_dict['AMP1'][idx]
+                        
+                        if span_value == 1:
+                            # Exact point - use the actual trace value at that point
+                            y_exact = REC[trace_idx][center_idx]
+                            ax_measurements.plot(x_center, y_exact, 'o', 
+                                               color=colors[idx], markersize=8, 
+                                               markeredgecolor='black', markeredgewidth=2,
+                                               markerfacecolor='white', markerfacewidth=1)
+                            print(f"Episode {trace_idx}: Exact measurement = {y_exact:.4f} at time = {x_center:.4f}s (index {center_idx})")
+                        else:
+                            # Averaged measurement - show as horizontal bar
+                            x_start = TIME[trace_idx][span_start]
+                            x_end = TIME[trace_idx][span_end]
+                            ax_measurements.plot([x_start, x_end], [y_measurement, y_measurement], 
+                                               color=colors[idx], linewidth=4, alpha=0.8)
+                            ax_measurements.plot(x_center, y_measurement, 's', 
+                                               color=colors[idx], markersize=6, 
+                                               markeredgecolor='black', markeredgewidth=1)
+                            print(f"Episode {trace_idx}: Averaged measurement = {y_measurement:.4f} from {x_start:.4f}s to {x_end:.4f}s (span={span_end-span_start+1} points)")
+                
+                # Draw cursors
+                ax_measurements.axvline(startpos[0], color='r', linestyle='--', linewidth=2, 
+                                      alpha=0.8, label='Start cursor')
+                ax_measurements.axvline(endpos[0], color='g', linestyle='--', linewidth=2, 
+                                      alpha=0.8, label='End cursor')
+                
+                ax_measurements.set_xlabel('Time (s)')
+                ax_measurements.set_ylabel('Signal (Amp)')
+                title_text = f'Amplitude Measurements on Tagged Traces (Span: {span_value})'
+                if span_value == 1:
+                    title_text += ' - Exact Points'
+                else:
+                    title_text += ' - Averaged Regions'
+                ax_measurements.set_title(title_text, fontweight="bold", fontsize=14)
+                ax_measurements.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+                plt.tight_layout()
+                plt.show()
                 
                 fig4 = plt.figure()
                 ax4 = fig4.add_subplot(111)
@@ -401,30 +480,107 @@ def Calculate_Amps():
             if event3 == "All Peaks from Trains":
                 amp_dict = {}
                 amp_dict_idx = {}
+                amp_dict_span = {}
                 locals().update(amp_dict) 
                 locals().update(amp_dict_idx) 
+                locals().update(amp_dict_span)
                    
                 for i in range(int(values3[2])):
                     amp_dict['AMP' + str(i+1)] = []
                     amp_dict_idx['AMP' + str(i+1)] = []
+                    amp_dict_span['AMP' + str(i+1)] = []
                 
+                span_value = int(values3[3])
                 Start_for_trains=startpos[0]
                 Stop_for_trains=endpos[0]
+                
                 for key in amp_dict.keys():                          
                     for i in range(len(REC)):
                         if values3[0] == True:
                             if TAG[i] == 1:
-                                local_amp, local_amp_idx =calc_min_in_trace(REC[i],float(Start_for_trains), float(Stop_for_trains),int(values3[3]))
+                                local_amp, center_idx, span_start, span_end = calc_min_in_trace(REC[i],float(Start_for_trains), float(Stop_for_trains), span_value)
                                 amp_dict[key].append(local_amp)
-                                amp_dict_idx[key].append(local_amp_idx)
+                                amp_dict_idx[key].append(center_idx)
+                                amp_dict_span[key].append((span_start, span_end))
                         else:
                             if TAG[i] == 1:
-                                local_amp, local_amp_idx =calc_max_in_trace(REC[i],float(Start_for_trains), float(Stop_for_trains),int(values3[3]))
+                                local_amp, center_idx, span_start, span_end = calc_max_in_trace(REC[i],float(Start_for_trains), float(Stop_for_trains), span_value)
                                 amp_dict[key].append(local_amp)
-                                amp_dict_idx[key].append(local_amp_idx)
+                                amp_dict_idx[key].append(center_idx)
+                                amp_dict_span[key].append((span_start, span_end))
                    
                     Start_for_trains+=float(values3[1])/1000
                     Stop_for_trains+=float(values3[1])/1000
+                
+                # Create visualization showing all measurement points
+                fig_train_measurements = plt.figure(figsize=(15, 10))
+                tagged_indices = [i for i, tag in enumerate(TAG) if tag == 1]
+                
+                # Show first few traces as examples (to avoid overcrowding)
+                max_traces_to_show = min(5, len(tagged_indices))
+                colors = plt.cm.tab10(np.linspace(0, 1, max_traces_to_show))
+                
+                for trace_idx in range(max_traces_to_show):
+                    if trace_idx < len(tagged_indices):
+                        real_trace_idx = tagged_indices[trace_idx]
+                        ax_train = fig_train_measurements.add_subplot(max_traces_to_show, 1, trace_idx + 1)
+                        ax_train.plot(TIME[real_trace_idx], REC[real_trace_idx], 
+                                    color=colors[trace_idx], alpha=0.8, linewidth=1.5)
+                        
+                        # Plot measurement points for all peaks
+                        for peak_idx, key in enumerate(amp_dict.keys()):
+                            if trace_idx < len(amp_dict[key]):
+                                center_idx = amp_dict_idx[key][trace_idx]
+                                span_start, span_end = amp_dict_span[key][trace_idx]
+                                x_center = TIME[real_trace_idx][center_idx]
+                                y_measurement = amp_dict[key][trace_idx]
+                                
+                                if span_value == 1:
+                                    # Exact point measurement
+                                    y_exact = REC[real_trace_idx][center_idx]
+                                    ax_train.plot(x_center, y_exact, 'o', 
+                                                markersize=6, label=f'{key}: {y_exact:.4f}',
+                                                markeredgecolor='black', markeredgewidth=0.5,
+                                                color=f'C{peak_idx}')
+                                else:
+                                    # Averaged measurement - show as horizontal bar
+                                    x_start = TIME[real_trace_idx][span_start]
+                                    x_end = TIME[real_trace_idx][span_end]
+                                    ax_train.plot([x_start, x_end], [y_measurement, y_measurement], 
+                                                color=f'C{peak_idx}', linewidth=3, alpha=0.8)
+                                    ax_train.plot(x_center, y_measurement, 's', 
+                                                markersize=4, label=f'{key}: {y_measurement:.4f}',
+                                                markeredgecolor='black', markeredgewidth=0.5,
+                                                color=f'C{peak_idx}')
+                        
+                        # Draw measurement windows
+                        temp_start = startpos[0]
+                        temp_end = endpos[0]
+                        for peak_idx in range(int(values3[2])):
+                            ax_train.axvspan(temp_start, temp_end, alpha=0.1, color=f'C{peak_idx}')
+                            temp_start += float(values3[1])/1000
+                            temp_end += float(values3[1])/1000
+                        
+                        ax_train.set_xlabel('Time (s)')
+                        ax_train.set_ylabel('Signal (Amp)')
+                        title_text = f'Episode {real_trace_idx} - Measurement Points (Span: {span_value})'
+                        if span_value == 1:
+                            title_text += ' - Exact'
+                        else:
+                            title_text += ' - Averaged'
+                        ax_train.set_title(title_text)
+                        ax_train.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+                
+                plt.tight_layout()
+                plt.show()
+                
+                # Print summary of measurements
+                print("\nMeasurement Summary:")
+                for key in amp_dict.keys():
+                    print(f"{key}: {len(amp_dict[key])} measurements")
+                    if len(amp_dict[key]) > 0:
+                        print(f"  Range: {min(amp_dict[key]):.4f} to {max(amp_dict[key]):.4f}")
+                        print(f"  Mean: {np.mean(amp_dict[key]):.4f}")
                 
                 fig4 = plt.figure()
                 ax4 = fig4.add_subplot(111)
@@ -601,7 +757,29 @@ def Main_window():
                     Saved_REC.append(REC[i])
                 for i in range(len(REC)):
                     REC[i][-1] = 0
-                    REC[i] = savgol_filter(np.squeeze(REC[i]),9,2)   #int(values[3]), 2) # Filter: window size 19, polynomial order 2   
+                    REC[i] = savgol_filter(np.squeeze(REC[i]),int(values[3]),2)   #int(values[3]), 2) # Filter: window size 19, polynomial order 2   
+
+                    
+                    # def gauss_kernel(n=9, sigma=2.0):
+                    #     assert n % 2 == 1, "n doit être impair"
+                    #     r = n // 2
+                    #     xs = np.arange(-r, r+1)
+                    #     kern = np.exp(-xs**2 / (2 * sigma**2))
+                    #     kern /= kern.sum()
+                    #     return kern
+                    
+                    # kernel = gauss_kernel(n=9, sigma=2.0)
+                    
+                    # from scipy.signal import lfilter
+                    
+                    # x = np.squeeze(REC[i])
+                    # REC[i] = lfilter(kernel, 1.0, x)
+                    
+                    # x = np.squeeze(REC[i])
+                    # kernel = np.ones(int(values[3])) / int(values[3])
+                    # # Utilise `lfilter` pour ne considérer que les points passés
+                    # from scipy.signal import lfilter
+                    # REC[i] = lfilter(kernel, 1.0, x) 
                           
             if event == "Undo": 
                 for i in range(len(REC)):
