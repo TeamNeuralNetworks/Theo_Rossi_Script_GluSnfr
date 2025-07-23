@@ -6,9 +6,10 @@ from scipy.interpolate import interp1d
 # ==============================================
 # PARAMÈTRES À MODIFIER FACILEMENT
 # ==============================================
-TEMPS_DEBUT = 0.9     # Temps de début (X) #0.9
-TEMPS_FIN = 1.5      # Temps de fin (Y) #1.5
-NB_POINTS = 1500        # Nombre de points pour l'interpolation (Z)
+TEMPS_DEBUT = 0.5       # Temps de début (X) #0.9
+TEMPS_FIN = 1.5         # Temps de fin (Y) #1.5
+ACTIVER_INTERPOLATION = True  # Activer/désactiver l'interpolation
+NB_POINTS = 300        # Nombre de points pour l'interpolation (Z) - utilisé seulement si interpolation activée
 # ==============================================
 
 def interpolate_trace(time_values, trace_values, start_time, end_time, num_points):
@@ -51,7 +52,32 @@ def interpolate_trace(time_values, trace_values, start_time, end_time, num_point
         print(f"Erreur lors de l'interpolation: {e}")
         return None, None
 
-def process_excel_files(folder_path, start_time=TEMPS_DEBUT, end_time=TEMPS_FIN, num_points=NB_POINTS):
+def extract_data_in_range(time_values, trace_values, start_time, end_time):
+    """
+    Extrait les données dans une plage de temps sans interpolation
+    
+    Args:
+        time_values: Array des valeurs de temps
+        trace_values: Array des valeurs de la trace
+        start_time: Temps de début
+        end_time: Temps de fin
+    
+    Returns:
+        tuple: (temps_extraits, valeurs_extraites)
+    """
+    # Filtrer les données dans la plage de temps
+    mask = (time_values >= start_time) & (time_values <= end_time)
+    time_filtered = time_values[mask]
+    trace_filtered = trace_values[mask]
+    
+    if len(time_filtered) == 0:
+        print(f"Attention: Aucun point dans la plage [{start_time}, {end_time}]")
+        return None, None
+    
+    return time_filtered, trace_filtered
+
+def process_excel_files(folder_path, start_time=TEMPS_DEBUT, end_time=TEMPS_FIN, 
+                       enable_interpolation=ACTIVER_INTERPOLATION, num_points=NB_POINTS):
     """
     Traite tous les fichiers Excel d'un dossier et extrait/interpole la colonne 'Average'
     
@@ -59,7 +85,8 @@ def process_excel_files(folder_path, start_time=TEMPS_DEBUT, end_time=TEMPS_FIN,
         folder_path (str): Chemin vers le dossier contenant les fichiers Excel
         start_time (float): Temps de début pour l'extraction
         end_time (float): Temps de fin pour l'extraction
-        num_points (int): Nombre de points pour l'interpolation
+        enable_interpolation (bool): Activer l'interpolation
+        num_points (int): Nombre de points pour l'interpolation (si activée)
     """
     
     # Convertir en objet Path pour une manipulation plus facile
@@ -72,7 +99,7 @@ def process_excel_files(folder_path, start_time=TEMPS_DEBUT, end_time=TEMPS_FIN,
     
     # Créer des DataFrames pour stocker les résultats
     result_df = pd.DataFrame()
-    interpolated_df = pd.DataFrame()
+    processed_df = pd.DataFrame()  # Pour les données traitées (interpolées ou extraites)
     
     # Parcourir tous les fichiers Excel dans le dossier
     excel_files = list(folder.glob("*.xlsx")) + list(folder.glob("*.xls"))
@@ -82,11 +109,14 @@ def process_excel_files(folder_path, start_time=TEMPS_DEBUT, end_time=TEMPS_FIN,
         return
     
     print(f"Traitement de {len(excel_files)} fichier(s) Excel...")
-    print(f"Paramètres: Temps [{start_time} - {end_time}], {num_points} points d'interpolation")
+    print(f"Paramètres: Temps [{start_time} - {end_time}]")
+    if enable_interpolation:
+        print(f"Interpolation activée: {num_points} points")
+    else:
+        print("Interpolation désactivée: extraction des données originales dans la plage")
     
-    # Créer le vecteur temps interpolé (commun à toutes les traces)
-    time_interpolated = np.linspace(start_time, end_time, num_points)
-    interpolated_df['Time'] = time_interpolated
+    # Variables pour stocker les temps (différents selon interpolation ou non)
+    common_time = None
     
     for file_path in excel_files:
         try:
@@ -124,15 +154,53 @@ def process_excel_files(folder_path, start_time=TEMPS_DEBUT, end_time=TEMPS_FIN,
             # Ajouter la colonne complète au DataFrame résultat
             result_df[column_name] = df['Average']
             
-            # Interpoler la trace
-            _, interpolated_trace = interpolate_trace(time_values, average_column, 
-                                                    start_time, end_time, num_points)
-            
-            if interpolated_trace is not None:
-                interpolated_df[column_name] = interpolated_trace
-                print(f"✓ Traité et interpolé: {file_path.name} -> Colonne: {column_name}")
+            # Traiter selon le mode (interpolation ou extraction)
+            if enable_interpolation:
+                # Interpoler la trace
+                processed_time, processed_trace = interpolate_trace(time_values, average_column, 
+                                                                  start_time, end_time, num_points)
+                
+                if processed_trace is not None:
+                    # Créer le vecteur temps commun pour l'interpolation (si pas encore fait)
+                    if common_time is None:
+                        common_time = processed_time
+                        processed_df['Time'] = common_time
+                    
+                    processed_df[column_name] = processed_trace
+                    
+                    # Sauvegarder aussi chaque trace interpolée individuellement
+                    temp_df = pd.DataFrame({
+                        'Time': processed_time,
+                        column_name: processed_trace
+                    })
+                    
+                    output_path_individual = folder / f"ICI_interpole_{column_name}.xlsx"
+                    temp_df.to_excel(output_path_individual, index=False)
+                    
+                    print(f"✓ Traité et interpolé: {file_path.name} -> Colonne: {column_name}")
+                    print(f"  -> Fichier individuel: ICI_interpole_{column_name}.xlsx")
+                else:
+                    print(f"⚠ Traité mais non interpolé: {file_path.name}")
             else:
-                print(f"⚠ Traité mais non interpolé: {file_path.name}")
+                # Extraire les données dans la plage sans interpolation
+                processed_time, processed_trace = extract_data_in_range(time_values, average_column,
+                                                                       start_time, end_time)
+                
+                if processed_trace is not None:
+                    # Pour l'extraction sans interpolation, chaque fichier peut avoir des longueurs différentes
+                    # On créera un fichier séparé pour chaque trace extraite
+                    temp_df = pd.DataFrame({
+                        'Time': processed_time,
+                        column_name: processed_trace
+                    })
+                    
+                    # Sauvegarder chaque trace extraite individuellement
+                    output_path_individual = folder / f"ICI_extrait_{column_name}.xlsx"
+                    temp_df.to_excel(output_path_individual, index=False)
+                    
+                    print(f"✓ Traité et extrait: {file_path.name} -> Fichier: ICI_extrait_{column_name}.xlsx")
+                else:
+                    print(f"⚠ Aucune donnée dans la plage pour: {file_path.name}")
             
         except Exception as e:
             print(f"Erreur lors du traitement de {file_path.name}: {str(e)}")
@@ -145,15 +213,22 @@ def process_excel_files(folder_path, start_time=TEMPS_DEBUT, end_time=TEMPS_FIN,
         result_df.to_excel(output_path_full, index=False)
         print(f"\n✓ Fichier de données complètes créé: {output_path_full}")
         
-        # Fichier avec les données interpolées
-        if not interpolated_df.empty:
-            output_path_interp = folder / "ICI_donnees_interpolees.xlsx"
-            interpolated_df.to_excel(output_path_interp, index=False)
-            print(f"✓ Fichier de données interpolées créé: {output_path_interp}")
+        # Fichier avec les données traitées (seulement si interpolation activée)
+        if enable_interpolation and not processed_df.empty:
+            output_path_processed = folder / "ICI_donnees_interpolees.xlsx"
+            processed_df.to_excel(output_path_processed, index=False)
+            print(f"✓ Fichier de données interpolées créé: {output_path_processed}")
             print(f"  -> Plage de temps: [{start_time} - {end_time}]")
             print(f"  -> Nombre de points: {num_points}")
+            print(f"✓ Fichiers individuels interpolés également créés (ICI_interpole_*.xlsx)")
+        elif not enable_interpolation:
+            print(f"✓ Données extraites sauvegardées individuellement dans des fichiers séparés (ICI_extrait_*.xlsx)")
+            print(f"  -> Plage de temps: [{start_time} - {end_time}]")
         
-        print(f"Colonnes créées: {list(result_df.columns)}")
+        if enable_interpolation:
+            print(f"Colonnes interpolées créées: {list(processed_df.columns) if not processed_df.empty else 'Aucune'}")
+        else:
+            print(f"Colonnes originales: {list(result_df.columns)}")
     else:
         print("Aucune donnée à sauvegarder.")
 
@@ -168,7 +243,9 @@ def main():
     print(f"Paramètres actuels:")
     print(f"  - Temps de début: {TEMPS_DEBUT}")
     print(f"  - Temps de fin: {TEMPS_FIN}")
-    print(f"  - Nombre de points d'interpolation: {NB_POINTS}")
+    print(f"  - Interpolation activée: {'Oui' if ACTIVER_INTERPOLATION else 'Non'}")
+    if ACTIVER_INTERPOLATION:
+        print(f"  - Nombre de points d'interpolation: {NB_POINTS}")
     print()
     
     # Demander s'il faut modifier les paramètres
@@ -176,17 +253,33 @@ def main():
     
     start_time = TEMPS_DEBUT
     end_time = TEMPS_FIN
+    enable_interpolation = ACTIVER_INTERPOLATION
     num_points = NB_POINTS
     
     if modify in ['o', 'oui', 'y', 'yes']:
         try:
             start_time = float(input(f"Temps de début (actuel: {TEMPS_DEBUT}): ") or TEMPS_DEBUT)
             end_time = float(input(f"Temps de fin (actuel: {TEMPS_FIN}): ") or TEMPS_FIN)
-            num_points = int(input(f"Nombre de points (actuel: {NB_POINTS}): ") or NB_POINTS)
+            
+            # Demander si on veut activer l'interpolation
+            interp_choice = input(f"Activer l'interpolation? (O/n, actuel: {'O' if ACTIVER_INTERPOLATION else 'n'}): ").strip().lower()
+            if interp_choice in ['o', 'oui', 'y', 'yes', '']:
+                enable_interpolation = True
+                num_points = int(input(f"Nombre de points d'interpolation (actuel: {NB_POINTS}): ") or NB_POINTS)
+            elif interp_choice in ['n', 'non', 'no']:
+                enable_interpolation = False
+                print("Interpolation désactivée - les données seront extraites dans la plage de temps spécifiée")
+            else:
+                # Garder la valeur par défaut
+                enable_interpolation = ACTIVER_INTERPOLATION
+                if enable_interpolation:
+                    num_points = int(input(f"Nombre de points d'interpolation (actuel: {NB_POINTS}): ") or NB_POINTS)
+            
         except ValueError:
             print("Valeurs invalides, utilisation des paramètres par défaut.")
             start_time = TEMPS_DEBUT
             end_time = TEMPS_FIN
+            enable_interpolation = ACTIVER_INTERPOLATION
             num_points = NB_POINTS
     
     # Demander le chemin du dossier
@@ -196,7 +289,7 @@ def main():
     folder_path = folder_path.strip('"\'')
     
     # Lancer le traitement
-    process_excel_files(folder_path, start_time, end_time, num_points)
+    process_excel_files(folder_path, start_time, end_time, enable_interpolation, num_points)
 
 if __name__ == "__main__":
     main()
