@@ -1388,20 +1388,20 @@ def save_analysis_results(output_name, filename, amp_dict, amp_dict_idx, amp_dic
 
 def analyze_file_no_gui(filename, 
                        use_gui=False,
-                       tag_mode='all',  # 'all', 'last', 'range', 'manual'
+                       tag_mode='last',  # 'all', 'last', 'range', 'manual'
                        tag_range=None,  # [start, end] for range mode
-                       cursor_start=None,  # in seconds, None = interactive
-                       cursor_end=None,    # in seconds, None = interactive
+                       cursor_start=0.99,  # in seconds, None = interactive
+                       cursor_end=1.048,    # in seconds, None = interactive
                        find_minimum=False,
                        span_for_peaks=1,
                        isi_ms=50,
                        peak_number=3,
-                       smooth_traces=False,
-                       smooth_window=19,
+                       smooth_traces=True,
+                       smooth_window=9,
                        filter_traces=False,
                        filter_low=0.01,
                        filter_high=2000,
-                       leak_subtraction=False,
+                       leak_subtraction=True,
                        leak_window_start=0,
                        leak_window_end=900,
                        save_results=True,
@@ -1796,27 +1796,312 @@ def analyze_file_no_gui(filename,
     
     return results
 
+def analyze_batch_no_gui(folder_path,
+                        file_pattern='*.xlsx',  # Pattern to match files (e.g., '*.xlsx', '*.wcp', '*')
+                        recursive=False,   # Search in subfolders
+                        # All the same parameters as analyze_file_no_gui
+                        tag_mode='last',
+                        tag_range=None,
+                        cursor_start=0.99,
+                        cursor_end=1.030,
+                        find_minimum=False,
+                        span_for_peaks=1,
+                        isi_ms=50,
+                        peak_number=10,
+                        smooth_traces=True,
+                        smooth_window=9,
+                        filter_traces=False,
+                        filter_low=0.01,
+                        filter_high=2000,
+                        leak_subtraction=True,
+                        leak_window_start=0,
+                        leak_window_end=900,
+                        save_results=True,
+                        output_prefix="",  # Prefix to add to all output names
+                        output_suffix="_AMP",  # Suffix to add to all output names
+                        show_visualization=True,  # Usually False for batch processing
+                        continue_on_error=True,  # Continue processing if one file fails
+                        create_summary=True):  # Create a summary Excel file
+    """
+    Batch process multiple files in a directory using analyze_file_no_gui
+    
+    Parameters:
+    -----------
+    folder_path : str
+        Path to the folder containing files to process
+    file_pattern : str
+        Pattern to match files (e.g., '*.xlsx', '*.wcp', '*data*.xlsx')
+    recursive : bool
+        If True, search in subfolders recursively
+    output_prefix : str
+        Prefix to add to all output file names
+    output_suffix : str
+        Suffix to add to all output file names  
+    continue_on_error : bool
+        If True, continue processing other files if one fails
+    create_summary : bool
+        If True, create a summary Excel file with results from all files
+    ... (all other parameters same as analyze_file_no_gui)
+    
+    Returns:
+    --------
+    dict : Summary of batch processing results
+    """
+    
+    import os
+    import glob
+    import pandas as pd
+    from datetime import datetime
+    
+    print("="*60)
+    print("BATCH ANALYSIS MODE")
+    print("="*60)
+    
+    # Normalize folder path
+    folder_path = os.path.normpath(folder_path)
+    print(f"Processing folder: {folder_path}")
+    
+    # Check if folder exists
+    if not os.path.exists(folder_path):
+        raise FileNotFoundError(f"Folder not found: {folder_path}")
+    
+    # Find files to process
+    if recursive:
+        # Search recursively
+        search_pattern = os.path.join(folder_path, "**", file_pattern)
+        file_list = glob.glob(search_pattern, recursive=True)
+    else:
+        # Search only in the specified folder
+        search_pattern = os.path.join(folder_path, file_pattern)
+        file_list = glob.glob(search_pattern)
+    
+    # Filter for supported file types
+    supported_extensions = ['.wcp', '.xlsx', '.xls']
+    file_list = [f for f in file_list if any(f.lower().endswith(ext) for ext in supported_extensions)]
+    
+    print(f"Found {len(file_list)} files to process:")
+    for i, file_path in enumerate(file_list, 1):
+        rel_path = os.path.relpath(file_path, folder_path)
+        print(f"  {i:2d}. {rel_path}")
+    
+    if len(file_list) == 0:
+        print("No supported files found!")
+        print(f"Search pattern: {search_pattern}")
+        print(f"Supported extensions: {supported_extensions}")
+        return {'status': 'no_files', 'files_processed': 0}
+    
+    # Initialize batch results
+    batch_results = {
+        'folder_path': folder_path,
+        'total_files': len(file_list),
+        'files_processed': 0,
+        'files_failed': 0,
+        'start_time': datetime.now(),
+        'results': {},
+        'errors': {},
+        'summary_data': []
+    }
+    
+    # Process each file
+    print(f"\nStarting batch processing...")
+    
+    for i, file_path in enumerate(file_list, 1):
+        rel_path = os.path.relpath(file_path, folder_path)
+        print(f"\n{'-'*40}")
+        print(f"Processing file {i}/{len(file_list)}: {rel_path}")
+        print(f"{'-'*40}")
+        
+        try:
+            # Generate output name
+            base_name = os.path.splitext(os.path.basename(file_path))[0]
+            output_name = f"{output_prefix}{base_name}{output_suffix}_AMP"
+            
+            # Analyze the file
+            result = analyze_file_no_gui(
+                filename=file_path,
+                use_gui=False,  # Never use GUI in batch mode
+                tag_mode=tag_mode,
+                tag_range=tag_range,
+                cursor_start=cursor_start,
+                cursor_end=cursor_end,
+                find_minimum=find_minimum,
+                span_for_peaks=span_for_peaks,
+                isi_ms=isi_ms,
+                peak_number=peak_number,
+                smooth_traces=smooth_traces,
+                smooth_window=smooth_window,
+                filter_traces=filter_traces,
+                filter_low=filter_low,
+                filter_high=filter_high,
+                leak_subtraction=leak_subtraction,
+                leak_window_start=leak_window_start,
+                leak_window_end=leak_window_end,
+                save_results=save_results,
+                output_name=output_name,
+                show_visualization=show_visualization
+            )
+            
+            # Store successful result
+            batch_results['results'][rel_path] = result
+            batch_results['files_processed'] += 1
+            
+            # Extract data for summary
+            if result['amplitudes']:
+                for peak_name, amplitudes in result['amplitudes'].items():
+                    if len(amplitudes) > 0:
+                        summary_row = {
+                            'File': rel_path,
+                            'Peak': peak_name,
+                            'Count': len(amplitudes),
+                            'Mean': np.mean(amplitudes),
+                            'Std': np.std(amplitudes),
+                            'SEM': np.std(amplitudes) / np.sqrt(len(amplitudes)),
+                            'Min': np.min(amplitudes),
+                            'Max': np.max(amplitudes),
+                            'CV_percent': (np.std(amplitudes) / np.mean(amplitudes)) * 100 if np.mean(amplitudes) != 0 else 0,
+                            'Tagged_Traces': len(result['tagged_traces']),
+                            'Cursor_Start': result['cursor_positions'][0],
+                            'Cursor_End': result['cursor_positions'][1]
+                        }
+                        batch_results['summary_data'].append(summary_row)
+            
+            print(f"✓ Successfully processed: {rel_path}")
+            
+        except Exception as e:
+            error_msg = str(e)
+            batch_results['errors'][rel_path] = error_msg
+            batch_results['files_failed'] += 1
+            
+            print(f"✗ Failed to process: {rel_path}")
+            print(f"  Error: {error_msg}")
+            
+            if not continue_on_error:
+                print("Stopping batch processing due to error (continue_on_error=False)")
+                break
+    
+    # Calculate processing time
+    batch_results['end_time'] = datetime.now()
+    batch_results['processing_time'] = batch_results['end_time'] - batch_results['start_time']
+    
+    # Print summary
+    print(f"\n{'='*60}")
+    print("BATCH PROCESSING SUMMARY")
+    print(f"{'='*60}")
+    print(f"Total files found: {batch_results['total_files']}")
+    print(f"Files processed successfully: {batch_results['files_processed']}")
+    print(f"Files failed: {batch_results['files_failed']}")
+    print(f"Processing time: {batch_results['processing_time']}")
+    
+    if batch_results['files_failed'] > 0:
+        print(f"\nFailed files:")
+        for file_path, error in batch_results['errors'].items():
+            print(f"  - {file_path}: {error}")
+    
+    # Create summary Excel file
+    if create_summary and batch_results['summary_data']:
+        try:
+            summary_df = pd.DataFrame(batch_results['summary_data'])
+            
+            # Generate summary file name
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            summary_filename = f"BATCH_SUMMARY_{timestamp}.xlsx"
+            
+            global savedir
+            summary_path = os.path.join(savedir, summary_filename)
+            
+            print(f"\nCreating summary file: {summary_path}")
+            
+            with pd.ExcelWriter(summary_path, engine='openpyxl') as writer:
+                # Main summary data
+                summary_df.to_excel(writer, sheet_name='Summary', index=False)
+                
+                # Processing information
+                process_info = pd.DataFrame([{
+                    'Batch_Folder': folder_path,
+                    'File_Pattern': file_pattern,
+                    'Recursive_Search': recursive,
+                    'Total_Files': batch_results['total_files'],
+                    'Files_Processed': batch_results['files_processed'],
+                    'Files_Failed': batch_results['files_failed'],
+                    'Start_Time': batch_results['start_time'].strftime('%Y-%m-%d %H:%M:%S'),
+                    'End_Time': batch_results['end_time'].strftime('%Y-%m-%d %H:%M:%S'),
+                    'Processing_Duration': str(batch_results['processing_time']),
+                    'Tag_Mode': tag_mode,
+                    'Find_Minimum': find_minimum,
+                    'Span_For_Peaks': span_for_peaks,
+                    'ISI_ms': isi_ms,
+                    'Peak_Number': peak_number,
+                    'Cursor_Start': cursor_start,
+                    'Cursor_End': cursor_end
+                }])
+                process_info.to_excel(writer, sheet_name='Batch_Info', index=False)
+                
+                # Error log if any
+                if batch_results['errors']:
+                    error_df = pd.DataFrame([
+                        {'File': file_path, 'Error': error} 
+                        for file_path, error in batch_results['errors'].items()
+                    ])
+                    error_df.to_excel(writer, sheet_name='Errors', index=False)
+                
+                # Aggregate statistics by peak
+                if len(summary_df) > 0:
+                    agg_stats = summary_df.groupby('Peak').agg({
+                        'Count': ['sum', 'mean'],
+                        'Mean': ['mean', 'std'],
+                        'Std': 'mean',
+                        'Min': 'min',
+                        'Max': 'max',
+                        'CV_percent': 'mean'
+                    }).round(4)
+                    agg_stats.columns = ['_'.join(col).strip() for col in agg_stats.columns]
+                    agg_stats.to_excel(writer, sheet_name='Aggregate_Stats')
+            
+            print(f"✓ Summary file created successfully")
+            batch_results['summary_file'] = summary_path
+            
+        except Exception as e:
+            print(f"✗ Failed to create summary file: {e}")
+    
+    print(f"\n✓ Batch processing completed!")
+    
+    return batch_results
+
 # Example usage function
 def run_example_analysis():
     """Example of how to use the no-GUI analysis"""
     
-    # Example 1: Simple analysis - output name will be automatically generated from filename
+    # Example 1: Simple single file analysis
     results1 = analyze_file_no_gui(
         filename=r"path/to/your/file.xlsx",
         tag_mode='all',
         cursor_start=0.1,
         cursor_end=0.5
-        # output_name will automatically be "file_AMP"
     )
     
-    # Example 2: Advanced analysis with custom output name
-    results2 = analyze_file_no_gui(
-        filename=r"path/to/your/experiment_data.xlsx",
-        tag_mode='range',
-        tag_range=[0, 10],  # Analyze first 10 traces
+    # Example 2: Batch processing of all Excel files in a folder
+    batch_results1 = analyze_batch_no_gui(
+        folder_path=r"C:\Your\Data\Folder",
+        file_pattern="*.xlsx",  # Process only Excel files
+        tag_mode='all',
         cursor_start=0.05,
         cursor_end=0.2,
         find_minimum=True,
+        span_for_peaks=1,
+        output_prefix="batch_",
+        create_summary=True
+    )
+    
+    # Example 3: Batch processing with advanced settings
+    batch_results2 = analyze_batch_no_gui(
+        folder_path=r"C:\Your\Experiment\Data",
+        file_pattern="*recording*.wcp",  # Process only WCP files with 'recording' in name
+        recursive=True,  # Search in subfolders too
+        tag_mode='range',
+        tag_range=[0, 10],  # Only first 10 traces
+        cursor_start=0.1,
+        cursor_end=0.5,
+        find_minimum=False,
         span_for_peaks=3,
         isi_ms=100,
         peak_number=5,
@@ -1825,14 +2110,20 @@ def run_example_analysis():
         filter_traces=True,
         filter_low=0.1,
         filter_high=1000,
-        output_name="experiment_data_custom_analysis"  # Custom name instead of default
+        output_prefix="exp_",
+        output_suffix="_processed",
+        continue_on_error=True,
+        create_summary=True
     )
     
-    # Example 3: Analysis with automatic filename-based naming
-    results3 = analyze_file_no_gui(
-        filename=r"path/to/recording_20231215.wcp",
-        tag_mode='all'
-        # output_name will automatically be "recording_20231215_AMP"
+    # Example 4: Batch processing all supported files
+    batch_results3 = analyze_batch_no_gui(
+        folder_path=r"C:\Data\AllFiles",
+        file_pattern="*",  # Process all supported files (.wcp, .xlsx, .xls)
+        tag_mode='all',
+        cursor_start=0.0,
+        cursor_end=1.0,
+        create_summary=True
     )
     
-    return results1, results2, results3
+    return results1, batch_results1, batch_results2, batch_results3
