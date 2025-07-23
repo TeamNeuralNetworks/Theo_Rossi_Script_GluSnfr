@@ -80,6 +80,10 @@ def func_mono_exp(x, a, b, c, d):
 def load_wcp(file_wcp):
     global REC
     global TIME
+    global current_filename
+    
+    current_filename = file_wcp  # Track current file
+    
     my_file = neo.io.WinWcpIO(file_wcp)
     bl = my_file.read_block()
     for episode in bl.segments :
@@ -104,6 +108,9 @@ def load_xls(file_xls):
     global REC
     global TIME
     global sampling
+    global current_filename
+    
+    current_filename = file_xls  # Track current file
     
     # Réinitialiser les listes
     REC = []
@@ -371,6 +378,15 @@ def Calculate_Amps():
     global REC
     global TIME
     global TAG
+    global current_filename  # Track current filename for better output names
+    
+    # Get the current filename for default output name
+    if 'current_filename' in globals() and current_filename:
+        import os
+        base_name = os.path.splitext(os.path.basename(current_filename))[0]
+        default_output = f"{base_name}_AMP"
+    else:
+        default_output = "filename_AMP"
     
     sg.theme('Black')	
  
@@ -386,7 +402,7 @@ def Calculate_Amps():
                 [sg.Text('_'*30)],
                 [sg.Text('Span for peaks (+/-)'), sg.InputText(default_text="1", size=(10, 1))],
                 [sg.Text('_'*30)],
-                [sg.Text('Save as'),sg.InputText(default_text="Amplitudes", size=(10, 1))],
+                [sg.Text('Save as'),sg.InputText(default_text=default_output, size=(10, 1))],
                 [sg.Text('_'*30)],
                 [sg.Button('Some stats from Amplitudes')]]
 #                [sg.Text('_'*30)],
@@ -1200,6 +1216,176 @@ def fix_file_path(file_path):
         file_path = os.path.normpath(file_path)
     return file_path
 
+def save_analysis_results(output_name, filename, amp_dict, amp_dict_idx, amp_dict_span, 
+                         TAG, REC, TIME, sampling, startpos, endpos, 
+                         tag_mode, find_minimum, span_for_peaks, isi_ms, peak_number,
+                         smooth_traces, smooth_window, filter_traces, filter_low, filter_high,
+                         leak_subtraction, leak_window_start, leak_window_end):
+    """
+    Save all analysis results to Excel file with multiple sheets
+    """
+    import os
+    import pandas as pd
+    
+    # Ensure savedir exists
+    global savedir
+    if not os.path.exists(savedir):
+        os.makedirs(savedir)
+        print(f"Created directory: {savedir}")
+    
+    # Create full output path
+    output_path = os.path.join(savedir, f"{output_name}.xlsx")
+    
+    print(f"Saving results to: {output_path}")
+    
+    try:
+        with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
+            
+            # 1. Save main amplitudes data
+            if amp_dict:
+                df_amplitudes = pd.DataFrame.from_dict(amp_dict)
+                df_amplitudes.to_excel(writer, sheet_name='Amplitudes', index=False)
+                print(f"  ✓ Amplitudes data saved ({len(df_amplitudes)} rows)")
+            
+            # 2. Save detailed measurement information
+            detailed_data = []
+            tagged_indices = np.where(TAG == 1)[0]
+            
+            for trace_idx_pos, trace_idx in enumerate(tagged_indices):
+                if trace_idx < len(REC):
+                    for peak_key in amp_dict.keys():
+                        if trace_idx_pos < len(amp_dict[peak_key]):
+                            center_idx = amp_dict_idx[peak_key][trace_idx_pos] if peak_key in amp_dict_idx else None
+                            amplitude = amp_dict[peak_key][trace_idx_pos]
+                            time_point = TIME[trace_idx][center_idx] if center_idx is not None and center_idx < len(TIME[trace_idx]) else None
+                            
+                            span_start, span_end = None, None
+                            if peak_key in amp_dict_span and trace_idx_pos < len(amp_dict_span[peak_key]):
+                                span_start, span_end = amp_dict_span[peak_key][trace_idx_pos]
+                            
+                            detailed_data.append({
+                                'Trace_Index': trace_idx,
+                                'Peak_Name': peak_key,
+                                'Amplitude': amplitude,
+                                'Time_Point_s': time_point,
+                                'Array_Index': center_idx,
+                                'Span_Start_Index': span_start,
+                                'Span_End_Index': span_end,
+                                'Span_Used': span_for_peaks
+                            })
+            
+            if detailed_data:
+                df_detailed = pd.DataFrame(detailed_data)
+                df_detailed.to_excel(writer, sheet_name='Detailed_Measurements', index=False)
+                print(f"  ✓ Detailed measurements saved ({len(df_detailed)} measurements)")
+            
+            # 3. Save analysis parameters
+            import pandas as pd
+            params_data = {
+                'Parameter': [
+                    'Input_File', 'Output_Name', 'Analysis_Date', 'Save_Directory',
+                    'Tag_Mode', 'Tagged_Traces_Count', 'Total_Traces_Loaded',
+                    'Cursor_Start_s', 'Cursor_End_s', 'Find_Minimum', 'Span_For_Peaks', 
+                    'ISI_ms', 'Peak_Number', 'Sampling_Rate_ms',
+                    'Smooth_Traces', 'Smooth_Window', 'Filter_Traces', 'Filter_Low_Hz', 
+                    'Filter_High_Hz', 'Leak_Subtraction', 'Leak_Window_Start_ms', 
+                    'Leak_Window_End_ms'
+                ],
+                'Value': [
+                    os.path.basename(filename), output_name, 
+                    pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S'),
+                    savedir, tag_mode, int(np.sum(TAG)), len(REC),
+                    startpos[0], endpos[0], find_minimum, span_for_peaks, 
+                    isi_ms, peak_number, sampling,
+                    smooth_traces, smooth_window, filter_traces,
+                    filter_low, filter_high, leak_subtraction,
+                    leak_window_start, leak_window_end
+                ]
+            }
+            df_params = pd.DataFrame(params_data)
+            df_params.to_excel(writer, sheet_name='Analysis_Parameters', index=False)
+            print(f"  ✓ Analysis parameters saved")
+            
+            # 4. Save trace information and tags
+            trace_info = []
+            for i in range(len(REC)):
+                trace_info.append({
+                    'Trace_Index': i,
+                    'Tagged': bool(TAG[i]),
+                    'Trace_Length_Points': len(REC[i]),
+                    'Duration_s': len(REC[i]) * sampling / 1000 if sampling > 0 else None,
+                    'Mean_Value': np.mean(REC[i]),
+                    'Std_Value': np.std(REC[i]),
+                    'Min_Value': np.min(REC[i]),
+                    'Max_Value': np.max(REC[i])
+                })
+            
+            df_traces = pd.DataFrame(trace_info)
+            df_traces.to_excel(writer, sheet_name='Trace_Information', index=False)
+            print(f"  ✓ Trace information saved ({len(df_traces)} traces)")
+            
+            # 5. Save summary statistics
+            if amp_dict:
+                summary_stats = []
+                for peak_name, amplitudes in amp_dict.items():
+                    if len(amplitudes) > 0:
+                        summary_stats.append({
+                            'Peak_Name': peak_name,
+                            'Count': len(amplitudes),
+                            'Mean': np.mean(amplitudes),
+                            'Std': np.std(amplitudes),
+                            'SEM': np.std(amplitudes) / np.sqrt(len(amplitudes)),
+                            'Min': np.min(amplitudes),
+                            'Max': np.max(amplitudes),
+                            'Median': np.median(amplitudes),
+                            'Q25': np.percentile(amplitudes, 25),
+                            'Q75': np.percentile(amplitudes, 75),
+                            'CV_percent': (np.std(amplitudes) / np.mean(amplitudes)) * 100 if np.mean(amplitudes) != 0 else 0
+                        })
+                
+                if summary_stats:
+                    df_summary = pd.DataFrame(summary_stats)
+                    df_summary.to_excel(writer, sheet_name='Summary_Statistics', index=False)
+                    print(f"  ✓ Summary statistics saved")
+            
+            # 6. Save raw data (first few traces as examples)
+            if len(REC) > 0:
+                max_traces_to_save = min(10, len(REC))  # Save max 10 traces to avoid huge files
+                raw_data = {}
+                
+                # Add time column
+                if len(TIME) > 0:
+                    raw_data['Time_s'] = TIME[0]
+                
+                # Add trace columns
+                for i in range(max_traces_to_save):
+                    raw_data[f'Trace_{i}'] = REC[i]
+                
+                df_raw = pd.DataFrame.from_dict(raw_data)
+                df_raw.to_excel(writer, sheet_name='Raw_Data_Sample', index=False)
+                print(f"  ✓ Raw data sample saved (first {max_traces_to_save} traces)")
+        
+        print(f"✓ All results saved successfully to: {output_path}")
+        return True, output_path
+        
+    except Exception as e:
+        print(f"✗ Error saving main results: {e}")
+        
+        # Try to save a simplified version
+        try:
+            simple_path = os.path.join(savedir, f"{output_name}_simple.xlsx")
+            if amp_dict:
+                df_simple = pd.DataFrame.from_dict(amp_dict)
+                df_simple.to_excel(simple_path, index=False)
+                print(f"✓ Simplified results saved to: {simple_path}")
+                return True, simple_path
+            else:
+                raise ValueError("No amplitude data to save")
+                
+        except Exception as e2:
+            print(f"✗ Failed to save even simplified results: {e2}")
+            return False, None
+
 def analyze_file_no_gui(filename, 
                        use_gui=False,
                        tag_mode='all',  # 'all', 'last', 'range', 'manual'
@@ -1219,7 +1405,7 @@ def analyze_file_no_gui(filename,
                        leak_window_start=0,
                        leak_window_end=900,
                        save_results=True,
-                       output_name="Analysis_Results",
+                       output_name=None,
                        show_visualization=True):
     """
     Analyze traces without GUI or with minimal GUI interaction
@@ -1271,8 +1457,6 @@ def analyze_file_no_gui(filename,
     dict : Analysis results
     """
     
-    import os
-    
     global REC, TIME, TAG, startpos, endpos, amp_dict, amp_dict_idx, sampling, savedir
     
     # Initialize global variables
@@ -1287,6 +1471,14 @@ def analyze_file_no_gui(filename,
     # Fix file path
     filename = fix_file_path(filename)
     print(f"Loading file: {filename}")
+    
+    # Generate default output name from filename
+    if output_name is None:
+        import os
+        base_name = os.path.splitext(os.path.basename(filename))[0]
+        output_name = f"{base_name}_AMP"
+    
+    print(f"Output name will be: {output_name}")
     
     # Check if file exists
     import os
@@ -1567,56 +1759,22 @@ def analyze_file_no_gui(filename,
     
     # Save results
     if save_results:
-        print(f"\nSaving results to {output_name}.xlsx...")
+        # Initialize amp_dict_span if not defined
+        if 'amp_dict_span' not in locals():
+            amp_dict_span = {}
+            for key in amp_dict.keys():
+                amp_dict_span[key] = [(None, None)] * len(amp_dict[key])
         
-        # Determine save directory - use the same directory as the input file if savedir is not set
-        if 'savedir' not in globals() or savedir is None:
-            file_dir = os.path.dirname(filename)
-            save_directory = file_dir
-        else:
-            save_directory = savedir
+        success, saved_path = save_analysis_results(
+            output_name, filename, amp_dict, amp_dict_idx, amp_dict_span,
+            TAG, REC, TIME, sampling, startpos, endpos,
+            tag_mode, find_minimum, span_for_peaks, isi_ms, peak_number,
+            smooth_traces, smooth_window, filter_traces, filter_low, filter_high,
+            leak_subtraction, leak_window_start, leak_window_end
+        )
         
-        # Create directory if it doesn't exist
-        if not os.path.exists(save_directory):
-            os.makedirs(save_directory)
-            print(f"Created directory: {save_directory}")
-        
-        # Construct full file path
-        full_file_path = os.path.join(save_directory, f"{output_name}.xlsx")
-        print(f"Full save path: {full_file_path}")
-        
-        df = pd.DataFrame.from_dict(amp_dict)
-        writer = pd.ExcelWriter(full_file_path, engine='openpyxl')
-        df.to_excel(writer, sheet_name='Amplitudes', index=False)
-        
-        # Save analysis parameters
-        params_df = pd.DataFrame({
-            'Parameter': ['filename', 'tag_mode', 'cursor_start', 'cursor_end', 
-                         'find_minimum', 'span_for_peaks', 'isi_ms', 'peak_number',
-                         'smooth_traces', 'smooth_window', 'filter_traces', 
-                         'filter_low', 'filter_high', 'leak_subtraction'],
-            'Value': [filename, tag_mode, startpos[0], endpos[0], 
-                     find_minimum, span_for_peaks, isi_ms, peak_number,
-                     smooth_traces, smooth_window, filter_traces,
-                     filter_low, filter_high, leak_subtraction]
-        })
-        params_df.to_excel(writer, sheet_name='Parameters', index=False)
-        
-        # Save trace tags
-        tags_df = pd.DataFrame({'Trace_Index': range(len(TAG)), 'Tagged': TAG})
-        tags_df.to_excel(writer, sheet_name='Tags', index=False)
-        
-        writer.close()
-        print(f"Results saved successfully!")
-        print(f"SAVE DIRECTORY: {save_directory}")
-        print(f"SAVE FILE: {full_file_path}")
-        
-        # Verify file was created
-        if os.path.exists(full_file_path):
-            file_size = os.path.getsize(full_file_path)
-            print(f"File created successfully: {file_size} bytes")
-        else:
-            print("ERROR: File was not created!")
+        if not success:
+            print("Warning: Results could not be saved!")
     
     # Prepare return dictionary
     results = {
@@ -1642,18 +1800,18 @@ def analyze_file_no_gui(filename,
 def run_example_analysis():
     """Example of how to use the no-GUI analysis"""
     
-    # Example 1: Simple analysis with all default parameters
+    # Example 1: Simple analysis - output name will be automatically generated from filename
     results1 = analyze_file_no_gui(
         filename=r"path/to/your/file.xlsx",
         tag_mode='all',
         cursor_start=0.1,
-        cursor_end=0.5,
-        output_name="Simple_Analysis"
+        cursor_end=0.5
+        # output_name will automatically be "file_AMP"
     )
     
-    # Example 2: Advanced analysis with custom parameters
+    # Example 2: Advanced analysis with custom output name
     results2 = analyze_file_no_gui(
-        filename=r"path/to/your/file.xlsx",
+        filename=r"path/to/your/experiment_data.xlsx",
         tag_mode='range',
         tag_range=[0, 10],  # Analyze first 10 traces
         cursor_start=0.05,
@@ -1667,7 +1825,14 @@ def run_example_analysis():
         filter_traces=True,
         filter_low=0.1,
         filter_high=1000,
-        output_name="Advanced_Analysis"
+        output_name="experiment_data_custom_analysis"  # Custom name instead of default
     )
     
-    return results1, results2
+    # Example 3: Analysis with automatic filename-based naming
+    results3 = analyze_file_no_gui(
+        filename=r"path/to/recording_20231215.wcp",
+        tag_mode='all'
+        # output_name will automatically be "recording_20231215_AMP"
+    )
+    
+    return results1, results2, results3
