@@ -1152,7 +1152,7 @@ if __name__ == '__main__' :
     import seaborn as sns
     
     
-    savedir = r'C:\Anthime.PERROT\1_Thèse\1_Manip\5_Glusnf_Théo\2_Revision\Longue_fibre\241212_theo_9\fibre_3\Excel_limited_13\Results'
+    savedir = r'C:\Anthime.PERROT\1_Thèse\1_Manip\5_Glusnf_Théo\2_Revision\Longue_fibre\241212_theo_9\fibre_3\Excel_limited_15\results'
 
     
           
@@ -2015,6 +2015,78 @@ def analyze_batch_no_gui(folder_path,
                 # Main summary data
                 summary_df.to_excel(writer, sheet_name='Summary', index=False)
                 
+                # Create amplitude matrix: files x peaks
+                amplitude_matrix_data = {}
+                amplitude_matrix_data['Filename'] = []
+                
+                # Get all peak names from all results
+                all_peak_names = set()
+                for rel_path, result in batch_results['results'].items():
+                    if result['amplitudes']:
+                        all_peak_names.update(result['amplitudes'].keys())
+                
+                # Sort peak names for consistent ordering
+                all_peak_names = sorted(list(all_peak_names))
+                
+                # Initialize columns for each peak (mean values)
+                for peak_name in all_peak_names:
+                    amplitude_matrix_data[f'{peak_name}_Mean'] = []
+                    amplitude_matrix_data[f'{peak_name}_Std'] = []
+                    amplitude_matrix_data[f'{peak_name}_Count'] = []
+                
+                # Fill the matrix
+                for rel_path, result in batch_results['results'].items():
+                    amplitude_matrix_data['Filename'].append(rel_path)
+                    
+                    for peak_name in all_peak_names:
+                        if (result['amplitudes'] and 
+                            peak_name in result['amplitudes'] and 
+                            len(result['amplitudes'][peak_name]) > 0):
+                            
+                            amplitudes = result['amplitudes'][peak_name]
+                            amplitude_matrix_data[f'{peak_name}_Mean'].append(np.mean(amplitudes))
+                            amplitude_matrix_data[f'{peak_name}_Std'].append(np.std(amplitudes))
+                            amplitude_matrix_data[f'{peak_name}_Count'].append(len(amplitudes))
+                        else:
+                            amplitude_matrix_data[f'{peak_name}_Mean'].append(np.nan)
+                            amplitude_matrix_data[f'{peak_name}_Std'].append(np.nan)
+                            amplitude_matrix_data[f'{peak_name}_Count'].append(0)
+                
+                # Create amplitude matrix DataFrame
+                amplitude_matrix_df = pd.DataFrame(amplitude_matrix_data)
+                amplitude_matrix_df.to_excel(writer, sheet_name='Amplitude_Matrix', index=False)
+                
+                # Create detailed amplitude data: all individual measurements
+                detailed_amplitude_data = {}
+                detailed_amplitude_data['Filename'] = []
+                detailed_amplitude_data['Trace_Index'] = []
+                
+                # Initialize columns for each peak
+                for peak_name in all_peak_names:
+                    detailed_amplitude_data[peak_name] = []
+                
+                # Fill detailed data
+                for rel_path, result in batch_results['results'].items():
+                    if result['amplitudes'] and len(result['tagged_traces']) > 0:
+                        # Get the number of tagged traces for this file
+                        num_traces = len(result['tagged_traces'])
+                        
+                        for i in range(num_traces):
+                            detailed_amplitude_data['Filename'].append(rel_path)
+                            detailed_amplitude_data['Trace_Index'].append(result['tagged_traces'][i] if i < len(result['tagged_traces']) else np.nan)
+                            
+                            for peak_name in all_peak_names:
+                                if (peak_name in result['amplitudes'] and 
+                                    i < len(result['amplitudes'][peak_name])):
+                                    detailed_amplitude_data[peak_name].append(result['amplitudes'][peak_name][i])
+                                else:
+                                    detailed_amplitude_data[peak_name].append(np.nan)
+                
+                # Create detailed amplitude DataFrame
+                if detailed_amplitude_data['Filename']:  # Only if we have data
+                    detailed_amplitude_df = pd.DataFrame(detailed_amplitude_data)
+                    detailed_amplitude_df.to_excel(writer, sheet_name='All_Amplitudes', index=False)
+                
                 # Processing information
                 process_info = pd.DataFrame([{
                     'Batch_Folder': folder_path,
@@ -2059,6 +2131,108 @@ def analyze_batch_no_gui(folder_path,
             
             print(f"✓ Summary file created successfully")
             batch_results['summary_file'] = summary_path
+            
+            # Create a separate Excel file with simplified format: Filename | AMP1 | AMP2 | AMP3 | ...
+            try:
+                simple_results_filename = f"BATCH_AMPLITUDES_{timestamp}.xlsx"
+                simple_results_path = os.path.join(savedir, simple_results_filename)
+                
+                print(f"Creating simplified amplitude results file: {simple_results_path}")
+                
+                # Prepare simplified data structure
+                simple_data = {}
+                simple_data['Filename'] = []
+                
+                # Get all peak names and sort them
+                all_peak_names = set()
+                for rel_path, result in batch_results['results'].items():
+                    if result['amplitudes']:
+                        all_peak_names.update(result['amplitudes'].keys())
+                
+                # Sort peak names naturally (AMP1, AMP2, AMP3, ...)
+                all_peak_names = sorted(list(all_peak_names), key=lambda x: int(x.replace('AMP', '')) if x.startswith('AMP') and x[3:].isdigit() else float('inf'))
+                
+                # Initialize columns for each peak
+                for peak_name in all_peak_names:
+                    simple_data[peak_name] = []
+                
+                # Fill the simplified data
+                for rel_path, result in batch_results['results'].items():
+                    simple_data['Filename'].append(rel_path)
+                    
+                    for peak_name in all_peak_names:
+                        if (result['amplitudes'] and 
+                            peak_name in result['amplitudes'] and 
+                            len(result['amplitudes'][peak_name]) > 0):
+                            # Use the mean amplitude for each peak
+                            amplitudes = result['amplitudes'][peak_name]
+                            simple_data[peak_name].append(np.mean(amplitudes))
+                        else:
+                            simple_data[peak_name].append(np.nan)
+                
+                # Create and save the simplified DataFrame
+                simple_df = pd.DataFrame(simple_data)
+                
+                with pd.ExcelWriter(simple_results_path, engine='openpyxl') as writer:
+                    # Main sheet with filename and amplitude means
+                    simple_df.to_excel(writer, sheet_name='Amplitude_Results', index=False)
+                    
+                    # Additional sheet with all individual measurements (expanded format)
+                    if detailed_amplitude_data['Filename']:
+                        detailed_df = pd.DataFrame(detailed_amplitude_data)
+                        detailed_df.to_excel(writer, sheet_name='All_Individual_Values', index=False)
+                    
+                    # Statistics sheet
+                    if len(simple_df) > 1:  # Need at least 2 files for meaningful stats
+                        stats_data = {}
+                        stats_data['Peak'] = []
+                        stats_data['Mean_Across_Files'] = []
+                        stats_data['Std_Across_Files'] = []
+                        stats_data['Min_Across_Files'] = []
+                        stats_data['Max_Across_Files'] = []
+                        stats_data['Files_With_Data'] = []
+                        
+                        for peak_name in all_peak_names:
+                            if peak_name in simple_df.columns:
+                                peak_values = simple_df[peak_name].dropna()
+                                if len(peak_values) > 0:
+                                    stats_data['Peak'].append(peak_name)
+                                    stats_data['Mean_Across_Files'].append(np.mean(peak_values))
+                                    stats_data['Std_Across_Files'].append(np.std(peak_values))
+                                    stats_data['Min_Across_Files'].append(np.min(peak_values))
+                                    stats_data['Max_Across_Files'].append(np.max(peak_values))
+                                    stats_data['Files_With_Data'].append(len(peak_values))
+                        
+                        stats_df = pd.DataFrame(stats_data)
+                        stats_df.to_excel(writer, sheet_name='Statistics_Across_Files', index=False)
+                    
+                    # Parameters used for analysis
+                    params_df = pd.DataFrame([{
+                        'Parameter': 'Analysis_Settings',
+                        'Tag_Mode': tag_mode,
+                        'Cursor_Start_s': cursor_start,
+                        'Cursor_End_s': cursor_end,
+                        'Find_Minimum': find_minimum,
+                        'Span_For_Peaks': span_for_peaks,
+                        'ISI_ms': isi_ms,
+                        'Peak_Number': peak_number,
+                        'Smooth_Traces': smooth_traces,
+                        'Smooth_Window': smooth_window,
+                        'Filter_Traces': filter_traces,
+                        'Leak_Subtraction': leak_subtraction,
+                        'Files_Processed': batch_results['files_processed'],
+                        'Processing_Time': str(batch_results['processing_time'])
+                    }])
+                    params_df.to_excel(writer, sheet_name='Analysis_Parameters', index=False)
+                
+                print(f"✓ Simplified amplitude results file created successfully")
+                print(f"  Format: Filename | {' | '.join(all_peak_names)}")
+                print(f"  {len(simple_df)} files with amplitude data")
+                
+                batch_results['simple_results_file'] = simple_results_path
+                
+            except Exception as e:
+                print(f"✗ Failed to create simplified amplitude results file: {e}")
             
         except Exception as e:
             print(f"✗ Failed to create summary file: {e}")
