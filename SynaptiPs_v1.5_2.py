@@ -1168,30 +1168,68 @@ def Main_window():
                 
                 
             if event == 'Remove residuals in current train':
+                # Check if required data exists
+                if not amp_dict or not amp_dict_idx or not FitPeaks_dict_popt:
+                    sg.popup_error('Missing required data. Please first:\n1. Calculate amplitudes\n2. Fit train peaks')
+                    continue
+                
+                # Find the position of the current episode in the tagged traces
+                tagged_indices = [i for i, tag in enumerate(TAG) if tag == 1]
+                if episode not in tagged_indices:
+                    sg.popup_error(f'Episode {episode} is not tagged. Please tag it first.')
+                    continue
+                
+                episode_position = tagged_indices.index(episode)
+                
                 amp_dict_corr = {}
-                print ('Episode', episode)
+                print ('Episode', episode, 'Position in tagged traces:', episode_position)
                 locals().update(amp_dict_corr)
                 for i in range(int(values[10])):
                     amp_dict_corr['AMP' + str(i+1)] = []
-                     
-                for key in amp_dict_corr.keys():
-                    if key == 'AMP1':
-                        print(key)
-                        amp_dict_corr[key].append(amp_dict[key][episode])
-                        print ('AMP1 =', amp_dict[key][episode])
+                
+                # Check if we have enough amplitude data for this episode position
+                for key in amp_dict.keys():
+                    if episode_position >= len(amp_dict[key]):
+                        sg.popup_error(f'Not enough amplitude data for episode {episode}. Position {episode_position} but only {len(amp_dict[key])} measurements for {key}.')
+                        break
+                else:
+                    # All checks passed, proceed with residual removal
+                    for key in amp_dict_corr.keys():
+                        if key == 'AMP1':
+                            print(key)
+                            amp_dict_corr[key].append(amp_dict[key][episode_position])
+                            print ('AMP1 =', amp_dict[key][episode_position])
+                        else:
+                            print('Processing', key)
+                            key_for_residual='AMP' + str(int(key[3:])-1)
+                            
+                            # Check if we have fit data for the residual key
+                            if key_for_residual not in FitPeaks_dict_popt or len(FitPeaks_dict_popt[key_for_residual]) == 0:
+                                sg.popup_error(f'No fit data available for {key_for_residual}. Please fit the train first.')
+                                break
+                            
+                            # Check if we have enough fit data for this episode
+                            if episode_position >= len(FitPeaks_dict_popt[key_for_residual]):
+                                sg.popup_error(f'Not enough fit data for episode {episode}. Position {episode_position} but only {len(FitPeaks_dict_popt[key_for_residual])} fits for {key_for_residual}.')
+                                break
+                            
+                            index_peak_key=amp_dict_idx[key][episode_position]
+                            try:
+                                residual = func_mono_exp(float(TIME[episode][index_peak_key]), *FitPeaks_dict_popt[key_for_residual][episode_position])
+                                new_amp = amp_dict[key][episode_position]-residual
+                                amp_dict_corr[key].append(new_amp)
+                                print ('new',key,' = ',new_amp)
+                            except Exception as e:
+                                print(f'Error calculating residual for {key}: {e}')
+                                sg.popup_error(f'Error calculating residual for {key}: {e}')
+                                break
                     else:
-                        print('A')
-                        key_for_residual='AMP' + str(int(key[3:])-1)
-                        index_peak_key=amp_dict_idx[key][episode]
-                        residual = func_mono_exp(float(TIME[episode][index_peak_key]), *FitPeaks_dict_popt[key_for_residual][0])
-                        new_amp = amp_dict[key][episode]-residual
-                        amp_dict_corr[key].append(new_amp)
-                        print ('new',key,' = ',new_amp)
-                        
-                df = pd.DataFrame.from_dict(amp_dict_corr)
-                writer = pd.ExcelWriter('{}\Amplitudes_corr.xlsx'.format(savedir))
-                df.to_excel(writer)
-                writer.save()
+                        # Save results only if all calculations succeeded
+                        df = pd.DataFrame.from_dict(amp_dict_corr)
+                        writer = pd.ExcelWriter('{}\Amplitudes_corr.xlsx'.format(savedir))
+                        df.to_excel(writer)
+                        writer.save()
+                        print('Residual correction completed and saved.')
                 
                 
             if event == 'Remove all residuals':
@@ -1498,12 +1536,12 @@ def analyze_file_no_gui(filename,
                        use_gui=False,
                        tag_mode='last',  # 'all', 'last', 'range', 'manual'
                        tag_range=None,  # [start, end] for range mode
-                       cursor_start=0.99,  # in seconds, None = interactive
-                       cursor_end=1.048,    # in seconds, None = interactive
+                       cursor_start=0.49,  # in seconds, None = interactive #0.99
+                       cursor_end=0.548,    # in seconds, None = interactive #1.048
                        find_minimum=False,
                        span_for_peaks=1,
                        isi_ms=50,
-                       peak_number=3,
+                       peak_number=10,
                        smooth_traces=True,
                        smooth_window=9,
                        filter_traces=False,
@@ -1511,10 +1549,13 @@ def analyze_file_no_gui(filename,
                        filter_high=2000,
                        bleaching_correction=False,
                        bleaching_window_start=0,
-                       bleaching_window_end=900,
+                       bleaching_window_end=400,
                        leak_subtraction=True,
                        leak_window_start=0,
-                       leak_window_end=900,
+                       leak_window_end=400,
+                       apply_remove_residuals=False,
+                       offset_points_after_amp1=10,  # X points after AMP1 position for cursor_start_Fit
+                       cursor_end_fit=None,  # End cursor for fitting, if None uses cursor_end
                        save_results=True,
                        output_name=None,
                        show_visualization=True):
@@ -1560,6 +1601,12 @@ def analyze_file_no_gui(filename,
         Apply leak subtraction
     leak_window_start, leak_window_end : float
         Leak subtraction window in ms
+    apply_remove_residuals : bool
+        Apply remove residuals correction after fitting
+    offset_points_after_amp1 : int
+        Number of points after AMP1 position to start cursor_start_Fit
+    cursor_end_fit : float or None
+        End cursor for fitting in seconds. If None, uses cursor_end
     save_results : bool
         Save results to Excel
     output_name : str
@@ -1573,6 +1620,7 @@ def analyze_file_no_gui(filename,
     """
     
     global REC, TIME, TAG, startpos, endpos, amp_dict, amp_dict_idx, sampling, savedir
+    global FitPeaks_dict_tau, FitPeaks_dict_popt, amp_dict_corr
     
     # Initialize global variables
     REC = []
@@ -1582,6 +1630,9 @@ def analyze_file_no_gui(filename,
     endpos = [None]
     amp_dict = {}
     amp_dict_idx = {}
+    FitPeaks_dict_tau = {}
+    FitPeaks_dict_popt = {}
+    amp_dict_corr = {}
     
     # Fix file path
     filename = fix_file_path(filename)
@@ -1772,6 +1823,108 @@ def analyze_file_no_gui(filename,
         
         print(f"Analyzed {len(amp_dict['AMP1'])} traces with {peak_number} peaks")
     
+    # Apply remove residuals if requested and we have multiple peaks
+    if apply_remove_residuals and peak_number > 1:
+        print("\nApplying remove residuals correction...")
+        
+        # Define fitting cursors
+        if cursor_end_fit is None:
+            cursor_end_fit = cursor_end
+        
+        # Get AMP1 positions and calculate cursor_start_Fit for each tagged trace
+        tagged_indices = np.where(TAG == 1)[0]
+        
+        # Fit all trains to get decay constants
+        FitPeaks_dict_tau = {}
+        FitPeaks_dict_popt = {}
+        
+        for i in range(peak_number):
+            FitPeaks_dict_tau[f'AMP{i+1}'] = []
+            FitPeaks_dict_popt[f'AMP{i+1}'] = []
+        
+        Start_for_trains = startpos[0]
+        Stop_for_trains = endpos[0]
+        
+        print("Fitting decay constants for all peaks...")
+        for key in FitPeaks_dict_popt.keys():
+            for trace_pos, trace_idx in enumerate(tagged_indices):
+                if trace_pos < len(amp_dict[key]):
+                    try:
+                        local_tau, local_popt, idxstart, idxstop = Fit_single_trace(
+                            REC[trace_idx], TIME[trace_idx], Start_for_trains, Stop_for_trains)
+                        FitPeaks_dict_tau[key].append(local_tau)
+                        FitPeaks_dict_popt[key].append(local_popt)
+                    except Exception as e:
+                        print(f"  Fitting failed for {key}, trace {trace_idx}: {e}")
+                        FitPeaks_dict_tau[key].append(np.nan)
+                        FitPeaks_dict_popt[key].append(None)
+            
+            Start_for_trains += isi_ms / 1000
+            Stop_for_trains += isi_ms / 1000
+        
+        # Apply remove residuals correction
+        amp_dict_corr = {}
+        for i in range(peak_number):
+            amp_dict_corr[f'AMP{i+1}'] = []
+        
+        print("Applying residual correction...")
+        for trace_pos, trace_idx in enumerate(tagged_indices):
+            if trace_pos < len(amp_dict['AMP1']):
+                # Get AMP1 position and calculate cursor_start_Fit
+                amp1_idx = amp_dict_idx['AMP1'][trace_pos]
+                cursor_start_fit_idx = amp1_idx + offset_points_after_amp1
+                
+                # Make sure we don't go beyond the trace
+                if cursor_start_fit_idx >= len(TIME[trace_idx]):
+                    cursor_start_fit_idx = len(TIME[trace_idx]) - 1
+                
+                cursor_start_fit = TIME[trace_idx][cursor_start_fit_idx]
+                
+                print(f"  Trace {trace_idx}: AMP1 at index {amp1_idx} ({TIME[trace_idx][amp1_idx]:.4f}s), "
+                      f"Fit start at index {cursor_start_fit_idx} ({cursor_start_fit:.4f}s)")
+                
+                # Process each peak
+                for key in amp_dict_corr.keys():
+                    if key == 'AMP1':
+                        # AMP1 is not corrected
+                        amp_dict_corr[key].append(amp_dict[key][trace_pos])
+                    else:
+                        # Calculate residual from previous peak
+                        key_for_residual = f'AMP{int(key[3:]) - 1}'
+                        
+                        if (key_for_residual in FitPeaks_dict_popt and 
+                            trace_pos < len(FitPeaks_dict_popt[key_for_residual]) and
+                            FitPeaks_dict_popt[key_for_residual][trace_pos] is not None):
+                            
+                            # Get the time point for this peak
+                            peak_idx = amp_dict_idx[key][trace_pos]
+                            peak_time = TIME[trace_idx][peak_idx]
+                            
+                            try:
+                                # Calculate residual using the fit from previous peak
+                                residual = func_mono_exp(peak_time, *FitPeaks_dict_popt[key_for_residual][trace_pos])
+                                corrected_amp = amp_dict[key][trace_pos] - residual
+                                amp_dict_corr[key].append(corrected_amp)
+                                
+                                print(f"    {key}: original={amp_dict[key][trace_pos]:.4f}, "
+                                      f"residual={residual:.4f}, corrected={corrected_amp:.4f}")
+                            except Exception as e:
+                                print(f"    {key}: Residual calculation failed: {e}")
+                                amp_dict_corr[key].append(amp_dict[key][trace_pos])
+                        else:
+                            print(f"    {key}: No fit data available for {key_for_residual}")
+                            amp_dict_corr[key].append(amp_dict[key][trace_pos])
+        
+        print("Remove residuals correction completed")
+        
+        # Update amp_dict with corrected values
+        amp_dict = amp_dict_corr.copy()
+        
+        # Store corrected amplitudes for batch processing
+        corrected_amplitudes = amp_dict_corr.copy()
+    else:
+        corrected_amplitudes = None
+    
     # Print detailed results
     print("\n" + "="*50)
     print("ANALYSIS RESULTS")
@@ -1807,9 +1960,11 @@ def analyze_file_no_gui(filename,
         print("\nGenerating visualization...")
         
         if peak_number == 1:
-            # Single peak visualization
-            fig_measurements = plt.figure(figsize=(12, 8))
-            ax_measurements = fig_measurements.add_subplot(111)
+            # Single peak visualization with subplots
+            fig_measurements = plt.figure(figsize=(20, 8))
+            
+            # Left subplot: amplitude measurements
+            ax_measurements = fig_measurements.add_subplot(1, 2, 1)
             
             tagged_indices = np.where(TAG == 1)[0]
             colors = plt.cm.tab10(np.linspace(0, 1, len(tagged_indices)))
@@ -1852,21 +2007,64 @@ def analyze_file_no_gui(filename,
                 title_text += ' - Exact Points'
             else:
                 title_text += ' - Averaged Regions'
-            ax_measurements.set_title(title_text, fontweight="bold", fontsize=14)
+            ax_measurements.set_title(title_text, fontweight="bold", fontsize=12)
             ax_measurements.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+            
+            # Right subplot: fitting visualization (if fitting was performed)
+            ax_fitting = fig_measurements.add_subplot(1, 2, 2)
+            
+            if 'FitPeaks_dict_popt' in globals() and FitPeaks_dict_popt and 'AMP1' in FitPeaks_dict_popt:
+                # Show fitting results for first few traces
+                max_fit_traces = min(len(tagged_indices), len(FitPeaks_dict_popt['AMP1']))
+                for idx in range(min(3, max_fit_traces)):
+                    trace_idx = tagged_indices[idx]
+                    if (idx < len(FitPeaks_dict_popt['AMP1']) and 
+                        FitPeaks_dict_popt['AMP1'][idx] is not None):
+                        
+                        # Plot trace
+                        ax_fitting.plot(TIME[trace_idx], REC[trace_idx], 
+                                      color=colors[idx], alpha=0.7, linewidth=1.5,
+                                      label=f'Trace {trace_idx}')
+                        
+                        # Plot fitted exponential
+                        popt = FitPeaks_dict_popt['AMP1'][idx]
+                        try:
+                            fitted_curve = func_mono_exp(TIME[trace_idx], *popt)
+                            ax_fitting.plot(TIME[trace_idx], fitted_curve, 
+                                          color=colors[idx], linestyle='--', linewidth=2, alpha=0.8,
+                                          label=f'Fit τ={popt[2]*1000:.1f}ms')
+                        except:
+                            pass
+                
+                ax_fitting.axvline(startpos[0], color='r', linestyle='--', linewidth=2, alpha=0.8)
+                ax_fitting.axvline(endpos[0], color='g', linestyle='--', linewidth=2, alpha=0.8)
+                ax_fitting.set_xlabel('Time (s)')
+                ax_fitting.set_ylabel('Signal (Amp)')
+                ax_fitting.set_title('Exponential Decay Fitting', fontweight="bold", fontsize=12)
+                ax_fitting.legend()
+            else:
+                # No fitting data available
+                ax_fitting.text(0.5, 0.5, 'No fitting data available\n(Single peak mode)', 
+                              ha='center', va='center', transform=ax_fitting.transAxes,
+                              fontsize=12, color='gray')
+                ax_fitting.set_title('Exponential Decay Fitting', fontweight="bold", fontsize=12)
+            
             plt.tight_layout()
             plt.show()
         
         else:
-            # Multiple peaks visualization - show first few traces
-            fig_train = plt.figure(figsize=(15, 10))
+            # Multiple peaks visualization with subplots - show first few traces
             tagged_indices = np.where(TAG == 1)[0]
             max_traces_to_show = min(3, len(tagged_indices))
             
+            fig_train = plt.figure(figsize=(20, 6*max_traces_to_show))
+            
             for plot_idx in range(max_traces_to_show):
                 trace_idx = tagged_indices[plot_idx]
-                ax_train = fig_train.add_subplot(max_traces_to_show, 1, plot_idx + 1)
-                ax_train.plot(TIME[trace_idx], REC[trace_idx], 'b-', alpha=0.8, linewidth=1.5)
+                
+                # Left subplot: amplitude measurements
+                ax_train_left = fig_train.add_subplot(max_traces_to_show, 2, 2*plot_idx + 1)
+                ax_train_left.plot(TIME[trace_idx], REC[trace_idx], 'b-', alpha=0.8, linewidth=1.5)
                 
                 for peak_idx, key in enumerate(amp_dict.keys()):
                     if plot_idx < len(amp_dict[key]):
@@ -1877,22 +2075,64 @@ def analyze_file_no_gui(filename,
                         
                         if span_for_peaks == 1:
                             y_exact = REC[trace_idx][center_idx]
-                            ax_train.plot(x_center, y_exact, 'o', 
+                            ax_train_left.plot(x_center, y_exact, 'o', 
                                         markersize=6, label=f'{key}: {y_exact:.4f}',
                                         color=f'C{peak_idx}')
                         else:
                             x_start = TIME[trace_idx][span_start]
                             x_end = TIME[trace_idx][span_end]
-                            ax_train.plot([x_start, x_end], [y_measurement, y_measurement], 
+                            ax_train_left.plot([x_start, x_end], [y_measurement, y_measurement], 
                                         color=f'C{peak_idx}', linewidth=3, alpha=0.8)
-                            ax_train.plot(x_center, y_measurement, 's', 
+                            ax_train_left.plot(x_center, y_measurement, 's', 
                                         markersize=4, label=f'{key}: {y_measurement:.4f}',
                                         color=f'C{peak_idx}')
                 
-                ax_train.set_xlabel('Time (s)')
-                ax_train.set_ylabel('Signal (Amp)')
-                ax_train.set_title(f'Trace {trace_idx} - Peak Measurements')
-                ax_train.legend()
+                ax_train_left.set_xlabel('Time (s)')
+                ax_train_left.set_ylabel('Signal (Amp)')
+                ax_train_left.set_title(f'Trace {trace_idx} - Peak Measurements')
+                ax_train_left.legend()
+                
+                # Right subplot: fitting visualization
+                ax_train_right = fig_train.add_subplot(max_traces_to_show, 2, 2*plot_idx + 2)
+                ax_train_right.plot(TIME[trace_idx], REC[trace_idx], 'b-', alpha=0.8, linewidth=1.5, 
+                                  label=f'Trace {trace_idx}')
+                
+                # Plot fitted exponentials for each peak
+                if 'FitPeaks_dict_popt' in globals() and FitPeaks_dict_popt:
+                    Start_for_trains_plot = startpos[0]
+                    Stop_for_trains_plot = endpos[0]
+                    
+                    for peak_idx, key in enumerate(amp_dict.keys()):
+                        if (key in FitPeaks_dict_popt and 
+                            plot_idx < len(FitPeaks_dict_popt[key]) and
+                            FitPeaks_dict_popt[key][plot_idx] is not None):
+                            
+                            popt = FitPeaks_dict_popt[key][plot_idx]
+                            try:
+                                # Create fitting window for this peak
+                                idx_start = np.where(TIME[trace_idx] >= Start_for_trains_plot)[0]
+                                idx_stop = np.where(TIME[trace_idx] >= Stop_for_trains_plot)[0]
+                                if len(idx_start) > 0 and len(idx_stop) > 0:
+                                    x_fit = TIME[trace_idx][idx_start[0]:idx_stop[0]]
+                                    if len(x_fit) > 0:
+                                        y_fit = func_mono_exp(x_fit, *popt)
+                                        ax_train_right.plot(x_fit, y_fit, '--', 
+                                                          color=f'C{peak_idx}', linewidth=2, alpha=0.8,
+                                                          label=f'{key} fit τ={popt[2]*1000:.1f}ms')
+                                        
+                                        # Show fitting window
+                                        ax_train_right.axvspan(Start_for_trains_plot, Stop_for_trains_plot, 
+                                                             alpha=0.1, color=f'C{peak_idx}')
+                            except Exception as e:
+                                print(f"Error plotting fit for {key}: {e}")
+                        
+                        Start_for_trains_plot += isi_ms / 1000
+                        Stop_for_trains_plot += isi_ms / 1000
+                
+                ax_train_right.set_xlabel('Time (s)')
+                ax_train_right.set_ylabel('Signal (Amp)')
+                ax_train_right.set_title(f'Trace {trace_idx} - Decay Fitting')
+                ax_train_right.legend()
             
             plt.tight_layout()
             plt.show()
@@ -1921,6 +2161,7 @@ def analyze_file_no_gui(filename,
     results = {
         'amplitudes': amp_dict,
         'amplitude_indices': amp_dict_idx,
+        'corrected_amplitudes': corrected_amplitudes,  # Add corrected amplitudes
         'tagged_traces': np.where(TAG == 1)[0].tolist(),
         'cursor_positions': [startpos[0], endpos[0]],
         'parameters': {
@@ -1931,7 +2172,9 @@ def analyze_file_no_gui(filename,
             'isi_ms': isi_ms,
             'peak_number': peak_number,
             'smooth_traces': smooth_traces,
-            'filter_traces': filter_traces
+            'filter_traces': filter_traces,
+            'apply_remove_residuals': apply_remove_residuals,
+            'offset_points_after_amp1': offset_points_after_amp1
         }
     }
     
@@ -1944,22 +2187,25 @@ def analyze_batch_no_gui(folder_path,
                         tag_mode='last',
                         tag_range=None,
                         cursor_start=0.49,
-                        cursor_end=0.530,
+                        cursor_end=0.543,
                         find_minimum=False,
-                        span_for_peaks=3,
+                        span_for_peaks=1,
                         isi_ms=50,
                         peak_number=10,
-                        smooth_traces=False,
+                        smooth_traces=True,
                         smooth_window=9,
                         filter_traces=False,
                         filter_low=0.01,
                         filter_high=2000,
-                        bleaching_correction=False,
+                        bleaching_correction=True,
                         bleaching_window_start=0,
-                        bleaching_window_end=900,
+                        bleaching_window_end=400,
                         leak_subtraction=True,
                         leak_window_start=0,
                         leak_window_end=400,
+                        apply_remove_residuals=True,
+                        offset_points_after_amp1=3,  # X points after AMP1 position for cursor_start_Fit
+                        cursor_end_fit=None,  # End cursor for fitting, if None uses cursor_end
                         save_results=True,
                         output_prefix="",  # Prefix to add to all output names
                         output_suffix="_AMP",  # Suffix to add to all output names
@@ -1981,6 +2227,12 @@ def analyze_batch_no_gui(folder_path,
         Prefix to add to all output file names
     output_suffix : str
         Suffix to add to all output file names  
+    apply_remove_residuals : bool
+        Apply remove residuals correction after fitting
+    offset_points_after_amp1 : int
+        Number of points after AMP1 position to start cursor_start_Fit
+    cursor_end_fit : float or None
+        End cursor for fitting, if None uses cursor_end
     continue_on_error : bool
         If True, continue processing other files if one fails
     create_summary : bool
@@ -2083,6 +2335,9 @@ def analyze_batch_no_gui(folder_path,
                 leak_subtraction=leak_subtraction,
                 leak_window_start=leak_window_start,
                 leak_window_end=leak_window_end,
+                apply_remove_residuals=apply_remove_residuals,
+                offset_points_after_amp1=offset_points_after_amp1,
+                cursor_end_fit=cursor_end_fit,
                 save_results=save_results,
                 output_name=output_name,
                 show_visualization=show_visualization
@@ -2380,6 +2635,146 @@ def analyze_batch_no_gui(folder_path,
                 
             except Exception as e:
                 print(f"✗ Failed to create simplified amplitude results file: {e}")
+                
+            # Create corrected amplitudes file if any files had remove residuals applied
+            try:
+                corrected_results_filename = f"BATCH_CORRECTED_AMPLITUDES_{timestamp}.xlsx"
+                corrected_results_path = os.path.join(savedir, corrected_results_filename)
+                
+                # Check if any files have corrected amplitudes
+                files_with_corrections = {}
+                for rel_path, result in batch_results['results'].items():
+                    if (result.get('corrected_amplitudes') is not None and 
+                        len(result['corrected_amplitudes']) > 0):
+                        files_with_corrections[rel_path] = result['corrected_amplitudes']
+                
+                if files_with_corrections:
+                    print(f"\nCreating corrected amplitudes file: {corrected_results_path}")
+                    
+                    # Prepare corrected data structure
+                    corrected_data = {}
+                    corrected_data['Filename'] = []
+                    
+                    # Get all peak names from corrected results
+                    all_corrected_peak_names = set()
+                    for rel_path, corrected_amps in files_with_corrections.items():
+                        all_corrected_peak_names.update(corrected_amps.keys())
+                    
+                    # Sort peak names naturally (AMP1, AMP2, AMP3, ...)
+                    all_corrected_peak_names = sorted(list(all_corrected_peak_names), 
+                                                     key=lambda x: int(x.replace('AMP', '')) if x.startswith('AMP') and x[3:].isdigit() else float('inf'))
+                    
+                    # Initialize columns for each corrected peak
+                    for peak_name in all_corrected_peak_names:
+                        corrected_data[f'{peak_name}_Corrected'] = []
+                    
+                    # Fill the corrected data
+                    for rel_path, result in batch_results['results'].items():
+                        corrected_data['Filename'].append(rel_path)
+                        
+                        if rel_path in files_with_corrections:
+                            corrected_amps = files_with_corrections[rel_path]
+                            for peak_name in all_corrected_peak_names:
+                                if (peak_name in corrected_amps and 
+                                    len(corrected_amps[peak_name]) > 0):
+                                    # Use the mean corrected amplitude for each peak
+                                    corrected_data[f'{peak_name}_Corrected'].append(np.mean(corrected_amps[peak_name]))
+                                else:
+                                    corrected_data[f'{peak_name}_Corrected'].append(np.nan)
+                        else:
+                            # File didn't have corrected amplitudes
+                            for peak_name in all_corrected_peak_names:
+                                corrected_data[f'{peak_name}_Corrected'].append(np.nan)
+                    
+                    # Create and save the corrected DataFrame
+                    corrected_df = pd.DataFrame(corrected_data)
+                    
+                    with pd.ExcelWriter(corrected_results_path, engine='openpyxl') as writer:
+                        # Main sheet with filename and corrected amplitude means
+                        corrected_df.to_excel(writer, sheet_name='Corrected_Amplitudes', index=False)
+                        
+                        # Detailed sheet with all individual corrected measurements
+                        detailed_corrected_data = {}
+                        detailed_corrected_data['Filename'] = []
+                        detailed_corrected_data['Trace_Index'] = []
+                        
+                        # Initialize columns for each corrected peak
+                        for peak_name in all_corrected_peak_names:
+                            detailed_corrected_data[f'{peak_name}_Corrected'] = []
+                        
+                        # Fill detailed corrected data
+                        for rel_path, result in batch_results['results'].items():
+                            if (rel_path in files_with_corrections and 
+                                len(result['tagged_traces']) > 0):
+                                corrected_amps = files_with_corrections[rel_path]
+                                num_traces = len(result['tagged_traces'])
+                                
+                                for i in range(num_traces):
+                                    detailed_corrected_data['Filename'].append(rel_path)
+                                    detailed_corrected_data['Trace_Index'].append(
+                                        result['tagged_traces'][i] if i < len(result['tagged_traces']) else np.nan)
+                                    
+                                    for peak_name in all_corrected_peak_names:
+                                        if (peak_name in corrected_amps and 
+                                            i < len(corrected_amps[peak_name])):
+                                            detailed_corrected_data[f'{peak_name}_Corrected'].append(
+                                                corrected_amps[peak_name][i])
+                                        else:
+                                            detailed_corrected_data[f'{peak_name}_Corrected'].append(np.nan)
+                        
+                        if detailed_corrected_data['Filename']:  # Only if we have data
+                            detailed_corrected_df = pd.DataFrame(detailed_corrected_data)
+                            detailed_corrected_df.to_excel(writer, sheet_name='All_Corrected_Individual', index=False)
+                        
+                        # Statistics for corrected amplitudes
+                        if len(corrected_df) > 1:
+                            corrected_stats_data = {}
+                            corrected_stats_data['Peak'] = []
+                            corrected_stats_data['Mean_Corrected'] = []
+                            corrected_stats_data['Std_Corrected'] = []
+                            corrected_stats_data['Min_Corrected'] = []
+                            corrected_stats_data['Max_Corrected'] = []
+                            corrected_stats_data['Files_With_Corrected_Data'] = []
+                            
+                            for peak_name in all_corrected_peak_names:
+                                col_name = f'{peak_name}_Corrected'
+                                if col_name in corrected_df.columns:
+                                    peak_values = corrected_df[col_name].dropna()
+                                    if len(peak_values) > 0:
+                                        corrected_stats_data['Peak'].append(peak_name)
+                                        corrected_stats_data['Mean_Corrected'].append(np.mean(peak_values))
+                                        corrected_stats_data['Std_Corrected'].append(np.std(peak_values))
+                                        corrected_stats_data['Min_Corrected'].append(np.min(peak_values))
+                                        corrected_stats_data['Max_Corrected'].append(np.max(peak_values))
+                                        corrected_stats_data['Files_With_Corrected_Data'].append(len(peak_values))
+                            
+                            if corrected_stats_data['Peak']:
+                                corrected_stats_df = pd.DataFrame(corrected_stats_data)
+                                corrected_stats_df.to_excel(writer, sheet_name='Corrected_Statistics', index=False)
+                        
+                        # Parameters used for correction
+                        correction_params_df = pd.DataFrame([{
+                            'Parameter': 'Correction_Settings',
+                            'Apply_Remove_Residuals': apply_remove_residuals,
+                            'Offset_Points_After_AMP1': offset_points_after_amp1,
+                            'Cursor_End_Fit': cursor_end_fit if cursor_end_fit is not None else cursor_end,
+                            'Files_With_Corrections': len(files_with_corrections),
+                            'Total_Files_Processed': batch_results['files_processed'],
+                            'Correction_Success_Rate': f"{len(files_with_corrections)}/{batch_results['files_processed']} ({100*len(files_with_corrections)/batch_results['files_processed']:.1f}%)" if batch_results['files_processed'] > 0 else "0%"
+                        }])
+                        correction_params_df.to_excel(writer, sheet_name='Correction_Parameters', index=False)
+                    
+                    print(f"✓ Corrected amplitudes file created successfully")
+                    print(f"  Files with corrections: {len(files_with_corrections)}/{batch_results['files_processed']}")
+                    print(f"  Corrected peaks: {', '.join(all_corrected_peak_names)}")
+                    
+                    batch_results['corrected_results_file'] = corrected_results_path
+                    
+                else:
+                    print("\nNo files had corrected amplitudes (remove residuals not applied or failed)")
+                    
+            except Exception as e:
+                print(f"✗ Failed to create corrected amplitudes file: {e}")
             
         except Exception as e:
             print(f"✗ Failed to create summary file: {e}")
@@ -2431,6 +2826,9 @@ def run_example_analysis():
         filter_traces=True,
         filter_low=0.1,
         filter_high=1000,
+        apply_remove_residuals=True,  # Enable remove residuals correction
+        offset_points_after_amp1=10,  # Start fitting 10 points after AMP1
+        cursor_end_fit=0.6,  # Custom end cursor for fitting
         output_prefix="exp_",
         output_suffix="_processed",
         continue_on_error=True,
