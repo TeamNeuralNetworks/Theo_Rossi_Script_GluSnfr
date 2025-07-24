@@ -218,15 +218,44 @@ def load_xls(file_xls):
 ### DEF AVERAGE  ############
 ###############################
 
-def Make_average(REC,TIME,CursorOn):
+def Make_average(REC,TIME,CursorOn,UpdateLastTrace=False):
     global AVERAGE
     global TAGREC
+    global TAG
 
+    TAGREC = []  # Reset TAGREC list
     
-    for i in range(len(REC)):
-        if TAG[i]==1:
-            TAGREC.append(REC[i])
-    AVERAGE = np.mean(TAGREC,axis = 0)
+    if UpdateLastTrace:
+        # Average all tagged traces EXCEPT the last one
+        for i in range(len(REC)-1):  # Exclude the last trace
+            if TAG[i]==1:
+                TAGREC.append(REC[i])
+        
+        if len(TAGREC) > 0:
+            AVERAGE = np.mean(TAGREC,axis = 0)
+            
+            # Replace the last trace with the average
+            REC[-1] = AVERAGE.copy()
+            
+            # Tag the last trace (make it red in display)
+            TAG[-1] = 1
+            
+            print(f"Updated last trace with average of {len(TAGREC)} traces (excluding last trace)")
+        else:
+            print("No tagged traces found to average (excluding last trace)")
+            return
+    else:
+        # Original behavior: average all tagged traces
+        for i in range(len(REC)):
+            if TAG[i]==1:
+                TAGREC.append(REC[i])
+        
+        if len(TAGREC) > 0:
+            AVERAGE = np.mean(TAGREC,axis = 0)
+        else:
+            print("No tagged traces found to average")
+            return
+    
     if CursorOn == True:
         min_avg, _, _, _ = calc_min_in_trace(AVERAGE, startpos[0], endpos[0], 5)
         max_avg, _, _, _ = calc_max_in_trace(AVERAGE, startpos[0], endpos[0], 5)
@@ -238,7 +267,9 @@ def Make_average(REC,TIME,CursorOn):
     plt.ylabel('Signal (Amp)')
     plt.draw()
     
-    if CursorOn == True:
+    if UpdateLastTrace:
+        plt.title('Average computed and last trace updated (Close me)',fontweight="bold", fontsize=12, color="orange")
+    elif CursorOn == True:
         plt.title('Average: min = '+str(min_avg)+'   max = '+str(max_avg)+'    (Close me)',fontweight="bold", fontsize=12, color="g")
     else:
         plt.title('Average (CLOSE ME)')
@@ -702,11 +733,13 @@ def Main_window():
     layout1 = [ [sg.Frame(' Init ',[[sg.Button('Start'),sg.Button('Previous Trace'),sg.Button('Next Trace'),sg.Button('Clear')],
                                      [sg.Button('Superimposed'),sg.Text('Go To (Push start)'), sg.InputText(default_text="0", size=(10, 1))]],relief="ridge", border_width= 5)],
                 [sg.Frame(' Adjust Traces ',[[sg.Button('Leak Subtraction'), sg.Button('Bleaching correction')],
-                                     [sg.Text('Window (ms)'),sg.InputText(default_text="0", size=(10, 1)),sg.InputText(default_text="900", size=(11, 1)),sg.Button('Undo')]],relief="groove", border_width= 5)],
+                                     [sg.Text('Window (ms)'),sg.InputText(default_text="0", size=(10, 1)),sg.InputText(default_text="900", size=(11, 1)),sg.Button('Undo')],
+                                     [sg.Checkbox('show bleaching plots', size=(15, 1), default=False)]],relief="groove", border_width= 5)],
                 [sg.Frame(' Filter Traces ',[[sg.Button('Smooth Traces'),sg.Text('Odd number'), sg.InputText(default_text="19", size=(12, 1))],
                   [sg.Button('Filter'),sg.Text('Band-Pass(Hz)'),sg.InputText(default_text="0.01", size=(10, 1)),sg.InputText(default_text="2000", size=(10, 1))]],relief="groove", border_width= 5)],
                 [sg.Frame(' Select Traces ',[[sg.Button('Tag'), sg.Button('UnTag'), sg.Button('Tag All'), sg.Button('UnTag All'), sg.Button('Save Tags')]],relief="groove", border_width= 5)],
                 [sg.Frame(' Average ',[[sg.Button('Averaged Tagged Traces'),sg.Checkbox('calc on cursors', size=(12, 1), default=False)],
+                                        [sg.Checkbox('update last trace', size=(12, 1), default=False)],
                                         [sg.Button("Save Average"), sg.InputText(default_text="Avg", size=(10, 1))]],relief="groove", border_width= 5)],
                 [sg.Frame(' Cursors and Amplitudes ',[[sg.Button('Select Cursors'),sg.Button('Draw Cursors'),sg.Text('Left/right click')],
                                         [sg.Button('Calculate Amps')]],relief="groove", border_width= 5)],
@@ -768,32 +801,101 @@ def Main_window():
             if event == "Bleaching correction": 
                 xstart = float(values[1])/1000
                 xstop = float(values[2])/1000
+                show_plots = values[3]  # Get checkbox value for showing plots
+                Saved_REC=[]
+                locals().update(Saved_REC)
+                
+                for i in range(len(REC)):
+                    Saved_REC.append(REC[i])
+                
+                # Create figure for bleaching correction visualization only if enabled
+                if show_plots:
+                    fig_bleach = plt.figure(figsize=(12, 8))
+                
+                # Process each trace and show visualization
+                for i in range(len(REC)):
+                    rec = REC[i]
+                    time = TIME[i]
+                    local_tau, local_popt, idxstart, idxstop = Fit_single_trace(rec, time, xstart, xstop)
+                    print(f"Trace {i}: {local_popt}")
+                    
+                    try:
+                        # Show visualization for first few traces (to avoid too many plots) only if enabled
+                        if show_plots and i < min(4, len(REC)):  # Show max 4 traces
+                            ax_bleach = fig_bleach.add_subplot(2, 2, i+1)
+                            
+                            # Plot original trace
+                            ax_bleach.plot(time, rec, 'b-', linewidth=1, alpha=0.8, label='Original trace')
+                            
+                            # Highlight the fitting window
+                            ax_bleach.axvspan(xstart, xstop, alpha=0.2, color='yellow', label='Fit window')
+                            
+                            # Generate fitted exponential curve for the entire trace
+                            fitted_curve = func_mono_exp(time, *local_popt)
+                            ax_bleach.plot(time, fitted_curve, 'r-', linewidth=2, alpha=0.8, label='Fitted exponential')
+                            
+                            # Show the corrected trace (preview)
+                            corrected_preview = rec - fitted_curve
+                            ax_bleach.plot(time, corrected_preview, 'g-', linewidth=1, alpha=0.7, label='Corrected trace')
+                            
+                            # Add zero line for reference
+                            ax_bleach.axhline(0, color='gray', linestyle='--', alpha=0.5)
+                            
+                            ax_bleach.set_xlabel('Time (s)')
+                            ax_bleach.set_ylabel('Signal (Amp)')
+                            ax_bleach.set_title(f'Trace {i} - Bleaching Correction\nTau: {local_popt[2]*1000:.1f} ms')
+                            ax_bleach.legend(fontsize=8)
+                            ax_bleach.grid(True, alpha=0.3)
+                        
+                        # Apply the correction to all traces
+                        for j in range(len(REC[i])):
+                            bleaching = func_mono_exp(TIME[i][j], *local_popt)
+                            REC[i][j] -= bleaching
+                            
+                    except Exception as e:
+                        print(f"Error processing trace {i}: {e}")
+                        pass
+                
+                # Show plots only if enabled
+                if show_plots:
+                    plt.tight_layout()
+                    plt.suptitle('Bleaching Correction - Before/After Comparison', y=0.98, fontweight='bold')
+                    plt.show()
+                    
+                    # Also show a summary plot comparing before/after for the current episode
+                    if 'episode' in locals():
+                        fig_comparison = plt.figure(figsize=(10, 6))
+                        ax_comp = fig_comparison.add_subplot(111)
+                        
+                        # Plot original (saved) trace
+                        if episode < len(Saved_REC):
+                            ax_comp.plot(TIME[episode], Saved_REC[episode], 'b-', linewidth=2, alpha=0.8, label='Before correction')
+                        
+                        # Plot corrected trace
+                        ax_comp.plot(TIME[episode], REC[episode], 'g-', linewidth=2, alpha=0.8, label='After correction')
+                        
+                        # Show fitting window
+                        ax_comp.axvspan(xstart, xstop, alpha=0.2, color='yellow', label='Fit window')
+                        
+                        ax_comp.axhline(0, color='gray', linestyle='--', alpha=0.5)
+                        ax_comp.set_xlabel('Time (s)')
+                        ax_comp.set_ylabel('Signal (Amp)')
+                        ax_comp.set_title(f'Current Episode {episode} - Bleaching Correction Comparison')
+                        ax_comp.legend()
+                        ax_comp.grid(True, alpha=0.3)
+                        plt.tight_layout()
+                        plt.show()
+                else:
+                    print("Bleaching correction applied successfully. Use 'show bleaching plots' checkbox to see visualization.")
+                    
+            if event == "Smooth Traces": 
                 Saved_REC=[]
                 locals().update(Saved_REC)
                 
                 for i in range(len(REC)):
                     Saved_REC.append(REC[i])
                 for i in range(len(REC)):
-                    rec = REC[i]
-                    time = TIME[i]
-                    local_tau, local_popt, idxstart, idxstop = Fit_single_trace(rec, time, xstart,xstop)
-                    print (local_popt)
-                    try:
-                        for j in range(len(REC[i])):
-                            bleaching = func_mono_exp(TIME[i][j], *local_popt)
-                            REC[i][j] -= bleaching
-                    except:
-                        pass
-                    
-            if event == "Smooth Traces": 
-                Saved_REC=[]
-                #locals().update(Saved_REC)
-                
-                for i in range(len(REC)):
-                    Saved_REC.append(REC[i])
-                for i in range(len(REC)):
-                    REC[i][-1] = 0
-                    REC[i] = savgol_filter(np.squeeze(REC[i]),int(values[3]),2)   #int(values[3]), 2) # Filter: window size 19, polynomial order 2   
+                    REC[i] = savgol_filter(np.squeeze(REC[i]),int(values[4]),2)   #int(values[3]), 2) # Filter: window size 19, polynomial order 2   
 
                     
                     # def gauss_kernel(n=9, sigma=2.0):
@@ -925,7 +1027,7 @@ def Main_window():
                 writer.save()
                             
             if event == "Averaged Tagged Traces":
-                Make_average(REC,TIME,values[6])
+                Make_average(REC,TIME,values[6],values[7])
             
             if event == "Save Average":
                 df = pd.DataFrame(AVERAGE, columns=['Average'])
@@ -993,7 +1095,7 @@ def Main_window():
                 locals().update(FitPeaks_dict_tau) 
                 locals().update(FitPeaks_dict_popt)
                 
-                for i in range(int(values[8])):
+                for i in range(int(values[10])):
                     FitPeaks_dict_tau['AMP' + str(i+1)] = []
                     FitPeaks_dict_popt['AMP' + str(i+1)] = []
                  
@@ -1010,8 +1112,8 @@ def Main_window():
 
                         else:
                             pass
-                    Start_for_trains+=float(values[9])/1000
-                    Stop_for_trains+=float(values[9])/1000
+                    Start_for_trains+=float(values[11])/1000
+                    Stop_for_trains+=float(values[11])/1000
     
             
                 df = pd.DataFrame.from_dict(FitPeaks_dict_tau)
@@ -1029,8 +1131,9 @@ def Main_window():
                 FitPeaks_dict_popt = {}
                 locals().update(FitPeaks_dict_tau) 
                 locals().update(FitPeaks_dict_popt)
-                
-                for i in range(int(values[8])):
+                print (values[9])
+                print (values[10])
+                for i in range(int(values[10])):
                     FitPeaks_dict_tau['AMP' + str(i+1)] = []
                     FitPeaks_dict_popt['AMP' + str(i+1)] = []
                  
@@ -1046,8 +1149,8 @@ def Main_window():
                     tau, popt, idxstart, idxstop = Fit_single_trace(REC[episode], TIME[episode],Start_for_trains,Stop_for_trains)
                     FitPeaks_dict_tau[key].append(tau)
                     FitPeaks_dict_popt[key].append(popt) 
-                    Start_for_trains+=float(values[9])/1000
-                    Stop_for_trains+=float(values[9])/1000
+                    Start_for_trains+=float(values[11])/1000
+                    Stop_for_trains+=float(values[11])/1000
                     x=TIME[episode][idxstart:idxstop]
                     x2=np.array(np.squeeze(x))
                     ax_fit.plot(x2, func_mono_exp(x2, *popt), color = 'black', alpha = 1, lw = '3')
@@ -1068,14 +1171,16 @@ def Main_window():
                 amp_dict_corr = {}
                 print ('Episode', episode)
                 locals().update(amp_dict_corr)
-                for i in range(int(values[8])):
+                for i in range(int(values[10])):
                     amp_dict_corr['AMP' + str(i+1)] = []
                      
                 for key in amp_dict_corr.keys():
                     if key == 'AMP1':
+                        print(key)
                         amp_dict_corr[key].append(amp_dict[key][episode])
                         print ('AMP1 =', amp_dict[key][episode])
                     else:
+                        print('A')
                         key_for_residual='AMP' + str(int(key[3:])-1)
                         index_peak_key=amp_dict_idx[key][episode]
                         residual = func_mono_exp(float(TIME[episode][index_peak_key]), *FitPeaks_dict_popt[key_for_residual][0])
@@ -1092,7 +1197,7 @@ def Main_window():
             if event == 'Remove all residuals':
                 amp_dict_corr = {}
                 locals().update(amp_dict_corr)  
-                for i in range(int(values[8])):
+                for i in range(int(values[10])):
                     amp_dict_corr['AMP' + str(i+1)] = []
                
                 
@@ -1152,7 +1257,7 @@ if __name__ == '__main__' :
     import seaborn as sns
     
     
-    savedir = r'C:\Anthime.PERROT\1_Thèse\1_Manip\5_Glusnf_Théo\2_Revision\Longue_fibre\241212_theo_9\fibre_3\Excel_limited_15\results'
+    savedir = r'C:\Anthime.PERROT\1_Thèse\1_Manip\5_Glusnf_Théo\2_Revision\All_boutons\All_Théo\Interpolation_PEAK_ALL\SynpatiP'
 
     
           
@@ -1220,6 +1325,7 @@ def save_analysis_results(output_name, filename, amp_dict, amp_dict_idx, amp_dic
                          TAG, REC, TIME, sampling, startpos, endpos, 
                          tag_mode, find_minimum, span_for_peaks, isi_ms, peak_number,
                          smooth_traces, smooth_window, filter_traces, filter_low, filter_high,
+                         bleaching_correction, bleaching_window_start, bleaching_window_end,
                          leak_subtraction, leak_window_start, leak_window_end):
     """
     Save all analysis results to Excel file with multiple sheets
@@ -1288,7 +1394,8 @@ def save_analysis_results(output_name, filename, amp_dict, amp_dict_idx, amp_dic
                     'Cursor_Start_s', 'Cursor_End_s', 'Find_Minimum', 'Span_For_Peaks', 
                     'ISI_ms', 'Peak_Number', 'Sampling_Rate_ms',
                     'Smooth_Traces', 'Smooth_Window', 'Filter_Traces', 'Filter_Low_Hz', 
-                    'Filter_High_Hz', 'Leak_Subtraction', 'Leak_Window_Start_ms', 
+                    'Filter_High_Hz', 'Bleaching_Correction', 'Bleaching_Window_Start_ms',
+                    'Bleaching_Window_End_ms', 'Leak_Subtraction', 'Leak_Window_Start_ms', 
                     'Leak_Window_End_ms'
                 ],
                 'Value': [
@@ -1298,8 +1405,9 @@ def save_analysis_results(output_name, filename, amp_dict, amp_dict_idx, amp_dic
                     startpos[0], endpos[0], find_minimum, span_for_peaks, 
                     isi_ms, peak_number, sampling,
                     smooth_traces, smooth_window, filter_traces,
-                    filter_low, filter_high, leak_subtraction,
-                    leak_window_start, leak_window_end
+                    filter_low, filter_high, bleaching_correction,
+                    bleaching_window_start, bleaching_window_end,
+                    leak_subtraction, leak_window_start, leak_window_end
                 ]
             }
             df_params = pd.DataFrame(params_data)
@@ -1401,6 +1509,9 @@ def analyze_file_no_gui(filename,
                        filter_traces=False,
                        filter_low=0.01,
                        filter_high=2000,
+                       bleaching_correction=False,
+                       bleaching_window_start=0,
+                       bleaching_window_end=900,
                        leak_subtraction=True,
                        leak_window_start=0,
                        leak_window_end=900,
@@ -1441,6 +1552,10 @@ def analyze_file_no_gui(filename,
         Apply band-pass filter
     filter_low, filter_high : float
         Filter frequencies in Hz
+    bleaching_correction : bool
+        Apply bleaching correction
+    bleaching_window_start, bleaching_window_end : float
+        Bleaching correction window in ms
     leak_subtraction : bool
         Apply leak subtraction
     leak_window_start, leak_window_end : float
@@ -1510,6 +1625,31 @@ def analyze_file_no_gui(filename,
         for i in range(len(REC)):
             REC[i] = filter_signal(REC[i], 8, 1000*round(float(1/sampling)), 
                                  filter_low, filter_high, axis=0)
+    
+    # Apply bleaching correction BEFORE leak subtraction
+    if bleaching_correction:
+        print(f"Applying bleaching correction from {bleaching_window_start} to {bleaching_window_end} ms")
+        xstart = bleaching_window_start / 1000  # Convert to seconds
+        xstop = bleaching_window_end / 1000     # Convert to seconds
+        
+        for i in range(len(REC)):
+            rec = REC[i].copy()
+            time = TIME[i]
+            
+            try:
+                local_tau, local_popt, idxstart, idxstop = Fit_single_trace(rec, time, xstart, xstop)
+                
+                if local_popt is not None and not np.any(np.isnan(local_popt)):
+                    # Apply the correction
+                    for j in range(len(REC[i])):
+                        bleaching = func_mono_exp(TIME[i][j], *local_popt)
+                        REC[i][j] -= bleaching
+                    print(f"  Trace {i}: tau = {local_popt[2]*1000:.1f} ms")
+                else:
+                    print(f"  Trace {i}: Bleaching correction failed, skipping")
+                    
+            except Exception as e:
+                print(f"  Trace {i}: Bleaching correction error: {e}")
     
     if leak_subtraction:
         print(f"Applying leak subtraction from {leak_window_start} to {leak_window_end} ms")
@@ -1770,6 +1910,7 @@ def analyze_file_no_gui(filename,
             TAG, REC, TIME, sampling, startpos, endpos,
             tag_mode, find_minimum, span_for_peaks, isi_ms, peak_number,
             smooth_traces, smooth_window, filter_traces, filter_low, filter_high,
+            bleaching_correction, bleaching_window_start, bleaching_window_end,
             leak_subtraction, leak_window_start, leak_window_end
         )
         
@@ -1802,20 +1943,23 @@ def analyze_batch_no_gui(folder_path,
                         # All the same parameters as analyze_file_no_gui
                         tag_mode='last',
                         tag_range=None,
-                        cursor_start=0.99,
-                        cursor_end=1.030,
+                        cursor_start=0.49,
+                        cursor_end=0.530,
                         find_minimum=False,
-                        span_for_peaks=1,
+                        span_for_peaks=3,
                         isi_ms=50,
                         peak_number=10,
-                        smooth_traces=True,
+                        smooth_traces=False,
                         smooth_window=9,
                         filter_traces=False,
                         filter_low=0.01,
                         filter_high=2000,
+                        bleaching_correction=False,
+                        bleaching_window_start=0,
+                        bleaching_window_end=900,
                         leak_subtraction=True,
                         leak_window_start=0,
-                        leak_window_end=900,
+                        leak_window_end=400,
                         save_results=True,
                         output_prefix="",  # Prefix to add to all output names
                         output_suffix="_AMP",  # Suffix to add to all output names
@@ -1933,6 +2077,9 @@ def analyze_batch_no_gui(folder_path,
                 filter_traces=filter_traces,
                 filter_low=filter_low,
                 filter_high=filter_high,
+                bleaching_correction=bleaching_correction,
+                bleaching_window_start=bleaching_window_start,
+                bleaching_window_end=bleaching_window_end,
                 leak_subtraction=leak_subtraction,
                 leak_window_start=leak_window_start,
                 leak_window_end=leak_window_end,
