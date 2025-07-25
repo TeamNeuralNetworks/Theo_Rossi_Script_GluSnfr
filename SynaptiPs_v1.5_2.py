@@ -1295,7 +1295,7 @@ if __name__ == '__main__' :
     import seaborn as sns
     
     
-    savedir = r'C:\Anthime.PERROT\1_Thèse\1_Manip\5_Glusnf_Théo\2_Revision\All_boutons\All_Théo\Interpolation_PEAK_ALL\SynpatiP'
+    savedir = r'C:\Anthime.PERROT\1_Thèse\1_Manip\5_Glusnf_Théo\2_Revision\All_boutons\All_Théo\subset_for_test\SynaptiP'
 
     
           
@@ -1850,10 +1850,30 @@ def analyze_file_no_gui(filename,
             for trace_pos, trace_idx in enumerate(tagged_indices):
                 if trace_pos < len(amp_dict[key]):
                     try:
+                        # Calculate fitting window based on peak position + offset
+                        if key == 'AMP1' and trace_pos < len(amp_dict_idx['AMP1']):
+                            # For AMP1, use the actual AMP1 position + offset for fitting start
+                            amp1_idx = amp_dict_idx['AMP1'][trace_pos]
+                            cursor_start_fit_idx = amp1_idx + offset_points_after_amp1
+                            
+                            # Make sure we don't go beyond the trace
+                            if cursor_start_fit_idx >= len(TIME[trace_idx]):
+                                cursor_start_fit_idx = len(TIME[trace_idx]) - 1
+                            
+                            cursor_start_fit = TIME[trace_idx][cursor_start_fit_idx]
+                            cursor_end_fit_value = cursor_end_fit if cursor_end_fit is not None else cursor_end
+                        else:
+                            # For AMP2, AMP3, etc., use the standard fitting windows
+                            cursor_start_fit = Start_for_trains
+                            cursor_end_fit_value = Stop_for_trains
+                        
                         local_tau, local_popt, idxstart, idxstop = Fit_single_trace(
-                            REC[trace_idx], TIME[trace_idx], Start_for_trains, Stop_for_trains)
+                            REC[trace_idx], TIME[trace_idx], cursor_start_fit, cursor_end_fit_value)
                         FitPeaks_dict_tau[key].append(local_tau)
                         FitPeaks_dict_popt[key].append(local_popt)
+                        
+                        print(f"  {key} trace {trace_idx}: fit from {cursor_start_fit:.4f}s to {cursor_end_fit_value:.4f}s, τ={local_tau*1000:.1f}ms")
+                        
                     except Exception as e:
                         print(f"  Fitting failed for {key}, trace {trace_idx}: {e}")
                         FitPeaks_dict_tau[key].append(np.nan)
