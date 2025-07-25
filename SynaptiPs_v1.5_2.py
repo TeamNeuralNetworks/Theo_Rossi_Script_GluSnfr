@@ -12,7 +12,7 @@ Created on Thu Jan 14 00:01:39 2021
 ###############################
 
 def calculate_fitting_window(peak_name, peak_idx_in_trace, amp_dict_idx, TIME, trace_idx, 
-                            offset_points_after_amp1, cursor_end_fit, cursor_end):
+                            offset_points_after_amp1, cursor_end_fit, cursor_end, isi_ms=50):
     """
     Calculate the actual fitting window used for a given peak
     This matches the logic used in the fitting code
@@ -40,12 +40,14 @@ def calculate_fitting_window(peak_name, peak_idx_in_trace, amp_dict_idx, TIME, t
             
             cursor_start_fit = TIME[trace_idx][cursor_start_fit_idx]
             
-            # For AMP2+: extend the fitting window if needed
-            if cursor_end_fit is not None:
-                # Use the original cursor_end_fit but extend if the start is beyond it
-                cursor_end_fit_value = max(cursor_end_fit, cursor_start_fit + 0.05)  # At least 50ms of fitting window
-            else:
-                cursor_end_fit_value = cursor_end
+            # For AMP2+: calculate end based on the ORIGINAL cursor positions shifted by ISI
+            peak_number_int = int(peak_name.replace('AMP', ''))
+            # Calculate how many ISI intervals we are from AMP1
+            isi_offset = (peak_number_int - 1) * (isi_ms / 1000)
+            
+            # The end for this peak should be the original cursor_end shifted by the ISI
+            original_cursor_end = cursor_end_fit if cursor_end_fit is not None else cursor_end
+            cursor_end_fit_value = original_cursor_end + isi_offset
             
             # Make sure we don't go beyond the trace end
             max_time = TIME[trace_idx][-1]
@@ -689,7 +691,8 @@ def Calculate_Amps():
                                         peak_name, trace_idx, amp_dict_idx, TIME, real_trace_idx,
                                         1,  # offset_points_after_amp1 - using 1 as default for visualization
                                         temp_end,  # cursor_end_fit
-                                        temp_end   # cursor_end
+                                        temp_end,  # cursor_end
+                                        float(values3[1])  # isi_ms
                                     )
                                     # Show fit window with a lighter shade and dashed border
                                     ax_train.axvspan(fit_start, fit_end, alpha=0.05, 
@@ -1944,12 +1947,14 @@ def analyze_file_no_gui(filename,
                             
                             cursor_start_fit = TIME[trace_idx][cursor_start_fit_idx]
                             
-                            # For AMP2+: extend the fitting window if needed
-                            if cursor_end_fit is not None:
-                                # Use the original cursor_end_fit but extend if the start is beyond it
-                                cursor_end_fit_value = max(cursor_end_fit, cursor_start_fit + 0.05)  # At least 50ms of fitting window
-                            else:
-                                cursor_end_fit_value = cursor_end
+                            # For AMP2+: calculate end based on the ORIGINAL cursor positions shifted by ISI
+                            peak_number_int = int(key.replace('AMP', ''))
+                            # Calculate how many ISI intervals we are from AMP1
+                            isi_offset = (peak_number_int - 1) * (isi_ms / 1000)
+                            
+                            # The end for this peak should be the original cursor_end shifted by the ISI
+                            original_cursor_end = cursor_end_fit if cursor_end_fit is not None else cursor_end
+                            cursor_end_fit_value = original_cursor_end + isi_offset
                             
                             # Make sure we don't go beyond the trace end
                             max_time = TIME[trace_idx][-1]
@@ -2258,12 +2263,14 @@ def analyze_file_no_gui(filename,
                                     
                                     fit_start_time = TIME[trace_idx][cursor_start_fit_idx]
                                     
-                                    # For AMP2+: extend the fitting window if needed (same logic as in fitting)
-                                    if cursor_end_fit is not None:
-                                        # Use the original cursor_end_fit but extend if the start is beyond it
-                                        fit_end_time = max(cursor_end_fit, fit_start_time + 0.05)  # At least 50ms of fitting window
-                                    else:
-                                        fit_end_time = cursor_end
+                                    # For AMP2+: calculate end based on the ORIGINAL cursor positions shifted by ISI
+                                    peak_number_int = int(key.replace('AMP', ''))
+                                    # Calculate how many ISI intervals we are from AMP1
+                                    isi_offset = (peak_number_int - 1) * (isi_ms / 1000)
+                                    
+                                    # The end for this peak should be the original cursor_end shifted by the ISI
+                                    original_cursor_end = cursor_end_fit if cursor_end_fit is not None else cursor_end
+                                    fit_end_time = original_cursor_end + isi_offset
                                     
                                     # Make sure we don't go beyond the trace end
                                     max_time = TIME[trace_idx][-1]
