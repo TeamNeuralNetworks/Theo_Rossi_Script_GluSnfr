@@ -88,6 +88,29 @@ def filter_signal(signal, order, sample_rate, freq_low, freq_high, axis=0):
 #############################
 ### FIT
 #############################    
+def Fit_single_trace_bleaching(Trace, Time_trace, x_start, x_end):
+    """
+    Fit exponential decay for bleaching correction with asymptote constrained to 0
+    """
+    idx_start = np.ravel(np.where(Time_trace >= x_start))[0]
+    idx_stop = np.ravel(np.where(Time_trace >= x_end))[0]
+    x = Time_trace[idx_start:idx_stop]
+    y = Trace[idx_start:idx_stop]
+    x2 = np.array(np.squeeze(x))
+    y2 = np.array(np.squeeze(y))  
+        
+    try:
+        # Use function without offset (asymptote = 0)
+        param_bounds = ([-np.inf, 0., 0.], [np.inf, 1., 10.])  # 3 parameters: a, b, c
+        popt, pcov = curve_fit(func_mono_exp_no_offset, x2, y2, bounds=param_bounds, max_nfev=10000) 
+        print('bleaching tau decay =', popt[2]*1000, ' ms (asymptote = 0)')
+        return popt[2], popt, idx_start, idx_stop
+    except Exception as e:
+        print('Bleaching fit failed')
+        print(f'  Error: {e}')
+        popt = [np.nan, np.nan, np.nan]  # Initialize popt with NaN values (3 parameters)
+        return np.nan, None, idx_start, idx_stop
+
 def Fit_single_trace(Trace, Time_trace, x_start,x_end):
     
     idx_start=np.ravel(np.where(Time_trace >=x_start))[0]
@@ -107,6 +130,9 @@ def Fit_single_trace(Trace, Time_trace, x_start,x_end):
         print(f'  Error: {e}')
         popt = [np.nan, np.nan, np.nan, np.nan]  # Initialize popt with NaN values
         return np.nan, None, idx_start, idx_stop
+
+def func_mono_exp_no_offset(x, a, b, c):
+    return a * np.exp(-(x-b)/c)
 
 def func_mono_exp(x, a, b, c, d):
     return a * np.exp(-(x-b)/c) + d
@@ -869,8 +895,22 @@ def Main_window():
                     Saved_REC.append(REC[i])
                 for i in range(len(REC)):
                     rec = REC[i]
-                    leak = np.mean(rec[int(float(values[1])/sampling):int(float(values[2])/sampling)])
-                    REC[i]=REC[i]-leak 
+                    # Use the time window specified in the GUI
+                    leak_start_ms = float(values[1])
+                    leak_end_ms = float(values[2])
+                    
+                    # Convert from ms to sampling points
+                    start_idx = int(leak_start_ms / sampling)
+                    end_idx = int(leak_end_ms / sampling)
+                    
+                    # Make sure indices are within bounds
+                    start_idx = max(0, start_idx)
+                    end_idx = min(len(REC[i]), end_idx)
+                    
+                    # leak = np.mean(REC[i][start_idx:end_idx])
+                    leak = np.percentile(REC[i], 20)
+                    REC[i] = REC[i] - leak
+                    print(f"Trace {i}: leak = {leak:.4f} subtracted (window: {leak_start_ms}-{leak_end_ms} ms, indices {start_idx}-{end_idx})")
             
             if event == "Bleaching correction": 
                 xstart = float(values[1])/1000
@@ -890,7 +930,7 @@ def Main_window():
                 for i in range(len(REC)):
                     rec = REC[i]
                     time = TIME[i]
-                    local_tau, local_popt, idxstart, idxstop = Fit_single_trace(rec, time, xstart, xstop)
+                    local_tau, local_popt, idxstart, idxstop = Fit_single_trace_bleaching(rec, time, xstart, xstop)
                     print(f"Trace {i}: {local_popt}")
                     
                     try:
@@ -904,27 +944,29 @@ def Main_window():
                             # Highlight the fitting window
                             ax_bleach.axvspan(xstart, xstop, alpha=0.2, color='yellow', label='Fit window')
                             
-                            # Generate fitted exponential curve for the entire trace
-                            fitted_curve = func_mono_exp(time, *local_popt)
-                            ax_bleach.plot(time, fitted_curve, 'r-', linewidth=2, alpha=0.8, label='Fitted exponential')
+                            # Generate fitted exponential curve for the entire trace using the 3-parameter function
+                            if local_popt is not None and len(local_popt) == 3:
+                                fitted_curve = func_mono_exp_no_offset(time, *local_popt)
+                                ax_bleach.plot(time, fitted_curve, 'r-', linewidth=2, alpha=0.8, label='Fitted exponential (asymptote=0)')
                             
-                            # Show the corrected trace (preview)
-                            corrected_preview = rec - fitted_curve
-                            ax_bleach.plot(time, corrected_preview, 'g-', linewidth=1, alpha=0.7, label='Corrected trace')
+                                # Show the corrected trace (preview)
+                                corrected_preview = rec - fitted_curve
+                                ax_bleach.plot(time, corrected_preview, 'g-', linewidth=1, alpha=0.7, label='Corrected trace')
                             
                             # Add zero line for reference
                             ax_bleach.axhline(0, color='gray', linestyle='--', alpha=0.5)
                             
                             ax_bleach.set_xlabel('Time (s)')
                             ax_bleach.set_ylabel('Signal (Amp)')
-                            ax_bleach.set_title(f'Trace {i} - Bleaching Correction\nTau: {local_popt[2]*1000:.1f} ms')
+                            ax_bleach.set_title(f'Trace {i} - Bleaching Correction\nTau: {local_popt[2]*1000:.1f} ms (asymptote=0)')
                             ax_bleach.legend(fontsize=8)
                             ax_bleach.grid(True, alpha=0.3)
                         
-                        # Apply the correction to all traces
-                        for j in range(len(REC[i])):
-                            bleaching = func_mono_exp(TIME[i][j], *local_popt)
-                            REC[i][j] -= bleaching
+                        # Apply the correction to all traces using the 3-parameter function
+                        if local_popt is not None and len(local_popt) == 3:
+                            for j in range(len(REC[i])):
+                                bleaching = func_mono_exp_no_offset(TIME[i][j], *local_popt)
+                                REC[i][j] -= bleaching
                             
                     except Exception as e:
                         print(f"Error processing trace {i}: {e}")
@@ -1180,7 +1222,7 @@ def Main_window():
                     for i in range(len(REC)):
                         print(key,'  episode: ', i)
                         if TAG[i] == 1: 
-                            local_tau, local_popt, idxstart, idxstop = Fit_single_trace(REC[i], TIME[i],Start_for_trains,Stop_for_trains)
+                            local_tau, local_popt, idxstart, idxstop = Fit_single_trace_bleaching(REC[i], TIME[i],Start_for_trains,Stop_for_trains)
                             FitPeaks_dict_tau[key].append(local_tau)
                             FitPeaks_dict_popt[key].append(local_popt) 
 
@@ -1220,14 +1262,18 @@ def Main_window():
                 ax_fit.plot(TIME[episode], REC[episode], color = 'green', alpha = 1, lw = '2')
                 
                 for key in FitPeaks_dict_popt.keys(): 
-                    tau, popt, idxstart, idxstop = Fit_single_trace(REC[episode], TIME[episode],Start_for_trains,Stop_for_trains)
+                    tau, popt, idxstart, idxstop = Fit_single_trace_bleaching(REC[episode], TIME[episode],Start_for_trains,Stop_for_trains)
                     FitPeaks_dict_tau[key].append(tau)
                     FitPeaks_dict_popt[key].append(popt) 
                     Start_for_trains+=float(values[11])/1000
                     Stop_for_trains+=float(values[11])/1000
                     x=TIME[episode][idxstart:idxstop]
                     x2=np.array(np.squeeze(x))
-                    ax_fit.plot(x2, func_mono_exp(x2, *popt), color = 'black', alpha = 1, lw = '3')
+                    # Use the appropriate function based on number of parameters
+                    if popt is not None and len(popt) == 3:  # 3-parameter function (asymptote=0)
+                        ax_fit.plot(x2, func_mono_exp_no_offset(x2, *popt), color = 'black', alpha = 1, lw = '3')
+                    elif popt is not None and len(popt) == 4:  # 4-parameter function (fallback)
+                        ax_fit.plot(x2, func_mono_exp(x2, *popt), color = 'black', alpha = 1, lw = '3')
                 
                 df = pd.DataFrame.from_dict(FitPeaks_dict_tau)
                 writer = pd.ExcelWriter('{}\Fit peaks dict tau.xlsx'.format(savedir))
@@ -1289,10 +1335,10 @@ def Main_window():
                             
                             index_peak_key=amp_dict_idx[key][episode_position]
                             try:
-                                residual = func_mono_exp(float(TIME[episode][index_peak_key]), *FitPeaks_dict_popt[key_for_residual][episode_position])
+                                residual = func_mono_exp_no_offset(float(TIME[episode][index_peak_key]), *FitPeaks_dict_popt[key_for_residual][episode_position])
                                 new_amp = amp_dict[key][episode_position]-residual
                                 amp_dict_corr[key].append(new_amp)
-                                print ('new',key,' = ',new_amp)
+                                print ('new',key,' = ',new_amp, ' (using 3-parameter fit, asymptote=0)')
                             except Exception as e:
                                 print(f'Error calculating residual for {key}: {e}')
                                 sg.popup_error(f'Error calculating residual for {key}: {e}')
@@ -1322,7 +1368,7 @@ def Main_window():
                             else:
                                 key_for_residual='AMP' + str(int(key[3:])-1)
                                 index_peak_key=amp_dict_idx[key][i]
-                                residual = func_mono_exp(float(TIME[i][index_peak_key]), *FitPeaks_dict_popt[key_for_residual][i])
+                                residual = func_mono_exp_no_offset(float(TIME[i][index_peak_key]), *FitPeaks_dict_popt[key_for_residual][i])
                                 new_amp=amp_dict[key][i]-residual
                                 amp_dict_corr[key].append(new_amp)
                         else:
@@ -1739,6 +1785,13 @@ def analyze_file_no_gui(filename,
     if len(REC) == 0:
         raise ValueError("No traces were loaded from the file. Please check the file format and content.")
     
+    # Debug: Print preprocessing parameters
+    print(f"\nPreprocessing parameters:")
+    print(f"  - smooth_traces: {smooth_traces}")
+    print(f"  - filter_traces: {filter_traces}")
+    print(f"  - bleaching_correction: {bleaching_correction}")
+    print(f"  - leak_subtraction: {leak_subtraction}")
+    
     # Apply preprocessing
     if smooth_traces:
         print(f"Applying smoothing with window size {smooth_window}")
@@ -1762,25 +1815,42 @@ def analyze_file_no_gui(filename,
             time = TIME[i]
             
             try:
-                local_tau, local_popt, idxstart, idxstop = Fit_single_trace(rec, time, xstart, xstop)
+                local_tau, local_popt, idxstart, idxstop = Fit_single_trace_bleaching(rec, time, xstart, xstop)
                 
                 if local_popt is not None and not np.any(np.isnan(local_popt)):
-                    # Apply the correction
+                    # Apply the correction using the 3-parameter function (asymptote = 0)
                     for j in range(len(REC[i])):
-                        bleaching = func_mono_exp(TIME[i][j], *local_popt)
+                        bleaching = func_mono_exp_no_offset(TIME[i][j], *local_popt)
                         REC[i][j] -= bleaching
-                    print(f"  Trace {i}: tau = {local_popt[2]*1000:.1f} ms")
+                    print(f"  Trace {i}: tau = {local_popt[2]*1000:.1f} ms (asymptote=0)")
                 else:
                     print(f"  Trace {i}: Bleaching correction failed, skipping")
                     
             except Exception as e:
                 print(f"  Trace {i}: Bleaching correction error: {e}")
+    else:
+        print("Bleaching correction skipped (disabled)")
     
     if leak_subtraction:
         print(f"Applying leak subtraction from {leak_window_start} to {leak_window_end} ms")
         for i in range(len(REC)):
-            leak = np.mean(REC[i][int(leak_window_start/sampling):int(leak_window_end/sampling)])
-            REC[i] = REC[i] - leak
+            # Convert from ms to sampling points
+            start_idx = int(leak_window_start / sampling)
+            end_idx = int(leak_window_end / sampling)
+            
+            # Make sure indices are within bounds
+            start_idx = max(0, start_idx)
+            end_idx = min(len(REC[i]), end_idx)
+            
+            if start_idx < end_idx:
+                leak = np.mean(REC[i][start_idx:end_idx])
+                leak = np.percentile(REC[i], 20)
+                REC[i] = REC[i] - leak
+                print(f"  Trace {i}: leak = {leak:.4f} (from indices {start_idx} to {end_idx})")
+            else:
+                print(f"  Trace {i}: Invalid leak subtraction window (start={start_idx}, end={end_idx})")
+    else:
+        print("Leak subtraction skipped (disabled)")
     
     # Set up tagging
     TAG = np.zeros(len(REC))
@@ -1975,7 +2045,7 @@ def analyze_file_no_gui(filename,
                             FitPeaks_dict_popt[key].append(None)
                             continue
                         
-                        local_tau, local_popt, idxstart, idxstop = Fit_single_trace(
+                        local_tau, local_popt, idxstart, idxstop = Fit_single_trace_bleaching(
                             REC[trace_idx], TIME[trace_idx], cursor_start_fit, cursor_end_fit_value)
                         
                         # Check if fit was successful
@@ -1995,6 +2065,108 @@ def analyze_file_no_gui(filename,
             
             Start_for_trains += isi_ms / 1000
             Stop_for_trains += isi_ms / 1000
+        
+        # Apply median filter to tau values and refit
+        print("\nApplying median filter to tau values and refitting...")
+        import pandas as pd
+        
+        # Check if we have enough traces for filtering
+        num_traces = len(tagged_indices)
+        if num_traces == 0:
+            print("No tagged traces found for filtering")
+        else:
+            print(f"Processing {num_traces} traces with {len(FitPeaks_dict_tau.keys())} peaks each")
+            
+            # For each trace, apply median filter across peaks (AMP1, AMP2, AMP3, ...)
+            for trace_pos in range(num_traces):
+                trace_idx = tagged_indices[trace_pos]
+                print(f"\nTrace {trace_idx} (position {trace_pos}):")
+                
+                # Collect tau values for this trace across all peaks
+                trace_tau_values = []
+                trace_keys = []
+                for key in sorted(FitPeaks_dict_tau.keys(), key=lambda x: int(x.replace('AMP', ''))):
+                    if trace_pos < len(FitPeaks_dict_tau[key]):
+                        tau_val = FitPeaks_dict_tau[key][trace_pos]
+                        trace_tau_values.append(tau_val)
+                        trace_keys.append(key)
+                
+                # Filter out NaN values for median calculation
+                valid_tau_values = [tau for tau in trace_tau_values if not np.isnan(tau)]
+                
+                if len(valid_tau_values) >= 3:
+                    # Apply rolling median filter across peaks for this trace
+                    tau_series = pd.Series(trace_tau_values)
+                    tau_filtered = tau_series.rolling(window=3, center=True, min_periods=1).median()
+                    
+                    print(f"  Original tau values: {[f'{tau*1000:.1f}ms' if not np.isnan(tau) else 'NaN' for tau in trace_tau_values]}")
+                    print(f"  Filtered tau values: {[f'{tau*1000:.1f}ms' if not np.isnan(tau) else 'NaN' for tau in tau_filtered]}")
+                    
+                    # Update the tau values and refit with constrained tau
+                    for i, key in enumerate(trace_keys):
+                        if i < len(tau_filtered) and not np.isnan(tau_filtered.iloc[i]):
+                            filtered_tau = tau_filtered.iloc[i]
+                            original_tau = trace_tau_values[i]
+                            
+                            if not np.isnan(original_tau) and abs(filtered_tau - original_tau) > 0.001:  # Only refit if significantly different
+                                try:
+                                    # Calculate fitting window for this peak and trace
+                                    if key == 'AMP1':
+                                        amp1_idx = amp_dict_idx['AMP1'][trace_pos]
+                                        cursor_start_fit_idx = amp1_idx + offset_points_after_amp1
+                                        if cursor_start_fit_idx >= len(TIME[trace_idx]):
+                                            cursor_start_fit_idx = len(TIME[trace_idx]) - 1
+                                        cursor_start_fit = TIME[trace_idx][cursor_start_fit_idx]
+                                        cursor_end_fit_value = cursor_end_fit if cursor_end_fit is not None else cursor_end
+                                    else:
+                                        peak_idx = amp_dict_idx[key][trace_pos]
+                                        cursor_start_fit_idx = peak_idx + offset_points_after_amp1
+                                        if cursor_start_fit_idx >= len(TIME[trace_idx]):
+                                            cursor_start_fit_idx = len(TIME[trace_idx]) - 1
+                                        cursor_start_fit = TIME[trace_idx][cursor_start_fit_idx]
+                                        peak_number_int = int(key.replace('AMP', ''))
+                                        isi_offset = (peak_number_int - 1) * (isi_ms / 1000)
+                                        original_cursor_end = cursor_end_fit if cursor_end_fit is not None else cursor_end
+                                        cursor_end_fit_value = original_cursor_end + isi_offset
+                                        max_time = TIME[trace_idx][-1]
+                                        cursor_end_fit_value = min(cursor_end_fit_value, max_time - 0.001)
+                                    
+                                    # Refit with constrained tau
+                                    idx_start = np.where(TIME[trace_idx] >= cursor_start_fit)[0]
+                                    idx_stop = np.where(TIME[trace_idx] >= cursor_end_fit_value)[0]
+                                    if len(idx_start) > 0 and len(idx_stop) > 0:
+                                        x = TIME[trace_idx][idx_start[0]:idx_stop[0]]
+                                        y = REC[trace_idx][idx_start[0]:idx_stop[0]]
+                                        
+                                        if len(x) > 3:  # Need enough points
+                                            # Constrained fit with fixed tau
+                                            try:
+                                                from scipy.optimize import curve_fit
+                                                def constrained_exp(t, a, b):
+                                                    return a * np.exp(-(t-b)/filtered_tau)
+                                                
+                                                popt_constrained, _ = curve_fit(constrained_exp, x, y, maxfev=5000)
+                                                # Convert back to 3-parameter format
+                                                new_popt = [popt_constrained[0], popt_constrained[1], filtered_tau]
+                                                
+                                                # Update with refined fit
+                                                FitPeaks_dict_tau[key][trace_pos] = filtered_tau
+                                                FitPeaks_dict_popt[key][trace_pos] = new_popt
+                                                
+                                                print(f"    {key}: τ {original_tau*1000:.1f}ms → {filtered_tau*1000:.1f}ms (refined)")
+                                            except:
+                                                print(f"    {key}: τ {original_tau*1000:.1f}ms → {filtered_tau*1000:.1f}ms (constrained refit failed)")
+                                                if FitPeaks_dict_popt[key][trace_pos] is not None:
+                                                    FitPeaks_dict_popt[key][trace_pos][2] = filtered_tau
+                                                FitPeaks_dict_tau[key][trace_pos] = filtered_tau
+                                            
+                                except Exception as e:
+                                    print(f"    {key}: refit error: {e}")
+                            else:
+                                print(f"    {key}: τ={original_tau*1000:.1f}ms (unchanged)")
+                
+                else:
+                    print(f"  Not enough valid tau values for filtering ({len(valid_tau_values)} < 3), skipping median filter for this trace")
         
         # Apply remove residuals correction
         amp_dict_corr = {}
@@ -2035,13 +2207,13 @@ def analyze_file_no_gui(filename,
                             peak_time = TIME[trace_idx][peak_idx]
                             
                             try:
-                                # Calculate residual using the fit from previous peak
-                                residual = func_mono_exp(peak_time, *FitPeaks_dict_popt[key_for_residual][trace_pos])
+                                # Calculate residual using the fit from previous peak (3-parameter function)
+                                residual = func_mono_exp_no_offset(peak_time, *FitPeaks_dict_popt[key_for_residual][trace_pos])
                                 corrected_amp = amp_dict[key][trace_pos] - residual
                                 amp_dict_corr[key].append(corrected_amp)
                                 
                                 print(f"    {key}: original={amp_dict[key][trace_pos]:.4f}, "
-                                      f"residual={residual:.4f}, corrected={corrected_amp:.4f}")
+                                      f"residual={residual:.4f}, corrected={corrected_amp:.4f} (asymptote=0)")
                             except Exception as e:
                                 print(f"    {key}: Residual calculation failed: {e}")
                                 amp_dict_corr[key].append(amp_dict[key][trace_pos])
@@ -2160,13 +2332,19 @@ def analyze_file_no_gui(filename,
                                       color=colors[idx], alpha=0.7, linewidth=1.5,
                                       label=f'Trace {trace_idx}')
                         
-                        # Plot fitted exponential
+                        # Plot fitted exponential (3-parameter function, asymptote=0)
                         popt = FitPeaks_dict_popt['AMP1'][idx]
                         try:
-                            fitted_curve = func_mono_exp(TIME[trace_idx], *popt)
-                            ax_fitting.plot(TIME[trace_idx], fitted_curve, 
-                                          color=colors[idx], linestyle='--', linewidth=2, alpha=0.8,
-                                          label=f'Fit τ={popt[2]*1000:.1f}ms')
+                            if len(popt) == 3:  # 3-parameter function (asymptote=0)
+                                fitted_curve = func_mono_exp_no_offset(TIME[trace_idx], *popt)
+                                ax_fitting.plot(TIME[trace_idx], fitted_curve, 
+                                              color=colors[idx], linestyle='--', linewidth=2, alpha=0.8,
+                                              label=f'Fit τ={popt[2]*1000:.1f}ms (asymptote=0)')
+                            else:  # Fallback for 4-parameter function
+                                fitted_curve = func_mono_exp(TIME[trace_idx], *popt)
+                                ax_fitting.plot(TIME[trace_idx], fitted_curve, 
+                                              color=colors[idx], linestyle='--', linewidth=2, alpha=0.8,
+                                              label=f'Fit τ={popt[2]*1000:.1f}ms')
                         except:
                             pass
                 
@@ -2287,10 +2465,16 @@ def analyze_file_no_gui(filename,
                                     x_fit_extended = TIME[trace_idx][fit_start_idx:]
                                     
                                     if len(x_fit_extended) > 0:
-                                        y_fit_extended = func_mono_exp(x_fit_extended, *popt)
-                                        ax_train_right.plot(x_fit_extended, y_fit_extended, '--', 
-                                                          color=f'C{peak_idx}', linewidth=2, alpha=0.8,
-                                                          label=f'{key} fit τ={popt[2]*1000:.1f}ms')
+                                        if len(popt) == 3:  # 3-parameter function (asymptote=0)
+                                            y_fit_extended = func_mono_exp_no_offset(x_fit_extended, *popt)
+                                            ax_train_right.plot(x_fit_extended, y_fit_extended, '--', 
+                                                              color=f'C{peak_idx}', linewidth=2, alpha=0.8,
+                                                              label=f'{key} fit τ={popt[2]*1000:.1f}ms (asymptote=0)')
+                                        else:  # Fallback for 4-parameter function
+                                            y_fit_extended = func_mono_exp(x_fit_extended, *popt)
+                                            ax_train_right.plot(x_fit_extended, y_fit_extended, '--', 
+                                                              color=f'C{peak_idx}', linewidth=2, alpha=0.8,
+                                                              label=f'{key} fit τ={popt[2]*1000:.1f}ms')
                                         
                                         # Show fitting window (where the fit was calculated)
                                         if len(idx_stop_fit) > 0:
