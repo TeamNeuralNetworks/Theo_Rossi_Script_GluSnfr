@@ -11,6 +11,52 @@ Created on Thu Jan 14 00:01:39 2021
 ## DEF GET COORDINATE CURSORS #
 ###############################
 
+def calculate_fitting_window(peak_name, peak_idx_in_trace, amp_dict_idx, TIME, trace_idx, 
+                            offset_points_after_amp1, cursor_end_fit, cursor_end):
+    """
+    Calculate the actual fitting window used for a given peak
+    This matches the logic used in the fitting code
+    """
+    if peak_name == 'AMP1' and len(amp_dict_idx.get('AMP1', [])) > peak_idx_in_trace:
+        # For AMP1, use the actual AMP1 position + offset for fitting start
+        amp1_idx = amp_dict_idx['AMP1'][peak_idx_in_trace]
+        cursor_start_fit_idx = amp1_idx + offset_points_after_amp1
+        
+        # Make sure we don't go beyond the trace
+        if cursor_start_fit_idx >= len(TIME[trace_idx]):
+            cursor_start_fit_idx = len(TIME[trace_idx]) - 1
+        
+        cursor_start_fit = TIME[trace_idx][cursor_start_fit_idx]
+        cursor_end_fit_value = cursor_end_fit if cursor_end_fit is not None else cursor_end
+    else:
+        # For AMP2, AMP3, etc., use the peak position + offset for fitting start
+        if peak_name in amp_dict_idx and len(amp_dict_idx[peak_name]) > peak_idx_in_trace:
+            peak_idx = amp_dict_idx[peak_name][peak_idx_in_trace]
+            cursor_start_fit_idx = peak_idx + offset_points_after_amp1
+            
+            # Make sure we don't go beyond the trace
+            if cursor_start_fit_idx >= len(TIME[trace_idx]):
+                cursor_start_fit_idx = len(TIME[trace_idx]) - 1
+            
+            cursor_start_fit = TIME[trace_idx][cursor_start_fit_idx]
+            
+            # For AMP2+: extend the fitting window if needed
+            if cursor_end_fit is not None:
+                # Use the original cursor_end_fit but extend if the start is beyond it
+                cursor_end_fit_value = max(cursor_end_fit, cursor_start_fit + 0.05)  # At least 50ms of fitting window
+            else:
+                cursor_end_fit_value = cursor_end
+            
+            # Make sure we don't go beyond the trace end
+            max_time = TIME[trace_idx][-1]
+            cursor_end_fit_value = min(cursor_end_fit_value, max_time - 0.001)  # Leave 1ms margin
+        else:
+            # Fallback if no data
+            cursor_start_fit = cursor_end_fit if cursor_end_fit is not None else cursor_end
+            cursor_end_fit_value = cursor_start_fit + 0.05
+    
+    return cursor_start_fit, cursor_end_fit_value
+
 def on_click(event):
     global startpos, endpos
     if event.button is MouseButton.LEFT:
@@ -54,12 +100,11 @@ def Fit_single_trace(Trace, Time_trace, x_start,x_end):
         popt, pcov = curve_fit(func_mono_exp, x2, y2,bounds=param_bounds, max_nfev = 10000) 
         print ('tau decay =',popt[2]*1000, ' ms' )
         return popt[2], popt, idx_start, idx_stop
-    except:
+    except Exception as e:
         print ('Fit failed')
-        popt[2]= float('nan')
-        popt= float('nan')
-        return popt[2], popt, idx_start, idx_stop
-        pass
+        print(f'  Error: {e}')
+        popt = [np.nan, np.nan, np.nan, np.nan]  # Initialize popt with NaN values
+        return np.nan, None, idx_start, idx_stop
 
 def func_mono_exp(x, a, b, c, d):
     return a * np.exp(-(x-b)/c) + d
@@ -620,13 +665,39 @@ def Calculate_Amps():
                                                 markeredgecolor='black', markeredgewidth=0.5,
                                                 color=f'C{peak_idx}')
                         
-                        # Draw measurement windows
-                        temp_start = startpos[0]
-                        temp_end = endpos[0]
+                        # Draw measurement windows with the same logic as fitting
                         for peak_idx in range(int(values3[2])):
-                            ax_train.axvspan(temp_start, temp_end, alpha=0.1, color=f'C{peak_idx}')
-                            temp_start += float(values3[1])/1000
-                            temp_end += float(values3[1])/1000
+                            peak_name = f'AMP{peak_idx + 1}'
+                            
+                            if peak_idx == 0:  # AMP1 - use original window (measurement window, not fit window)
+                                temp_start = startpos[0]
+                                temp_end = endpos[0]
+                                ax_train.axvspan(temp_start, temp_end, alpha=0.1, color=f'C{peak_idx}', 
+                                               label=f'{peak_name} measure window')
+                            else:  # AMP2+ - show measurement window
+                                temp_start = startpos[0] + (peak_idx * float(values3[1])/1000)
+                                temp_end = endpos[0] + (peak_idx * float(values3[1])/1000)
+                                ax_train.axvspan(temp_start, temp_end, alpha=0.1, color=f'C{peak_idx}',
+                                               label=f'{peak_name} measure window')
+                            
+                            # Also show fitting window if 'remove residuals' would be applied
+                            # This gives a visual indication of where the fit would be calculated
+                            if peak_idx > 0:  # Only for AMP2+, AMP1 fit window is same as measure window
+                                try:
+                                    # Use the helper function to get the actual fit window
+                                    fit_start, fit_end = calculate_fitting_window(
+                                        peak_name, trace_idx, amp_dict_idx, TIME, real_trace_idx,
+                                        1,  # offset_points_after_amp1 - using 1 as default for visualization
+                                        temp_end,  # cursor_end_fit
+                                        temp_end   # cursor_end
+                                    )
+                                    # Show fit window with a lighter shade and dashed border
+                                    ax_train.axvspan(fit_start, fit_end, alpha=0.05, 
+                                                   color=f'C{peak_idx}', linestyle='--', linewidth=1,
+                                                   label=f'{peak_name} fit window')
+                                except:
+                                    # Fallback if calculation fails
+                                    pass
                         
                         ax_train.set_xlabel('Time (s)')
                         ax_train.set_ylabel('Signal (Amp)')
@@ -1863,16 +1934,54 @@ def analyze_file_no_gui(filename,
                             cursor_start_fit = TIME[trace_idx][cursor_start_fit_idx]
                             cursor_end_fit_value = cursor_end_fit if cursor_end_fit is not None else cursor_end
                         else:
-                            # For AMP2, AMP3, etc., use the standard fitting windows
-                            cursor_start_fit = Start_for_trains
-                            cursor_end_fit_value = Stop_for_trains
+                            # For AMP2, AMP3, etc., use the peak position + offset for fitting start
+                            peak_idx = amp_dict_idx[key][trace_pos]
+                            cursor_start_fit_idx = peak_idx + offset_points_after_amp1
+                            
+                            # Make sure we don't go beyond the trace
+                            if cursor_start_fit_idx >= len(TIME[trace_idx]):
+                                cursor_start_fit_idx = len(TIME[trace_idx]) - 1
+                            
+                            cursor_start_fit = TIME[trace_idx][cursor_start_fit_idx]
+                            
+                            # For AMP2+: extend the fitting window if needed
+                            if cursor_end_fit is not None:
+                                # Use the original cursor_end_fit but extend if the start is beyond it
+                                cursor_end_fit_value = max(cursor_end_fit, cursor_start_fit + 0.05)  # At least 50ms of fitting window
+                            else:
+                                cursor_end_fit_value = cursor_end
+                            
+                            # Make sure we don't go beyond the trace end
+                            max_time = TIME[trace_idx][-1]
+                            cursor_end_fit_value = min(cursor_end_fit_value, max_time - 0.001)  # Leave 1ms margin
+                        
+                        # Check if we have enough data points for fitting
+                        if cursor_start_fit >= cursor_end_fit_value:
+                            print(f"  {key} trace {trace_idx}: Skipping - start >= end ({cursor_start_fit:.4f}s >= {cursor_end_fit_value:.4f}s)")
+                            FitPeaks_dict_tau[key].append(np.nan)
+                            FitPeaks_dict_popt[key].append(None)
+                            continue
+                        
+                        # Check minimum fitting window duration
+                        min_fit_duration = 0.01  # 10ms minimum
+                        if (cursor_end_fit_value - cursor_start_fit) < min_fit_duration:
+                            print(f"  {key} trace {trace_idx}: Skipping - window too short ({cursor_end_fit_value - cursor_start_fit:.4f}s < {min_fit_duration}s)")
+                            FitPeaks_dict_tau[key].append(np.nan)
+                            FitPeaks_dict_popt[key].append(None)
+                            continue
                         
                         local_tau, local_popt, idxstart, idxstop = Fit_single_trace(
                             REC[trace_idx], TIME[trace_idx], cursor_start_fit, cursor_end_fit_value)
-                        FitPeaks_dict_tau[key].append(local_tau)
-                        FitPeaks_dict_popt[key].append(local_popt)
                         
-                        print(f"  {key} trace {trace_idx}: fit from {cursor_start_fit:.4f}s to {cursor_end_fit_value:.4f}s, τ={local_tau*1000:.1f}ms")
+                        # Check if fit was successful
+                        if local_popt is not None and not np.isnan(local_tau):
+                            FitPeaks_dict_tau[key].append(local_tau)
+                            FitPeaks_dict_popt[key].append(local_popt)
+                            print(f"  {key} trace {trace_idx}: fit from {cursor_start_fit:.4f}s to {cursor_end_fit_value:.4f}s, τ={local_tau*1000:.1f}ms")
+                        else:
+                            FitPeaks_dict_tau[key].append(np.nan)
+                            FitPeaks_dict_popt[key].append(None)
+                            print(f"  {key} trace {trace_idx}: Fit failed - storing None")
                         
                     except Exception as e:
                         print(f"  Fitting failed for {key}, trace {trace_idx}: {e}")
@@ -2119,9 +2228,6 @@ def analyze_file_no_gui(filename,
                 
                 # Plot fitted exponentials for each peak
                 if 'FitPeaks_dict_popt' in globals() and FitPeaks_dict_popt:
-                    Start_for_trains_plot = startpos[0]
-                    Stop_for_trains_plot = endpos[0]
-                    
                     for peak_idx, key in enumerate(amp_dict.keys()):
                         if (key in FitPeaks_dict_popt and 
                             plot_idx < len(FitPeaks_dict_popt[key]) and
@@ -2129,8 +2235,9 @@ def analyze_file_no_gui(filename,
                             
                             popt = FitPeaks_dict_popt[key][plot_idx]
                             try:
-                                # For AMP1, use the calculated position: AMP1 + offset
+                                # Calculate the correct fitting window for each peak
                                 if key == 'AMP1' and plot_idx < len(amp_dict_idx['AMP1']):
+                                    # For AMP1, use the calculated position: AMP1 + offset
                                     amp1_idx = amp_dict_idx['AMP1'][plot_idx]
                                     cursor_start_fit_idx = amp1_idx + offset_points_after_amp1
                                     
@@ -2141,9 +2248,26 @@ def analyze_file_no_gui(filename,
                                     fit_start_time = TIME[trace_idx][cursor_start_fit_idx]
                                     fit_end_time = cursor_end_fit if cursor_end_fit is not None else cursor_end
                                 else:
-                                    # For other peaks, use the standard window
-                                    fit_start_time = Start_for_trains_plot
-                                    fit_end_time = Stop_for_trains_plot
+                                    # For AMP2, AMP3, etc., use peak position + offset
+                                    peak_idx_val = amp_dict_idx[key][plot_idx]
+                                    cursor_start_fit_idx = peak_idx_val + offset_points_after_amp1
+                                    
+                                    # Make sure we don't go beyond the trace
+                                    if cursor_start_fit_idx >= len(TIME[trace_idx]):
+                                        cursor_start_fit_idx = len(TIME[trace_idx]) - 1
+                                    
+                                    fit_start_time = TIME[trace_idx][cursor_start_fit_idx]
+                                    
+                                    # For AMP2+: extend the fitting window if needed (same logic as in fitting)
+                                    if cursor_end_fit is not None:
+                                        # Use the original cursor_end_fit but extend if the start is beyond it
+                                        fit_end_time = max(cursor_end_fit, fit_start_time + 0.05)  # At least 50ms of fitting window
+                                    else:
+                                        fit_end_time = cursor_end
+                                    
+                                    # Make sure we don't go beyond the trace end
+                                    max_time = TIME[trace_idx][-1]
+                                    fit_end_time = min(fit_end_time, max_time - 0.001)  # Leave 1ms margin
                                 
                                 # Find indices for fitting window display
                                 idx_start_fit = np.where(TIME[trace_idx] >= fit_start_time)[0]
@@ -2165,13 +2289,15 @@ def analyze_file_no_gui(filename,
                                         if len(idx_stop_fit) > 0:
                                             ax_train_right.axvspan(fit_start_time, fit_end_time, 
                                                                  alpha=0.1, color=f'C{peak_idx}')
+                                            
+                                        # Add vertical line to show start of fitting
+                                        ax_train_right.axvline(fit_start_time, color=f'C{peak_idx}', 
+                                                             linestyle=':', alpha=0.6, linewidth=1)
+                                        
+                                print(f"  Visualization: {key} fit window: {fit_start_time:.4f}s to {fit_end_time:.4f}s")
+                                        
                             except Exception as e:
                                 print(f"Error plotting fit for {key}: {e}")
-                        
-                        # Only increment for non-AMP1 peaks (since AMP1 uses different logic)
-                        if key != 'AMP1':
-                            Start_for_trains_plot += isi_ms / 1000
-                            Stop_for_trains_plot += isi_ms / 1000
                 
                 ax_train_right.set_xlabel('Time (s)')
                 ax_train_right.set_ylabel('Signal (Amp)')
@@ -2248,7 +2374,7 @@ def analyze_batch_no_gui(folder_path,
                         leak_window_start=0,
                         leak_window_end=400,
                         apply_remove_residuals=True,
-                        offset_points_after_amp1=3,  # X points after AMP1 position for cursor_start_Fit
+                        offset_points_after_amp1=1,  # X points after AMP1 position for cursor_start_Fit
                         cursor_end_fit=None,  # End cursor for fitting, if None uses cursor_end
                         save_results=True,
                         output_prefix="",  # Prefix to add to all output names
