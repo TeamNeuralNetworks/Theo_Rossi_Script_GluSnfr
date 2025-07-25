@@ -100,11 +100,21 @@ def Fit_single_trace_bleaching(Trace, Time_trace, x_start, x_end):
     y2 = np.array(np.squeeze(y))  
         
     try:
-        # Use function without offset (asymptote = 0)
-        param_bounds = ([-np.inf, 0., 0.], [np.inf, 1., 10.])  # 3 parameters: a, b, c
+        # Use function without offset (asymptote = 0) with stricter bounds
+        # Parameter bounds: [a, b, c] where a=amplitude, b=offset, c=tau
+        # Tau bounds: 5ms to 1000ms (0.005s to 1.0s)
+        param_bounds = ([-np.inf, 0., 0.005], [np.inf, 1., 1.0])  # Strict tau limits: 5ms to 1000ms
         popt, pcov = curve_fit(func_mono_exp_no_offset, x2, y2, bounds=param_bounds, max_nfev=10000) 
-        print('bleaching tau decay =', popt[2]*1000, ' ms (asymptote = 0)')
-        return popt[2], popt, idx_start, idx_stop
+        
+        # Additional validation of fitted tau
+        fitted_tau = popt[2]
+        if 0.005 <= fitted_tau <= 1.0:  # Double-check tau is reasonable
+            print('bleaching tau decay =', fitted_tau*1000, ' ms (asymptote = 0)')
+            return fitted_tau, popt, idx_start, idx_stop
+        else:
+            print(f'Bleaching fit rejected: τ={fitted_tau*1000:.1f}ms outside valid range (5-1000ms)')
+            return np.nan, None, idx_start, idx_stop
+            
     except Exception as e:
         print('Bleaching fit failed')
         print(f'  Error: {e}')
@@ -1415,7 +1425,7 @@ if __name__ == '__main__' :
     import seaborn as sns
     
     
-    savedir = r'C:\Anthime.PERROT\1_Thèse\1_Manip\5_Glusnf_Théo\2_Revision\All_boutons\All_Théo\subset_for_test\SynaptiP'
+    savedir = r'C:\Anthime.PERROT\1_Thèse\1_Manip\5_Glusnf_Théo\2_Revision\All_boutons\All_Théo\SynaptiP'
 
     
           
@@ -2048,15 +2058,23 @@ def analyze_file_no_gui(filename,
                         local_tau, local_popt, idxstart, idxstop = Fit_single_trace_bleaching(
                             REC[trace_idx], TIME[trace_idx], cursor_start_fit, cursor_end_fit_value)
                         
-                        # Check if fit was successful
-                        if local_popt is not None and not np.isnan(local_tau):
+                        # Check if fit was successful and tau is within reasonable limits
+                        TAU_MIN_CHECK = 0.001  # 1ms minimum
+                        TAU_MAX_CHECK = 1.0    # 1000ms maximum
+                        
+                        if (local_popt is not None and not np.isnan(local_tau) and 
+                            TAU_MIN_CHECK <= local_tau <= TAU_MAX_CHECK):
                             FitPeaks_dict_tau[key].append(local_tau)
                             FitPeaks_dict_popt[key].append(local_popt)
                             print(f"  {key} trace {trace_idx}: fit from {cursor_start_fit:.4f}s to {cursor_end_fit_value:.4f}s, τ={local_tau*1000:.1f}ms")
                         else:
+                            # Reject outlier tau values
+                            if local_popt is not None and not np.isnan(local_tau):
+                                print(f"  {key} trace {trace_idx}: Rejecting outlier τ={local_tau*1000:.1f}ms (outside {TAU_MIN_CHECK*1000:.1f}-{TAU_MAX_CHECK*1000:.1f}ms range)")
+                            else:
+                                print(f"  {key} trace {trace_idx}: Fit failed - storing None")
                             FitPeaks_dict_tau[key].append(np.nan)
                             FitPeaks_dict_popt[key].append(None)
-                            print(f"  {key} trace {trace_idx}: Fit failed - storing None")
                         
                     except Exception as e:
                         print(f"  Fitting failed for {key}, trace {trace_idx}: {e}")
@@ -2070,12 +2088,34 @@ def analyze_file_no_gui(filename,
         print("\nApplying median filter to tau values and refitting...")
         import pandas as pd
         
+        # Define reasonable tau limits (in seconds)
+        TAU_MIN = 0.001  # 1ms minimum
+        TAU_MAX = 0.5    # 500ms maximum (REDUCED from 1000ms to exclude 1000ms outliers)
+        
         # Check if we have enough traces for filtering
         num_traces = len(tagged_indices)
         if num_traces == 0:
             print("No tagged traces found for filtering")
         else:
             print(f"Processing {num_traces} traces with {len(FitPeaks_dict_tau.keys())} peaks each")
+            print(f"Tau limits: {TAU_MIN*1000:.1f}ms to {TAU_MAX*1000:.1f}ms")
+            
+            # First pass: Remove outliers and apply reasonable limits
+            for key in FitPeaks_dict_tau.keys():
+                for trace_pos in range(len(FitPeaks_dict_tau[key])):
+                    tau_val = FitPeaks_dict_tau[key][trace_pos]
+                    
+                    # Check for outliers and apply limits (STRICT: exclude 1000ms values)
+                    if not np.isnan(tau_val):
+                        # Special case: detect and remove 1000ms values (often fitting failures)
+                        if abs(tau_val - 1.0) < 0.001:  # tau_val ≈ 1000ms
+                            print(f"  1000ms outlier detected: {key} trace {trace_pos}: τ={tau_val*1000:.1f}ms → removed")
+                            FitPeaks_dict_tau[key][trace_pos] = np.nan
+                            FitPeaks_dict_popt[key][trace_pos] = None
+                        elif tau_val < TAU_MIN or tau_val > TAU_MAX:
+                            print(f"  Outlier detected: {key} trace {trace_pos}: τ={tau_val*1000:.1f}ms → removed")
+                            FitPeaks_dict_tau[key][trace_pos] = np.nan
+                            FitPeaks_dict_popt[key][trace_pos] = None
             
             # For each trace, apply median filter across peaks (AMP1, AMP2, AMP3, ...)
             for trace_pos in range(num_traces):
@@ -2094,22 +2134,37 @@ def analyze_file_no_gui(filename,
                 # Filter out NaN values for median calculation
                 valid_tau_values = [tau for tau in trace_tau_values if not np.isnan(tau)]
                 
-                if len(valid_tau_values) >= 3:
+                if len(valid_tau_values) >= 2:  # Need at least 2 valid values
                     # Apply rolling median filter across peaks for this trace
                     tau_series = pd.Series(trace_tau_values)
-                    tau_filtered = tau_series.rolling(window=3, center=True, min_periods=1).median()
+                    
+                    # Use different window sizes based on available data
+                    if len(valid_tau_values) >= 3:
+                        tau_filtered = tau_series.rolling(window=5, center=True, min_periods=1).median()
+                    else:
+                        # Use simple median for small datasets
+                        median_val = np.median(valid_tau_values)
+                        tau_filtered = tau_series.fillna(median_val)
                     
                     print(f"  Original tau values: {[f'{tau*1000:.1f}ms' if not np.isnan(tau) else 'NaN' for tau in trace_tau_values]}")
                     print(f"  Filtered tau values: {[f'{tau*1000:.1f}ms' if not np.isnan(tau) else 'NaN' for tau in tau_filtered]}")
                     
-                    # Update the tau values and refit with constrained tau
+                    # Debug: Show the median calculation
+                    median_val = np.median(valid_tau_values) if len(valid_tau_values) > 0 else np.nan
+                    print(f"  >> MEDIAN of valid taus: {median_val*1000:.1f}ms (from {len(valid_tau_values)} valid values)")
+                    
+                    # Update ALL tau values and refit with constrained tau
                     for i, key in enumerate(trace_keys):
-                        if i < len(tau_filtered) and not np.isnan(tau_filtered.iloc[i]):
+                        if i < len(tau_filtered):
                             filtered_tau = tau_filtered.iloc[i]
                             original_tau = trace_tau_values[i]
                             
-                            if not np.isnan(original_tau) and abs(filtered_tau - original_tau) > 0.001:  # Only refit if significantly different
+                            # Apply filtered tau ALWAYS if it's valid (remove the condition about difference)
+                            if not np.isnan(filtered_tau) and TAU_MIN <= filtered_tau <= TAU_MAX:
                                 try:
+                                    # FORCE update to use the filtered tau (ignore original value)
+                                    FitPeaks_dict_tau[key][trace_pos] = filtered_tau
+                                    
                                     # Calculate fitting window for this peak and trace
                                     if key == 'AMP1':
                                         amp1_idx = amp_dict_idx['AMP1'][trace_pos]
@@ -2131,7 +2186,7 @@ def analyze_file_no_gui(filename,
                                         max_time = TIME[trace_idx][-1]
                                         cursor_end_fit_value = min(cursor_end_fit_value, max_time - 0.001)
                                     
-                                    # Refit with constrained tau
+                                    # Always refit with the filtered tau (constrained)
                                     idx_start = np.where(TIME[trace_idx] >= cursor_start_fit)[0]
                                     idx_stop = np.where(TIME[trace_idx] >= cursor_end_fit_value)[0]
                                     if len(idx_start) > 0 and len(idx_stop) > 0:
@@ -2145,28 +2200,70 @@ def analyze_file_no_gui(filename,
                                                 def constrained_exp(t, a, b):
                                                     return a * np.exp(-(t-b)/filtered_tau)
                                                 
-                                                popt_constrained, _ = curve_fit(constrained_exp, x, y, maxfev=5000)
+                                                # Use better initial guesses
+                                                initial_a = np.max(y) - np.min(y)
+                                                initial_b = x[0]
+                                                
+                                                popt_constrained, _ = curve_fit(
+                                                    constrained_exp, x, y, 
+                                                    p0=[initial_a, initial_b],
+                                                    maxfev=10000,
+                                                    bounds=([-np.inf, x[0]-0.1], [np.inf, x[-1]+0.1])
+                                                )
+                                                
                                                 # Convert back to 3-parameter format
                                                 new_popt = [popt_constrained[0], popt_constrained[1], filtered_tau]
                                                 
                                                 # Update with refined fit
-                                                FitPeaks_dict_tau[key][trace_pos] = filtered_tau
                                                 FitPeaks_dict_popt[key][trace_pos] = new_popt
                                                 
-                                                print(f"    {key}: τ {original_tau*1000:.1f}ms → {filtered_tau*1000:.1f}ms (refined)")
-                                            except:
-                                                print(f"    {key}: τ {original_tau*1000:.1f}ms → {filtered_tau*1000:.1f}ms (constrained refit failed)")
+                                                print(f"    {key}: τ {original_tau*1000:.1f}ms → {filtered_tau*1000:.1f}ms (FORCED median filter)")
+                                                
+                                            except Exception as fit_error:
+                                                print(f"    {key}: τ {original_tau*1000:.1f}ms → {filtered_tau*1000:.1f}ms (FORCED median filter - constrained fit failed: {fit_error})")
+                                                # Create a basic fit with the filtered tau
                                                 if FitPeaks_dict_popt[key][trace_pos] is not None:
                                                     FitPeaks_dict_popt[key][trace_pos][2] = filtered_tau
-                                                FitPeaks_dict_tau[key][trace_pos] = filtered_tau
+                                                else:
+                                                    # Create minimal popt with filtered tau
+                                                    FitPeaks_dict_popt[key][trace_pos] = [1.0, cursor_start_fit, filtered_tau]
+                                        else:
+                                            print(f"    {key}: τ {original_tau*1000:.1f}ms → {filtered_tau*1000:.1f}ms (FORCED median filter - not enough points for fitting)")
+                                            if FitPeaks_dict_popt[key][trace_pos] is not None:
+                                                FitPeaks_dict_popt[key][trace_pos][2] = filtered_tau
+                                            else:
+                                                FitPeaks_dict_popt[key][trace_pos] = [1.0, cursor_start_fit, filtered_tau]
                                             
                                 except Exception as e:
-                                    print(f"    {key}: refit error: {e}")
+                                    print(f"    {key}: τ {original_tau*1000:.1f}ms → {filtered_tau*1000:.1f}ms (FORCED median filter - general error: {e})")
+                                    # At minimum, update the tau value
+                                    FitPeaks_dict_tau[key][trace_pos] = filtered_tau
                             else:
-                                print(f"    {key}: τ={original_tau*1000:.1f}ms (unchanged)")
+                                if np.isnan(filtered_tau):
+                                    print(f"    {key}: τ={original_tau*1000:.1f}ms (filtered tau is NaN, keeping original)")
+                                elif not (TAU_MIN <= filtered_tau <= TAU_MAX):
+                                    print(f"    {key}: τ={original_tau*1000:.1f}ms (filtered tau {filtered_tau*1000:.1f}ms outside limits)")
+                                else:
+                                    print(f"    {key}: τ={original_tau*1000:.1f}ms (unexpected condition)")
+                        else:
+                            print(f"    {key}: No filtered tau available (index {i} >= {len(tau_filtered)})")
                 
+                elif len(valid_tau_values) == 1:
+                    # Use the single valid tau for all peaks in this trace
+                    single_tau = valid_tau_values[0]
+                    print(f"  Only one valid tau ({single_tau*1000:.1f}ms), applying to all peaks")
+                    
+                    for i, key in enumerate(trace_keys):
+                        if np.isnan(trace_tau_values[i]):
+                            FitPeaks_dict_tau[key][trace_pos] = single_tau
+                            # Create basic popt if needed
+                            if FitPeaks_dict_popt[key][trace_pos] is None:
+                                FitPeaks_dict_popt[key][trace_pos] = [1.0, 0.0, single_tau]
+                            else:
+                                FitPeaks_dict_popt[key][trace_pos][2] = single_tau
+                            print(f"    {key}: τ=NaN → {single_tau*1000:.1f}ms (from valid peak)")
                 else:
-                    print(f"  Not enough valid tau values for filtering ({len(valid_tau_values)} < 3), skipping median filter for this trace")
+                    print(f"  No valid tau values for filtering, skipping trace")
         
         # Apply remove residuals correction
         amp_dict_corr = {}
