@@ -2223,8 +2223,9 @@ def analyze_file_no_gui(filename,
 
         print("Remove residuals correction completed")
         
-        # Update amp_dict with corrected values
-        amp_dict = amp_dict_corr.copy()
+        # DON'T update amp_dict - keep original values for comparison
+        # amp_dict remains with original (uncorrected) values
+        # amp_dict_corr contains the corrected values
         
         # Store corrected amplitudes for batch processing
         corrected_amplitudes = amp_dict_corr.copy()
@@ -2308,7 +2309,10 @@ def analyze_file_no_gui(filename,
             
             ax_measurements.set_xlabel('Time (s)')
             ax_measurements.set_ylabel('Signal (Amp)')
-            title_text = f'Amplitude Measurements (Span: {span_for_peaks})'
+            # Get filename for title
+            import os
+            file_basename = os.path.basename(filename) if 'filename' in locals() and filename else 'Unknown File'
+            title_text = f'{file_basename}\nAmplitude Measurements (Span: {span_for_peaks})'
             if span_for_peaks == 1:
                 title_text += ' - Exact Points'
             else:
@@ -2401,7 +2405,10 @@ def analyze_file_no_gui(filename,
                 
                 ax_train_left.set_xlabel('Time (s)')
                 ax_train_left.set_ylabel('Signal (Amp)')
-                ax_train_left.set_title(f'Trace {trace_idx} - Peak Measurements')
+                # Get filename for title
+                import os
+                file_basename = os.path.basename(filename) if 'filename' in locals() and filename else 'Unknown File'
+                ax_train_left.set_title(f'{file_basename}\nTrace {trace_idx} - Peak Measurements')
                 ax_train_left.legend()
                 
                 # Right subplot: fitting visualization
@@ -2520,11 +2527,12 @@ def analyze_file_no_gui(filename,
     
     # Prepare return dictionary
     results = {
-        'amplitudes': amp_dict,
+        'amplitudes': amp_dict,  # ORIGINAL (uncorrected) amplitudes
         'amplitude_indices': amp_dict_idx,
-        'corrected_amplitudes': corrected_amplitudes,  # Add corrected amplitudes
+        'corrected_amplitudes': corrected_amplitudes,  # CORRECTED amplitudes (if available)
         'tagged_traces': np.where(TAG == 1)[0].tolist(),
         'cursor_positions': [startpos[0], endpos[0]],
+        'tau_values': FitPeaks_dict_tau if apply_remove_residuals and FitPeaks_dict_tau else None,  # Store tau values
         'parameters': {
             'filename': filename,
             'tag_mode': tag_mode,
@@ -2548,7 +2556,7 @@ def analyze_batch_no_gui(folder_path,
                         tag_mode='last',
                         tag_range=None,
                         cursor_start=0.49,
-                        cursor_end=0.543,
+                        cursor_end=0.513,
                         find_minimum=False,
                         span_for_peaks=1,
                         isi_ms=50,
@@ -2566,7 +2574,7 @@ def analyze_batch_no_gui(folder_path,
                         leak_window_end=400,
                         apply_remove_residuals=True,
                         offset_points_after_amp1=1,  # X points after AMP1 position for cursor_start_Fit
-                        cursor_end_fit=None,  # End cursor for fitting, if None uses cursor_end
+                        cursor_end_fit=0.543,  # End cursor for fitting, if None uses cursor_end
                         save_results=True,
                         output_prefix="",  # Prefix to add to all output names
                         output_suffix="_AMP",  # Suffix to add to all output names
@@ -2927,7 +2935,7 @@ def analyze_batch_no_gui(folder_path,
                         if (result['amplitudes'] and 
                             peak_name in result['amplitudes'] and 
                             len(result['amplitudes'][peak_name]) > 0):
-                            # Use the mean amplitude for each peak
+                            # Use the mean amplitude for each peak (ORIGINAL/UNCORRECTED values)
                             amplitudes = result['amplitudes'][peak_name]
                             simple_data[peak_name].append(np.mean(amplitudes))
                         else:
@@ -3054,38 +3062,49 @@ def analyze_batch_no_gui(folder_path,
                         # Main sheet with filename and corrected amplitude means
                         corrected_df.to_excel(writer, sheet_name='Corrected_Amplitudes', index=False)
                         
-                        # Detailed sheet with all individual corrected measurements
-                        detailed_corrected_data = {}
-                        detailed_corrected_data['Filename'] = []
-                        detailed_corrected_data['Trace_Index'] = []
+                        # Sheet with all tau values used for fitting
+                        tau_data = {}
+                        tau_data['Filename'] = []
                         
-                        # Initialize columns for each corrected peak
-                        for peak_name in all_corrected_peak_names:
-                            detailed_corrected_data[f'{peak_name}_Corrected'] = []
+                        # Initialize columns for each peak's tau values (up to 10 peaks)
+                        for i in range(1, 11):  # AMP1 to AMP10
+                            tau_data[f'AMP{i}_tau_ms'] = []
                         
-                        # Fill detailed corrected data
+                        # Fill tau data
                         for rel_path, result in batch_results['results'].items():
-                            if (rel_path in files_with_corrections and 
-                                len(result['tagged_traces']) > 0):
-                                corrected_amps = files_with_corrections[rel_path]
-                                num_traces = len(result['tagged_traces'])
+                            tau_data['Filename'].append(rel_path)
+                            
+                            # Check if this file has tau values from fitting
+                            if (result.get('tau_values') is not None and 
+                                isinstance(result['tau_values'], dict)):
                                 
-                                for i in range(num_traces):
-                                    detailed_corrected_data['Filename'].append(rel_path)
-                                    detailed_corrected_data['Trace_Index'].append(
-                                        result['tagged_traces'][i] if i < len(result['tagged_traces']) else np.nan)
+                                tau_values = result['tau_values']
+                                
+                                # Get tau values for each peak (convert to ms)
+                                for i in range(1, 11):
+                                    peak_name = f'AMP{i}'
                                     
-                                    for peak_name in all_corrected_peak_names:
-                                        if (peak_name in corrected_amps and 
-                                            i < len(corrected_amps[peak_name])):
-                                            detailed_corrected_data[f'{peak_name}_Corrected'].append(
-                                                corrected_amps[peak_name][i])
+                                    if (peak_name in tau_values and 
+                                        len(tau_values[peak_name]) > 0):
+                                        # Take the mean tau value for this peak and convert to ms
+                                        tau_values_for_peak = [tau for tau in tau_values[peak_name] if not np.isnan(tau)]
+                                        if len(tau_values_for_peak) > 0:
+                                            mean_tau_ms = np.mean(tau_values_for_peak) * 1000  # Convert to ms
+                                            tau_data[f'AMP{i}_tau_ms'].append(mean_tau_ms)
                                         else:
-                                            detailed_corrected_data[f'{peak_name}_Corrected'].append(np.nan)
+                                            tau_data[f'AMP{i}_tau_ms'].append(np.nan)
+                                    else:
+                                        tau_data[f'AMP{i}_tau_ms'].append(np.nan)
+                            else:
+                                # No fitting results for this file
+                                for i in range(1, 11):
+                                    tau_data[f'AMP{i}_tau_ms'].append(np.nan)
                         
-                        if detailed_corrected_data['Filename']:  # Only if we have data
-                            detailed_corrected_df = pd.DataFrame(detailed_corrected_data)
-                            detailed_corrected_df.to_excel(writer, sheet_name='All_Corrected_Individual', index=False)
+                        # Create and save tau DataFrame
+                        tau_df = pd.DataFrame(tau_data)
+                        # Remove columns that are all NaN
+                        tau_df = tau_df.dropna(axis=1, how='all')
+                        tau_df.to_excel(writer, sheet_name='All_tau', index=False)
                         
                         # Statistics for corrected amplitudes
                         if len(corrected_df) > 1:
