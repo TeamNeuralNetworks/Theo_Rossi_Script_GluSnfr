@@ -2129,20 +2129,26 @@ def analyze_file_no_gui(filename,
                             
                             popt = FitPeaks_dict_popt[key][plot_idx]
                             try:
-                                # Create fitting window for this peak
-                                idx_start = np.where(TIME[trace_idx] >= Start_for_trains_plot)[0]
-                                idx_stop = np.where(TIME[trace_idx] >= Stop_for_trains_plot)[0]
-                                if len(idx_start) > 0 and len(idx_stop) > 0:
-                                    x_fit = TIME[trace_idx][idx_start[0]:idx_stop[0]]
-                                    if len(x_fit) > 0:
-                                        y_fit = func_mono_exp(x_fit, *popt)
-                                        ax_train_right.plot(x_fit, y_fit, '--', 
+                                # Create fitting window for this peak (for highlighting)
+                                idx_start_fit = np.where(TIME[trace_idx] >= Start_for_trains_plot)[0]
+                                idx_stop_fit = np.where(TIME[trace_idx] >= Stop_for_trains_plot)[0]
+                                
+                                # For the fitted curve, extend from fitting start to end of recording
+                                if len(idx_start_fit) > 0:
+                                    fit_start_idx = idx_start_fit[0]
+                                    # Extend the fitted curve to the end of the trace
+                                    x_fit_extended = TIME[trace_idx][fit_start_idx:]
+                                    
+                                    if len(x_fit_extended) > 0:
+                                        y_fit_extended = func_mono_exp(x_fit_extended, *popt)
+                                        ax_train_right.plot(x_fit_extended, y_fit_extended, '--', 
                                                           color=f'C{peak_idx}', linewidth=2, alpha=0.8,
                                                           label=f'{key} fit τ={popt[2]*1000:.1f}ms')
                                         
-                                        # Show fitting window
-                                        ax_train_right.axvspan(Start_for_trains_plot, Stop_for_trains_plot, 
-                                                             alpha=0.1, color=f'C{peak_idx}')
+                                        # Show fitting window (where the fit was calculated)
+                                        if len(idx_stop_fit) > 0:
+                                            ax_train_right.axvspan(Start_for_trains_plot, Stop_for_trains_plot, 
+                                                                 alpha=0.1, color=f'C{peak_idx}')
                             except Exception as e:
                                 print(f"Error plotting fit for {key}: {e}")
                         
