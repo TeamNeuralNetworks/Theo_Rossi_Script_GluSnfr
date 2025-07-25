@@ -1934,7 +1934,7 @@ def analyze_file_no_gui(filename,
                         else:
                             print(f"    {key}: No fit data available for {key_for_residual}")
                             amp_dict_corr[key].append(amp_dict[key][trace_pos])
-        
+
         print("Remove residuals correction completed")
         
         # Update amp_dict with corrected values
@@ -2129,9 +2129,25 @@ def analyze_file_no_gui(filename,
                             
                             popt = FitPeaks_dict_popt[key][plot_idx]
                             try:
-                                # Create fitting window for this peak (for highlighting)
-                                idx_start_fit = np.where(TIME[trace_idx] >= Start_for_trains_plot)[0]
-                                idx_stop_fit = np.where(TIME[trace_idx] >= Stop_for_trains_plot)[0]
+                                # For AMP1, use the calculated position: AMP1 + offset
+                                if key == 'AMP1' and plot_idx < len(amp_dict_idx['AMP1']):
+                                    amp1_idx = amp_dict_idx['AMP1'][plot_idx]
+                                    cursor_start_fit_idx = amp1_idx + offset_points_after_amp1
+                                    
+                                    # Make sure we don't go beyond the trace
+                                    if cursor_start_fit_idx >= len(TIME[trace_idx]):
+                                        cursor_start_fit_idx = len(TIME[trace_idx]) - 1
+                                    
+                                    fit_start_time = TIME[trace_idx][cursor_start_fit_idx]
+                                    fit_end_time = cursor_end_fit if cursor_end_fit is not None else cursor_end
+                                else:
+                                    # For other peaks, use the standard window
+                                    fit_start_time = Start_for_trains_plot
+                                    fit_end_time = Stop_for_trains_plot
+                                
+                                # Find indices for fitting window display
+                                idx_start_fit = np.where(TIME[trace_idx] >= fit_start_time)[0]
+                                idx_stop_fit = np.where(TIME[trace_idx] >= fit_end_time)[0]
                                 
                                 # For the fitted curve, extend from fitting start to end of recording
                                 if len(idx_start_fit) > 0:
@@ -2147,13 +2163,15 @@ def analyze_file_no_gui(filename,
                                         
                                         # Show fitting window (where the fit was calculated)
                                         if len(idx_stop_fit) > 0:
-                                            ax_train_right.axvspan(Start_for_trains_plot, Stop_for_trains_plot, 
+                                            ax_train_right.axvspan(fit_start_time, fit_end_time, 
                                                                  alpha=0.1, color=f'C{peak_idx}')
                             except Exception as e:
                                 print(f"Error plotting fit for {key}: {e}")
                         
-                        Start_for_trains_plot += isi_ms / 1000
-                        Stop_for_trains_plot += isi_ms / 1000
+                        # Only increment for non-AMP1 peaks (since AMP1 uses different logic)
+                        if key != 'AMP1':
+                            Start_for_trains_plot += isi_ms / 1000
+                            Stop_for_trains_plot += isi_ms / 1000
                 
                 ax_train_right.set_xlabel('Time (s)')
                 ax_train_right.set_ylabel('Signal (Amp)')
