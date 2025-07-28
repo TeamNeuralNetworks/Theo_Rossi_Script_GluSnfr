@@ -918,7 +918,7 @@ def Main_window():
                     end_idx = min(len(REC[i]), end_idx)
                     
                     # leak = np.mean(REC[i][start_idx:end_idx])
-                    leak = np.percentile(REC[i], 20)
+                    leak = np.nanpercentile(REC[i], 20)
                     REC[i] = REC[i] - leak
                     print(f"Trace {i}: leak = {leak:.4f} subtracted (window: {leak_start_ms}-{leak_end_ms} ms, indices {start_idx}-{end_idx})")
             
@@ -1425,7 +1425,7 @@ if __name__ == '__main__' :
     import seaborn as sns
     
     
-    savedir = r'C:\Anthime.PERROT\1_Thèse\1_Manip\5_Glusnf_Théo\2_Revision\All_boutons\All_Théo\SynaptiP'
+    savedir = r'C:\Anthime.PERROT\1_Thèse\1_Manip\5_Glusnf_Théo\2_Revision\All_boutons\All_Normalized_SynII_smooth\interpolation_traces_all\Traces_individuelles\SynaptiP'
 
     
           
@@ -1853,8 +1853,8 @@ def analyze_file_no_gui(filename,
             end_idx = min(len(REC[i]), end_idx)
             
             if start_idx < end_idx:
-                leak = np.mean(REC[i][start_idx:end_idx])
-                leak = np.percentile(REC[i], 20)
+                #leak = np.nanmean(REC[i][start_idx:end_idx])
+                leak = np.nanpercentile(REC[i], 20)
                 REC[i] = REC[i] - leak
                 print(f"  Trace {i}: leak = {leak:.4f} (from indices {start_idx} to {end_idx})")
             else:
@@ -2652,8 +2652,8 @@ def analyze_batch_no_gui(folder_path,
                         # All the same parameters as analyze_file_no_gui
                         tag_mode='last',
                         tag_range=None,
-                        cursor_start=0.49,
-                        cursor_end=0.513,
+                        cursor_start=0.49,  #For start at 0.5 --> 0.49
+                        cursor_end=0.513,   #For start at 0.5 --> 0.513
                         find_minimum=False,
                         span_for_peaks=1,
                         isi_ms=50,
@@ -2664,14 +2664,14 @@ def analyze_batch_no_gui(folder_path,
                         filter_low=0.01,
                         filter_high=2000,
                         bleaching_correction=True,
-                        bleaching_window_start=0,
-                        bleaching_window_end=400,
+                        bleaching_window_start=0,   
+                        bleaching_window_end=400,   #For start at 0.5 --> 400
                         leak_subtraction=True,
-                        leak_window_start=0,
-                        leak_window_end=400,
+                        leak_window_start=0,     
+                        leak_window_end=400,        #For start at 0.5 --> 400
                         apply_remove_residuals=True,
                         offset_points_after_amp1=1,  # X points after AMP1 position for cursor_start_Fit
-                        cursor_end_fit=0.543,  # End cursor for fitting, if None uses cursor_end
+                        cursor_end_fit=0.543,  # End cursor for fitting, if None uses cursor_end           #For start at 0.5 --> 0.543
                         save_results=True,
                         output_prefix="",  # Prefix to add to all output names
                         output_suffix="_AMP",  # Suffix to add to all output names
