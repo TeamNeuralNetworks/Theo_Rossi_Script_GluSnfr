@@ -355,9 +355,9 @@ def extract_contiguous_baseline_windows(baseline_data, window_size, step_size=1)
         windows.append(np.mean(window))  # Could also use np.max or np.sum
     return np.array(windows)
 
-def statistical_test_vs_baseline(peak_value, baseline_distribution, alpha=0.15):
+def statistical_test_vs_baseline(peak_value, baseline_distribution, alpha=0.20):
     """
-    Optimal statistical test: percentile-based (non-parametric, robust to non-normality)
+    One-tailed test for glutamate release detection (only test if peak > baseline)
     """
     if len(baseline_distribution) == 0:
         return False, 0, np.nan
@@ -365,20 +365,20 @@ def statistical_test_vs_baseline(peak_value, baseline_distribution, alpha=0.15):
     # Calculate percentile of peak in baseline distribution
     percentile = (np.sum(baseline_distribution < peak_value) / len(baseline_distribution)) * 100
     
-    # One-tailed test: significant if peak is in the upper tail
-    p_value = 1 - (percentile / 100)
+    # One-tailed test: only significant if peak is in upper tail
+    p_value = (100 - percentile) / 100  # Convert to p-value (0-1)
     significant = p_value < alpha
     
-    # Also calculate z-score equivalent for reporting
-    z_equivalent = np.abs(peak_value - np.mean(baseline_distribution)) / np.std(baseline_distribution)
+    # Calculate z-score equivalent for reporting (one-tailed)
+    z_equivalent = (peak_value - np.mean(baseline_distribution)) / np.std(baseline_distribution)
     
     return significant, percentile, z_equivalent
 
 def process_single_file(file_path, output_folder, parameters):
     """
-    Traite un seul fichier avec les paramètres donnés
+    Traite un seul fichier avec les paramètres donnés - VERSION SANS BOOTSTRAP
     Applique les corrections (photobleaching, leak, résiduel), extrait les fenêtres d'intérêt,
-    effectue le bootstrap et sauvegarde les résultats dans des fichiers Excel.
+    effectue l'analyse statistique directe et sauvegarde les résultats dans des fichiers Excel.
     Retourne True, nom du fichier, liste des pourcentages d'échec (PercFail) pour chaque pic.
     """
     try:
@@ -427,43 +427,45 @@ def process_single_file(file_path, output_folder, parameters):
             WINDOWS_NS.append(windows_ns)
             WINDOWS_AMP.append(windows_amp)
         
-        # 5. Analyse bootstrap sur chaque pic
-        print("Analyse bootstrap...")
-        wb_hist = Workbook()  # Fichier Excel pour les cycles bootstrap
-        wb_data = Workbook()  # Fichier Excel pour les résultats agrégés
-        ALL_FAILS = []  # Pourcentage d'échec (zscore <= 2) pour chaque pic
+        # 5. Analyse statistique directe sur chaque pic (SANS BOOTSTRAP)
+        print("Analyse statistique directe...")
+        wb_data = Workbook()  # Fichier Excel pour les résultats
+        ALL_FAILS = []  # Pourcentage d'échec pour chaque pic
+        
         for peak in range(parameters['n_peaks']):
             EP, PEAK, ZSCORE, AMP, NS_AMP, STD_NS, STD_AMP, PERCENTILE = [], [], [], [], [], [], [], []
             df_episodes = pd.DataFrame(index=None, columns=None)
-            print(f'BOOTSTRAP PEAK{peak+1}')
+            print(f'ANALYSE DIRECTE PEAK{peak+1}')
             
             for item in range(len(WINDOWS_AMP[peak])):
                 EP.append(f'Episode {item}')
                 
-                # Bootstrap on peak window (unchanged)
-                amp_mean, amp_std, amp_cycle = bootstrap_patterns(WINDOWS_AMP[peak][item], N=len(WINDOWS_AMP[peak][item]))
+                # NOUVEAU: Calcul direct sans bootstrap
+                peak_window_means = [np.mean(sweep) for sweep in WINDOWS_AMP[peak][item]]
+                amp_mean = np.mean(peak_window_means)
+                amp_std = np.std(peak_window_means) if len(peak_window_means) > 1 else 0
                 
-                # CHANGED: Contiguous window baseline analysis
-                baseline_flat = np.array(WINDOWS_NS[peak][item]).flatten()  # Flatten baseline data robustly
-                peak_window_size = len(WINDOWS_AMP[peak][item])  # Size of peak window
+                # Analyse baseline avec fenêtres contiguës
+                baseline_flat = np.array(WINDOWS_NS[peak][item]).flatten()
+                peak_window_size = len(WINDOWS_AMP[peak][item])  # Taille d'une fenêtre pic (en points)
                 
-                # Extract contiguous baseline windows (step=1 for overlapping, step=peak_window_size for non-overlapping)
+                # Extraction des fenêtres contiguës de baseline
                 baseline_windows = extract_contiguous_baseline_windows(baseline_flat, peak_window_size, step_size=1)
                 
-                if len(baseline_windows) < 10:  # Need minimum windows for statistics
-                    print(f"Warning: Only {len(baseline_windows)} baseline windows available")
+                if len(baseline_windows) < 10:
+                    print(f"Warning: Seulement {len(baseline_windows)} fenêtres baseline disponibles")
                 
                 ns_mean = np.mean(baseline_windows)
                 ns_std = np.std(baseline_windows)
                 
-                # Net signal calculation
+                # Calcul du signal net
                 amp = amp_mean - ns_mean
                 AMP.append(amp)
                 NS_AMP.append(ns_mean)
                 STD_AMP.append(amp_std)
                 STD_NS.append(ns_std)
                 
-                # CHANGED: Use optimal statistical test
+                # Test statistique
                 significant, percentile, z_equiv = statistical_test_vs_baseline(amp_mean, baseline_windows)
                 
                 PERCENTILE.append(percentile)
@@ -474,41 +476,37 @@ def process_single_file(file_path, output_folder, parameters):
                 else:
                     PEAK.append('Fail')
                 
-                # Store bootstrap cycles for Excel output
-                df_episodes[f'baseline_windows{item}'] = baseline_windows[:len(amp_cycle)] if len(baseline_windows) >= len(amp_cycle) else list(baseline_windows) + [np.nan]*(len(amp_cycle)-len(baseline_windows))
-                df_episodes[f'amp{item}'] = amp_cycle
+                # Stockage pour Excel (simplifié sans bootstrap)
+                df_episodes[f'peak_means{item}'] = peak_window_means + [np.nan] * (max(50 - len(peak_window_means), 0))
+                df_episodes[f'baseline_sample{item}'] = baseline_windows[:50].tolist() + [np.nan] * max(50 - len(baseline_windows), 0)
 
-            # Calculate failure percentage and save results
+            # Calcul du pourcentage d'échec
             percentage_failures = (PEAK.count('Fail')/len(WINDOWS_AMP[peak]))*100
             ALL_FAILS.append(percentage_failures)
             
-            # Updated dataframe with percentile information
+            # DataFrame des résultats
             df_ep = pd.concat((pd.DataFrame(EP), pd.DataFrame(PEAK), pd.DataFrame(AMP), pd.DataFrame(NS_AMP),
                                pd.DataFrame(STD_AMP), pd.DataFrame(STD_NS), pd.DataFrame(ZSCORE), pd.DataFrame(PERCENTILE)), axis=1)
             df_ep.columns = ['Episode','PEAK','AMP','AMPns','Std_amp','Std_ns','Zscore','Percentile']
             df_ep['PercFail'] = percentage_failures
 
-            sheet_hist = wb_hist.create_sheet(f'PEAK{peak+1}')
+            # Sauvegarde dans Excel
             sheet_data = wb_data.create_sheet(f'PEAK{peak+1}')
-            for r in dataframe_to_rows(df_episodes, index=False, header=True):
-                sheet_hist.append(r)
             for r in dataframe_to_rows(df_ep, index=False, header=True):
                 sheet_data.append(r)
         
-        # 6. Sauvegarde des fichiers Excel individuels
-        wb_hist.remove(wb_hist['Sheet'])
+        # 6. Sauvegarde du fichier Excel
         wb_data.remove(wb_data['Sheet'])
-        hist_path = os.path.join(output_folder, f'{file_name}_histograms_bootstrap.xlsx')
-        data_path = os.path.join(output_folder, f'{file_name}_data_bootstrap.xlsx')
-        wb_hist.save(hist_path)
+        data_path = os.path.join(output_folder, f'{file_name}_data_direct.xlsx')
         wb_data.save(data_path)
         print(f"Fichier traité avec succès: {file_name}")
-        print(f"Fichiers sauvegardés: {hist_path}, {data_path}")
+        print(f"Fichier sauvegardé: {data_path}")
         
-        # 7. Retourne True, nom du fichier, et liste des pourcentages d'échec pour le récapitulatif
-        # Nouvelle étape : Génération de la figure par fichier
+        # 7. Génération de la figure
         plot_results_per_file(file_path, data_path, parameters)
+        
         return True, file_name, ALL_FAILS
+        
     except Exception as e:
         print(f"Erreur lors du traitement de {file_path}: {e}")
         return False, None, None
@@ -516,13 +514,9 @@ def process_single_file(file_path, output_folder, parameters):
 # Nouvelle fonction pour générer la figure par fichier
 import matplotlib.colors as mcolors
 
-def plot_results_per_file(input_file, data_bootstrap_file, parameters):
+def plot_results_per_file(input_file, data_file, parameters):
     """
-    Génère une seule figure par fichier input, avec toutes les traces complètes.
-    Les failures sont en gradient de rouge, les success en gradient de bleu (statut PEAK1).
-    Légende : numéro d'épisode (data_bootstrap) et numéro d'essai (input, index réel de la colonne sweep).
-    Axe X = colonne Time du fichier source.
-    Ajoute des barres pour toutes les fenêtres de pics étudiés.
+    Génère une figure par fichier avec toutes les traces complètes - VERSION SIMPLIFIÉE
     """
     try:
         # Chargement des sweeps et du temps du fichier input
@@ -530,8 +524,10 @@ def plot_results_per_file(input_file, data_bootstrap_file, parameters):
         if sweeps is None or len(sweeps) == 0 or time is None:
             print(f"Impossible de charger les sweeps ou le temps pour {input_file}")
             return
-        # Chargement des résultats bootstrap pour tous les pics
-        df = pd.read_excel(data_bootstrap_file, sheet_name=None)
+            
+        # Chargement des résultats pour tous les pics
+        df = pd.read_excel(data_file, sheet_name=None)
+        
         # Récupérer les dataframes pour chaque pic
         df_peaks = []
         for i in range(1, parameters['n_peaks']+1):
@@ -540,29 +536,36 @@ def plot_results_per_file(input_file, data_bootstrap_file, parameters):
                 df_peaks.append(df[sheet])
             else:
                 df_peaks.append(None)
+                
         if df_peaks[0] is None:
-            print(f"Aucune feuille PEAK1 trouvée dans {data_bootstrap_file}")
+            print(f"Aucune feuille PEAK1 trouvée dans {data_file}")
             return
+
         fig, (ax, ax2) = plt.subplots(2, 1, figsize=(12,12), sharex=True, gridspec_kw={'height_ratios': [2, 1]})
+        
         # Préparer les couleurs selon PEAK1
         fails = df_peaks[0]['PEAK'] == 'Fail'
         success = df_peaks[0]['PEAK'] == 'Success'
         reds = plt.cm.Reds(np.linspace(0.4, 1, max(1, sum(fails))))
         blues = plt.cm.Blues(np.linspace(0.4, 1, max(1, sum(success))))
+        
         fail_idx = 0
         succ_idx = 0
+        
         for i, row in df_peaks[0].iterrows():
             if row['PEAK'] == 'Fail':
-                color = reds[fail_idx]
+                color = reds[fail_idx] if sum(fails) > 0 else 'red'
                 fail_idx += 1
             else:
-                color = blues[succ_idx]
+                color = blues[succ_idx] if sum(success) > 0 else 'blue'
                 succ_idx += 1
+                
             if i < len(sweeps):
                 trace = sweeps[i]
             else:
                 continue
-            # Récupérer les percentiles et statut pour chaque pic
+                
+            # Récupérer les percentiles pour chaque pic
             perc_str = []
             for k in range(len(df_peaks)):
                 if df_peaks[k] is not None and i < len(df_peaks[k]):
@@ -572,9 +575,11 @@ def plot_results_per_file(input_file, data_bootstrap_file, parameters):
                     perc_str.append(f"{round(perc,1)}{status_letter}")
                 else:
                     perc_str.append("-")
-            perc_legend = " / ".join([f"Perc{k+1} = {perc_str[k]}" for k in range(len(perc_str))])
-            ax.plot(time, trace, color=color, label=f"Ep {i} / {perc_legend}", alpha=0.8)
-            # Calcul z-score sur baseline (fenêtre bruit du premier pic)
+                    
+            perc_legend = " / ".join([f"P{k+1}={perc_str[k]}" for k in range(len(perc_str))])
+            ax.plot(time, trace, color=color, label=f"Ep{i} / {perc_legend}", alpha=0.8)
+            
+            # Calcul z-score sur baseline
             noise_start = parameters['noise_start']
             noise_stop = parameters['noise_stop']
             idx1 = np.searchsorted(time, noise_start, side='left')
@@ -582,33 +587,38 @@ def plot_results_per_file(input_file, data_bootstrap_file, parameters):
             baseline = trace[idx1:idx2]
             mean_bsl = np.mean(baseline)
             std_bsl = np.std(baseline)
+            
             if std_bsl == 0:
                 z_trace = np.zeros_like(trace)
             else:
                 z_trace = (trace - mean_bsl) / std_bsl
-            ax2.plot(time, z_trace, color=color, label=f"Ep {i}", alpha=0.8)
-        # Barre horizontale à 0
+                
+            ax2.plot(time, z_trace, color=color, alpha=0.8)
+
+        # Barres horizontales
         ax.axhline(0, color='grey', linestyle='--', linewidth=1)
         ax2.axhline(0, color='grey', linestyle='--', linewidth=1)
+        
         # Barres verticales et % failure pour chaque pic
-        n_peaks = parameters['n_peaks']
         freq = parameters['frequency']
         t0 = parameters['peak_start']
         t1 = parameters['peak_stop']
-        for i in range(n_peaks):
+        
+        for i in range(parameters['n_peaks']):
             ax.axvline(t0, color='black', linestyle=':', linewidth=1)
             ax.axvline(t1, color='black', linestyle=':', linewidth=1)
             ax2.axvline(t0, color='black', linestyle=':', linewidth=1)
             ax2.axvline(t1, color='black', linestyle=':', linewidth=1)
+            
             # % failure pour ce pic
             dfp = df_peaks[i]
             if dfp is not None:
                 perc_fail = (dfp['PEAK'].value_counts().get('Fail',0)/len(dfp))*100
                 x_text = (t0 + t1)/2
                 y_text = ax.get_ylim()[1] - 0.05*(ax.get_ylim()[1]-ax.get_ylim()[0])
-                ax.text(x_text, y_text, f"{perc_fail:.1f}% Fail", color='black', fontsize=10, ha='center', va='top', bbox=dict(facecolor='white', alpha=0.7, edgecolor='none'))
-                y2_text = ax2.get_ylim()[1] - 0.05*(ax2.get_ylim()[1]-ax2.get_ylim()[0])
-                ax2.text(x_text, y2_text, f"{perc_fail:.1f}% Fail", color='black', fontsize=10, ha='center', va='top', bbox=dict(facecolor='white', alpha=0.7, edgecolor='none'))
+                ax.text(x_text, y_text, f"{perc_fail:.1f}%F", color='black', fontsize=10, 
+                       ha='center', va='top', bbox=dict(facecolor='white', alpha=0.7, edgecolor='none'))
+                       
             # Décalage selon la fréquence
             if freq == '20':
                 t0 += 0.05
@@ -619,19 +629,22 @@ def plot_results_per_file(input_file, data_bootstrap_file, parameters):
             elif freq == '100':
                 t0 += 0.01
                 t1 += 0.01
-        ax.set_title(f"{Path(input_file).stem}")
-        ax.set_xlabel('Time (s)')
+
+        ax.set_title(f"{Path(input_file).stem} - Direct Analysis")
         ax.set_ylabel('Amplitude')
-        ax.legend(fontsize=7, loc='best', ncol=2)
+        ax.legend(fontsize=6, loc='best', ncol=1)
         ax2.set_ylabel('Z-score (baseline)')
         ax2.set_xlabel('Time (s)')
-        ax2.legend(fontsize=7, loc='best', ncol=2)
+        
         plt.tight_layout()
+        
         # Sauvegarde
-        fig_name = f"{Path(input_file).stem}.png"
-        out_path = os.path.join(os.path.dirname(data_bootstrap_file), fig_name)
+        fig_name = f"{Path(input_file).stem}_direct.png"
+        out_path = os.path.join(os.path.dirname(data_file), fig_name)
         plt.savefig(out_path, dpi=200)
+        # plt.close(fig) retiré pour garder la figure ouverte
         print(f"Figure sauvegardée : {out_path}")
+        
     except Exception as e:
         print(f"Erreur lors de la génération de la figure pour {input_file}: {e}")
 
