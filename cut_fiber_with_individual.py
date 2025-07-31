@@ -278,48 +278,45 @@ def process_excel_files(folder_path, start_time=TEMPS_DEBUT, end_time=TEMPS_FIN,
             # Créer le nom de colonne de base (nom du fichier sans extension)
             base_name = file_path.stem.replace('_traces_converted', '')
 
+            # DataFrame pour stocker toutes les traces traitées de ce fichier
+            output_df = pd.DataFrame()
+            processed_time_ref = None
+
             # Pour chaque trace individuelle
             for col in individual_columns + [average_column_name]:
-                column_name = f"{base_name}_{col}"
                 trace_values = df[col].values
-
-                # Ajouter la colonne complète au DataFrame résultat (pour sauvegarde complète)
-                result_df[column_name] = trace_values
-
                 # Traiter selon le mode (interpolation ou extraction)
                 if enable_interpolation:
                     processed_time, processed_trace = interpolate_trace(time_values, trace_values, 
                                                                       start_time, end_time, num_points)
                     if processed_trace is not None:
-                        # Créer le vecteur temps commun pour l'interpolation (si pas encore fait)
-                        if common_time is None:
-                            common_time = processed_time
-                            processed_df['Time'] = common_time
-                        processed_df[column_name] = processed_trace
-                        # Sauvegarder aussi chaque trace interpolée individuellement
-                        temp_df = pd.DataFrame({
-                            'Time': processed_time,
-                            column_name: processed_trace
-                        })
-                        output_path_individual = folder / f"ICI_interpole_{column_name}.xlsx"
-                        temp_df.to_excel(output_path_individual, index=False, sheet_name='Traces DF_F0')
-                        print(f"✓ Traité et interpolé: {file_path.name} -> Colonne: {column_name}")
-                        print(f"  -> Fichier individuel: ICI_interpole_{column_name}.xlsx")
+                        if processed_time_ref is None:
+                            processed_time_ref = processed_time
+                        output_df[col] = processed_trace
                     else:
                         print(f"⚠ Traité mais non interpolé: {file_path.name} - {col}")
                 else:
                     processed_time, processed_trace = extract_data_in_range(time_values, trace_values,
                                                                            start_time, end_time)
                     if processed_trace is not None:
-                        temp_df = pd.DataFrame({
-                            'Time': processed_time,
-                            column_name: processed_trace
-                        })
-                        output_path_individual = folder / f"ICI_extrait_{column_name}.xlsx"
-                        temp_df.to_excel(output_path_individual, index=False, sheet_name='Traces DF_F0')
-                        print(f"✓ Traité et extrait: {file_path.name} -> Fichier: ICI_extrait_{column_name}.xlsx")
+                        if processed_time_ref is None:
+                            processed_time_ref = processed_time
+                        output_df[col] = processed_trace
                     else:
                         print(f"⚠ Aucune donnée dans la plage pour: {file_path.name} - {col}")
+
+            # Ajouter la colonne temps à la fin
+            if processed_time_ref is not None:
+                output_df[time_column] = processed_time_ref
+                # Réordonner les colonnes comme dans l'original
+                output_df = output_df[[col for col in df.columns if col in output_df.columns]]
+                # Sauvegarder le fichier de sortie unique pour ce fichier d'entrée
+                suffix = 'interpole' if enable_interpolation else 'extrait'
+                output_path = folder / f"ICI_{suffix}_{base_name}.xlsx"
+                output_df.to_excel(output_path, index=False, sheet_name='Traces DF_F0')
+                print(f"✓ Fichier traité: {file_path.name} -> {output_path.name}")
+            else:
+                print(f"⚠ Aucune donnée traitée pour: {file_path.name}")
 
         except Exception as e:
             print(f"Erreur lors du traitement de {file_path.name}: {str(e)}")
