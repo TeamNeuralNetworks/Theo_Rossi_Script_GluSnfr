@@ -1,82 +1,62 @@
-# -*- coding: utf-8 -*-
-"""
-Created on Thu Jun 26 17:01:43 2025
-
-@author: Anthime.PERROT
-"""
-
-# -*- coding: utf-8 -*-
-"""
-Bootstrap Batch Processing Script
-Modifié pour traitement automatique par lots
-
-@author: Theo.ROSSI modified by Anthime Perrot
-"""
-
-import os
+import os  # Gestion des variables d'environnement et du système
 # Fix pour les erreurs MKL - DOIT ÊTRE EN PREMIER
-os.environ['MKL_THREADING_LAYER'] = 'GNU'
-os.environ['OPENBLAS_NUM_THREADS'] = '1'
+os.environ['MKL_THREADING_LAYER'] = 'GNU'  # Correction pour certains environnements numpy/scipy
+os.environ['OPENBLAS_NUM_THREADS'] = '1'   # Limite le nombre de threads pour éviter les conflits
 os.environ['MKL_NUM_THREADS'] = '1'
 
-import matplotlib.pyplot as plt
-from scipy.optimize import curve_fit
-from scipy.signal import savgol_filter
-import PySimpleGUI as sg
-import numpy as np
-import pandas as pd
-from scipy import stats
-import math
-import random
-from openpyxl import Workbook
-from openpyxl.utils.dataframe import dataframe_to_rows
-import glob
-from pathlib import Path
+import matplotlib.pyplot as plt  # Pour les graphiques (non utilisé ici mais utile pour debug)
+from scipy.optimize import curve_fit  # Pour les fits exponentiels
+from scipy.signal import savgol_filter  # Pour le lissage des données
+import PySimpleGUI as sg  # Interface graphique utilisateur
+import numpy as np  # Calculs numériques
+import pandas as pd  # Manipulation de tableaux de données
+from scipy import stats  # Statistiques
+import math  # Fonctions mathématiques
+import random  # Tirages aléatoires
+from openpyxl import Workbook  # Création de fichiers Excel
+from openpyxl.utils.dataframe import dataframe_to_rows  # Conversion DataFrame -> Excel
+import glob  # Recherche de fichiers
+from pathlib import Path  # Gestion des chemins de fichiers
 
-filt = 5  #Smoothing value, before 9. Here 1 because with Antoine script smoothing is already done.
+filt = 5  # Valeur de lissage (avant 9, ici 5, défini par la valeur qui donne le moins de différence pour la STD de la baseline)
 
+# =====================
+# FONCTIONS UTILITAIRES ET TRAITEMENT
+# =====================
 
-
-# Toutes vos fonctions existantes (copiées telles quelles)
 def gauss_func(mu,sigma,bins):
     '''
-    mu : mean
-    sigma : standard deviation
-    bins : histogram bins
-
-    Returns
-    -------
-    y : gaussian function of a histogram dataset
-
+    Calcule une gaussienne pour un histogramme
+    mu : moyenne
+    sigma : écart-type
+    bins : bins de l'histogramme
     '''
     y = ((1 / (np.sqrt(2 * np.pi) * sigma)) * np.exp(-0.5 * (1 / sigma * (bins - mu))**2)) 
     return y
 
 def func_mono_exp(x, a, b, c, d):
+    '''
+    Fonction exponentielle décroissante pour le fit du photobleaching
+    '''
     return a * np.exp(-(x-b)/c) + d
 
 def MAD(a,axis=None):
      '''
-     Computes median absolute deviation of an array along given axis
+     Calcule la médiane de la déviation absolue (robuste au bruit)
      '''
-     #Median along given axis but keep reduced axis so that result can still broadcast along a
-
      med = np.nanmedian(a, axis=axis, keepdims=True)
-     mad = np.nanmedian(np.abs(a-med),axis=axis) #MAD along the given axis
+     mad = np.nanmedian(np.abs(a-med),axis=axis)
      return mad
 
 def bootstrap_patterns(patterns, run=5000, N=12, input_method='average', output_method='average'):
     '''
-    Bootstraps synaptic patterns and returns median or average pattern
-    
-    patterns (list of arrays) : the patterns (data)
-    run (int) : the amount of runs for average/median
-    N (int) : number of draws for each cycle
-    input_method (str) : 'median' , 'average' stores median or average value for each run 
-    output_method (str) : 'median' or 'average' : returns medianed or averaged pattern
-    
+    Bootstrap sur des patterns synaptiques, retourne pattern médian ou moyen
+    patterns : liste de tableaux (données)
+    run : nombre de tirages bootstrap
+    N : nombre de tirages par cycle
+    input_method : 'median' ou 'average' pour chaque run
+    output_method : 'median' ou 'average' sur tous les runs
     '''
-    
     endCycle = []
     
     for i in range(run): 
@@ -112,7 +92,13 @@ def bootstrap_patterns(patterns, run=5000, N=12, input_method='average', output_
 
 def load_xls(file_xls):
     '''
-    Version sécurisée du chargement Excel
+    Chargement sécurisé d'un fichier Excel contenant les données expérimentales.
+    Tente d'ouvrir la feuille 'Traces DF_F0' avec différents moteurs, sinon la première feuille.
+    Nettoie les données et extrait les colonnes temps, moyenne et sweeps.
+    Retourne :
+        timescale : vecteur temps
+        average : trace moyenne
+        SWEEPS : liste des sweeps individuelles
     '''
     try:
         print(f"Ouverture du fichier: {file_xls}")
@@ -190,23 +176,9 @@ def load_xls(file_xls):
 
 def Fit_single_trace(time, trace, x_start, x_end):
     '''
-    Computes an exponential fit on a window of a dataset values.
-    The dataset has to be an excel file with variables as columns.
-    
-    time : time variable.
-    trace : the trace the fit must be applied on.
-    x_start : first limit of the window.
-    x_end : second limit of the window.
-
-    Returns
-    -------
-    popt : array
-        optimal values for the parameters
-    idx_start : int
-        the first index of the window.
-    idx_stop : int
-        the second index of the window.
-
+    Effectue un fit exponentiel décroissant sur une fenêtre de la trace.
+    Retourne :
+        tau (constante de temps), paramètres du fit, indices de début/fin de la fenêtre
     '''
     
     idx_start = np.ravel(np.where(time >= x_start))[0]
@@ -218,7 +190,7 @@ def Fit_single_trace(time, trace, x_start, x_end):
     y2 = np.array(np.squeeze(y))  
     
     try:
-        param_bounds=([-np.inf,0.,0.,-1000.],[np.inf,1.,10.,1000.])      # be careful ok for seconds. If millisec change param 2 and 3
+        param_bounds=([-np.inf,0.,0.,-1000.],[np.inf,1.,10.,1000.])      # bornes pour le fit, ok for seconds. If milliseconds, change param 2 and 3.
         popt, pcov = curve_fit(func_mono_exp, x2, y2, bounds=param_bounds, maxfev=10000) 
         return popt[2], popt, idx_start, idx_stop
     except:
@@ -228,18 +200,8 @@ def Fit_single_trace(time, trace, x_start, x_end):
 
 def bleaching_correction(time, trace, start, stop):
     '''
-    Suppresses the exponential decay on a window of a dataset values
-    
-    time (array): time variable.
-    trace (array or list): the trace or list of traces the fit must be applied on.
-    start (int or float) : first limit of the window.
-    end (int or float): second limit of the window.
-
-    Returns
-    -------
-    no_bleach : list
-        The list of traces corrected for the exp decay.
-
+    Correction du photobleaching par soustraction d'un fit exponentiel sur la fenêtre [start, stop].
+    Fonctionne sur une trace ou une liste de traces.
     '''
     
     x1 = float(start)
@@ -262,17 +224,8 @@ def bleaching_correction(time, trace, start, stop):
 
 def leak_subtraction(time, trace, start, stop):
     ''' 
-    Suppresses the offset on a window of a dataset values
-    time (array): time variable.
-    trace (array or list): the trace or list of traces.
-    start (int or float) : first limit of the window.
-    end (int or float): second limit of the window.
-
-    Returns
-    -------
-    no_leak : list
-        the list of traces without offset.
-
+    Soustraction du leak (offset) sur la fenêtre [start, stop].
+    Fonctionne sur une trace ou une liste de traces.
     '''
     
     x1 = np.ravel(np.where(time >= float(start)))[0]
@@ -294,17 +247,10 @@ def leak_subtraction(time, trace, start, stop):
 
 def residual_sublimation(time, trace, start, stop, freq, n_peaks):
     ''' 
-    Suppresses the residual preceding the onset of the peak from the peak
-    time (array): time variable.
-    trace (array or list): the trace or list of traces.
-    start (int or float) : first limit of the window.
-    end (int or float): second limit of the window.
-
-    Returns
-    -------
-    no_res : list
-        the list of traces containing peaks without res.
-
+    Soustraction du résiduel précédant chaque pic.
+    freq : fréquence de stimulation (str)
+    n_peaks : nombre de pics à traiter
+    Fonctionne sur une trace ou une liste de traces.
     '''
     
     if len(trace) == 0:
@@ -382,17 +328,7 @@ def residual_sublimation(time, trace, start, stop, freq, n_peaks):
 
 def values_extraction(time, trace, start, stop):    
     '''
-    Exctracts values on a window of a dataset values
-    time (array): time variable.
-    trace (array or list): the trace or list of traces.
-    start (int or float) : first limit of the window.
-    end (int or float): second limit of the window.
-
-    Returns
-    -------
-    windows : list
-        The list of values in the extracted window.
-
+    Extrait les valeurs d'une fenêtre temporelle [start, stop] d'une trace ou liste de traces.
     '''
     
     x1 = np.ravel(np.where(time >= float(start)))[0]
@@ -412,13 +348,14 @@ def values_extraction(time, trace, start, stop):
 def process_single_file(file_path, output_folder, parameters):
     """
     Traite un seul fichier avec les paramètres donnés
+    Applique les corrections (photobleaching, leak, résiduel), extrait les fenêtres d'intérêt,
+    effectue le bootstrap et sauvegarde les résultats dans des fichiers Excel.
+    Retourne True, nom du fichier, liste des pourcentages d'échec (PercFail) pour chaque pic.
     """
     try:
         print(f"\n=== Traitement du fichier: {file_path} ===")
-        
-        # Chargement du fichier
+        # Chargement du fichier et extraction des données principales
         time, avg, sweeps = load_xls(file_path)
-        
         if time is None or avg is None or sweeps is None:
             print(f"Erreur lors du chargement de {file_path}")
             return False
@@ -426,31 +363,29 @@ def process_single_file(file_path, output_folder, parameters):
         # Application des corrections automatiques
         print("Application des corrections...")
         
-        # 1. Correction du photobleaching
+        # 1. Correction du photobleaching (décroissance exponentielle)
         avg_corrected = bleaching_correction(time, avg, parameters['photo_start'], parameters['photo_stop'])
         sweeps_corrected = bleaching_correction(time, sweeps, parameters['photo_start'], parameters['photo_stop'])
         
-        # 2. Soustraction du leak
+        # 2. Soustraction du leak (offset)
         avg_corrected = leak_subtraction(time, avg_corrected, parameters['leak_start'], parameters['leak_stop'])
         sweeps_corrected = leak_subtraction(time, sweeps_corrected, parameters['leak_start'], parameters['leak_stop'])
         
-        # 3. Sublimation résiduelle
+        # 3. Sublimation résiduelle (soustraction du résiduel avant chaque pic)
         avg_corrected = residual_sublimation(time, avg_corrected, parameters['res_start'], parameters['res_stop'], 
                                            parameters['frequency'], parameters['n_peaks'])
         sweeps_corrected = residual_sublimation(time, sweeps_corrected, parameters['res_start'], parameters['res_stop'], 
                                               parameters['frequency'], parameters['n_peaks'])
         
-        # Extraction des fenêtres pour l'analyse
+        # 4. Extraction des fenêtres temporelles pour l'analyse des pics et du bruit
         file_name = Path(file_path).stem
         a = parameters['peak_start']
         b = parameters['peak_stop']
-        
         WINDOWS_NS, WINDOWS_AMP = [], []
-        
         for i in range(parameters['n_peaks']):
             windows_amp = values_extraction(time, sweeps_corrected, a, b)
             windows_ns = values_extraction(time, sweeps_corrected, parameters['noise_start'], parameters['noise_stop'])
-            
+            # Décalage de la fenêtre selon la fréquence
             if parameters['frequency'] == '20':
                 a += 0.05
                 b += 0.05
@@ -460,95 +395,80 @@ def process_single_file(file_path, output_folder, parameters):
             elif parameters['frequency'] == '100':  
                 a += 0.01
                 b += 0.01
-                
             WINDOWS_NS.append(windows_ns)
             WINDOWS_AMP.append(windows_amp)
         
-        # Analyse bootstrap
+        # 5. Analyse bootstrap sur chaque pic
         print("Analyse bootstrap...")
-        
-        wb_hist = Workbook()
-        wb_data = Workbook()
-        
-        ALL_FAILS = []
-        
+        wb_hist = Workbook()  # Fichier Excel pour les cycles bootstrap
+        wb_data = Workbook()  # Fichier Excel pour les résultats agrégés
+        ALL_FAILS = []  # Pourcentage d'échec (zscore <= 2) pour chaque pic
         for peak in range(parameters['n_peaks']):
             EP, PEAK, ZSCORE, AMP, NS_AMP, STD_NS, STD_AMP = [], [], [], [], [], [], []
-            
             df_episodes = pd.DataFrame(index=None, columns=None)
-            
             print(f'BOOTSTRAP PEAK{peak+1}')
-            
             for item in range(len(WINDOWS_AMP[peak])):
                 EP.append(f'Episode {item}')
-            
+                # Bootstrap sur la fenêtre du pic
                 amp_mean, amp_std, amp_cycle = bootstrap_patterns(WINDOWS_AMP[peak][item], N=len(WINDOWS_AMP[peak][item]))
-                
+                # Bootstrap bruit (tirages aléatoires dans la fenêtre bruit)
                 ns_cycle = [np.mean(random.sample(windows_ns[item].tolist(), len(WINDOWS_AMP[peak][item]))) 
                            for i in range(len(amp_cycle))]
                 ns_mean = np.mean(ns_cycle)
                 ns_std = np.std(ns_cycle)
-                
                 NS_AMP.append(ns_mean)
                 STD_AMP.append(amp_std)
                 STD_NS.append(ns_std)
-                
                 amp = amp_mean - ns_mean
                 AMP.append(amp)
-                
                 df_episodes[f'noise{item}'] = ns_cycle
                 df_episodes[f'amp{item}'] = amp_cycle
-                
                 z_score = amp/ns_std
                 ZSCORE.append(z_score)
-                
-                if z_score <= 3:
+                if z_score <= 2:
                     PEAK.append('Fail')
                 else:
                     PEAK.append('Success')
-            
+            # Calcul du pourcentage d'échec pour ce pic
             percentage_failures = (PEAK.count('Fail')/len(WINDOWS_AMP[peak]))*100
             ALL_FAILS.append(percentage_failures)
-            
+            # Tableaux de résultats pour Excel
             df_ep = pd.concat((pd.DataFrame(EP), pd.DataFrame(PEAK), pd.DataFrame(AMP), pd.DataFrame(NS_AMP),
                                pd.DataFrame(STD_AMP), pd.DataFrame(STD_NS), pd.DataFrame(ZSCORE)), axis=1)
             df_ep.columns = ['Episode','PEAK','AMP','AMPns','Std_amp','Std_ns','Zscore']
             df_ep['PercFail'] = percentage_failures
-            
             sheet_hist = wb_hist.create_sheet(f'PEAK{peak+1}')
             sheet_data = wb_data.create_sheet(f'PEAK{peak+1}')
-            
             for r in dataframe_to_rows(df_episodes, index=False, header=True):
                 sheet_hist.append(r)
-
             for r in dataframe_to_rows(df_ep, index=False, header=True):
                 sheet_data.append(r)
         
-        # Sauvegarde
+        # 6. Sauvegarde des fichiers Excel individuels
         wb_hist.remove(wb_hist['Sheet'])
         wb_data.remove(wb_data['Sheet'])
-        
         hist_path = os.path.join(output_folder, f'{file_name}_histograms_bootstrap.xlsx')
         data_path = os.path.join(output_folder, f'{file_name}_data_bootstrap.xlsx')
-        
         wb_hist.save(hist_path)
         wb_data.save(data_path)
-        
         print(f"Fichier traité avec succès: {file_name}")
         print(f"Fichiers sauvegardés: {hist_path}, {data_path}")
         
-        return True
-        
+        # 7. Retourne True, nom du fichier, et liste des pourcentages d'échec pour le récapitulatif
+        return True, file_name, ALL_FAILS
     except Exception as e:
         print(f"Erreur lors du traitement de {file_path}: {e}")
-        return False
+        return False, None, None
 
 def batch_process():
     """
-    Interface pour le traitement par lots
+    Interface graphique pour le traitement par lots de fichiers Excel.
+    Permet de sélectionner les dossiers, de paramétrer les corrections et l'analyse,
+    lance le traitement de tous les fichiers trouvés, affiche la progression et sauvegarde un récapitulatif.
     """
     sg.theme('DarkBlue')
-
+    
+    # Définition de la fenêtre principale avec tous les paramètres utilisateur
     layout = [
       [sg.Text('Dossier contenant les fichiers Excel:')],
       [sg.InputText(size=(50,1), key='input_folder'), sg.FolderBrowse()],
@@ -556,19 +476,19 @@ def batch_process():
       [sg.InputText(size=(50,1), key='output_folder'), sg.FolderBrowse()],
       [sg.Frame('Paramètres de correction', [
           [sg.Text('Photobleaching:'), sg.InputText('0.01', size=(6,1), key='photo_start'), 
-           sg.Text('à'), sg.InputText('0.45', size=(6,1), key='photo_stop'), sg.Text('sec')],
-          [sg.Text('Leak:'), sg.InputText('0.35', size=(6,1), key='leak_start'), 
-           sg.Text('à'), sg.InputText('0.45', size=(6,1), key='leak_stop'), sg.Text('sec')],
-          [sg.Text('Résiduel:'), sg.InputText('0.49', size=(6,1), key='res_start'), 
-           sg.Text('à'), sg.InputText('0.5', size=(6,1), key='res_stop'), sg.Text('sec')]
+           sg.Text('à'), sg.InputText('0.95', size=(6,1), key='photo_stop'), sg.Text('sec')],
+          [sg.Text('Leak:'), sg.InputText('0.85', size=(6,1), key='leak_start'), 
+           sg.Text('à'), sg.InputText('0.95', size=(6,1), key='leak_stop'), sg.Text('sec')],
+          [sg.Text('Résiduel:'), sg.InputText('0.99', size=(6,1), key='res_start'), 
+           sg.Text('à'), sg.InputText('1.0', size=(6,1), key='res_stop'), sg.Text('sec')]
       ])],
       [sg.Frame('Paramètres d\'analyse', [
           [sg.Text('Fréquence (Hz):'), sg.InputText('20', size=(4,1), key='frequency'),
-           sg.Text('Nombre de pics:'), sg.InputText('2', size=(4,1), key='n_peaks')],
-          [sg.Text('Fenêtre pic:'), sg.InputText('0.498', size=(6,1), key='peak_start'), 
-           sg.Text('à'), sg.InputText('0.51', size=(6,1), key='peak_stop')],
-          [sg.Text('Fenêtre bruit:'), sg.InputText('0.1', size=(6,1), key='noise_start'), 
-           sg.Text('à'), sg.InputText('0.4', size=(6,1), key='noise_stop')]
+           sg.Text('Nombre de pics:'), sg.InputText('3', size=(4,1), key='n_peaks')],
+          [sg.Text('Fenêtre pic:'), sg.InputText('0.998', size=(6,1), key='peak_start'), 
+           sg.Text('à'), sg.InputText('1.020', size=(6,1), key='peak_stop')],
+          [sg.Text('Fenêtre bruit:'), sg.InputText('0.6', size=(6,1), key='noise_start'), 
+           sg.Text('à'), sg.InputText('0.9', size=(6,1), key='noise_stop')]
       ])],
       [sg.Button('Traiter tous les fichiers', size=(20,2)), sg.Button('Quitter')]
     ]
@@ -587,6 +507,7 @@ def batch_process():
             input_folder = values['input_folder']
             output_folder = values['output_folder']
             
+            # Vérification des dossiers
             if not input_folder or not output_folder:
                 sg.popup_error('Veuillez sélectionner les dossiers d\'entrée et de sortie')
                 continue
@@ -594,7 +515,7 @@ def batch_process():
             if not os.path.exists(output_folder):
                 os.makedirs(output_folder)
             
-            # Recherche des fichiers Excel
+            # Recherche des fichiers Excel dans le dossier d'entrée
             excel_files = []
             for ext in ['*.xlsx', '*.xls']:
                 excel_files.extend(glob.glob(os.path.join(input_folder, ext)))
@@ -603,7 +524,7 @@ def batch_process():
                 sg.popup_error('Aucun fichier Excel trouvé dans le dossier d\'entrée')
                 continue
             
-            # Paramètres
+            # Récupération des paramètres utilisateur
             parameters = {
                 'photo_start': float(values['photo_start']),
                 'photo_stop': float(values['photo_stop']),
@@ -623,13 +544,15 @@ def batch_process():
             total_files = len(excel_files)
             successful = 0
             failed = 0
+            all_in_results = []  # Pour stocker les résultats pour All_In.xlsx
             
+            # Fenêtre de progression
             progress_layout = [[sg.Text(f'Traitement en cours... 0/{total_files}', key='progress_text')],
                               [sg.ProgressBar(total_files, orientation='h', size=(50, 20), key='progress_bar')],
                               [sg.Button('Annuler', key='cancel')]]
-            
             progress_window = sg.Window('Progression', progress_layout, finalize=True)
             
+            # Boucle de traitement de chaque fichier Excel
             for i, file_path in enumerate(excel_files):
                 event_prog, values_prog = progress_window.read(timeout=10)
                 if event_prog == 'cancel':
@@ -638,14 +561,30 @@ def batch_process():
                 progress_window['progress_text'].update(f'Traitement: {os.path.basename(file_path)} ({i+1}/{total_files})')
                 progress_window['progress_bar'].update(i)
                 
-                if process_single_file(file_path, output_folder, parameters):
+                # Appel du traitement sur un fichier
+                result, file_name, all_fails = process_single_file(file_path, output_folder, parameters)
+                if result:
                     successful += 1
+                    # On ne garde que les 3 premiers PercFail (PEAK1, PEAK2, PEAK3)
+                    row = [file_name]
+                    for idx in range(3):
+                        if all_fails and len(all_fails) > idx:
+                            row.append(all_fails[idx])
+                        else:
+                            row.append('')
+                    all_in_results.append(row)
                 else:
                     failed += 1
             
             progress_window.close()
             
-            # Résumé
+            # Sauvegarde du fichier All_In.xlsx récapitulatif
+            if all_in_results:
+                df_allin = pd.DataFrame(all_in_results, columns=['Fichier', 'PercFail_PEAK1', 'PercFail_PEAK2', 'PercFail_PEAK3'])
+                allin_path = os.path.join(output_folder, 'All_In.xlsx')
+                df_allin.to_excel(allin_path, index=False)
+            
+            # Affichage du résumé final
             sg.popup(f'Traitement terminé!\n\n'
                     f'Fichiers traités avec succès: {successful}\n'
                     f'Fichiers échoués: {failed}\n'
