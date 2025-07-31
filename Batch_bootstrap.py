@@ -345,6 +345,35 @@ def values_extraction(time, trace, start, stop):
         
     return windows
 
+def extract_contiguous_baseline_windows(baseline_data, window_size, step_size=1):
+    """
+    Extract contiguous windows from baseline data preserving temporal structure
+    """
+    windows = []
+    for start in range(0, len(baseline_data) - window_size + 1, step_size):
+        window = baseline_data[start:start + window_size]
+        windows.append(np.mean(window))  # Could also use np.max or np.sum
+    return np.array(windows)
+
+def statistical_test_vs_baseline(peak_value, baseline_distribution, alpha=0.05):
+    """
+    Optimal statistical test: percentile-based (non-parametric, robust to non-normality)
+    """
+    if len(baseline_distribution) == 0:
+        return False, 0, np.nan
+    
+    # Calculate percentile of peak in baseline distribution
+    percentile = (np.sum(baseline_distribution < peak_value) / len(baseline_distribution)) * 100
+    
+    # One-tailed test: significant if peak is in the upper tail
+    p_value = 1 - (percentile / 100)
+    significant = p_value < alpha
+    
+    # Also calculate z-score equivalent for reporting
+    z_equivalent = np.abs(peak_value - np.mean(baseline_distribution)) / np.std(baseline_distribution)
+    
+    return significant, percentile, z_equivalent
+
 def process_single_file(file_path, output_folder, parameters):
     """
     Traite un seul fichier avec les paramètres donnés
@@ -404,39 +433,61 @@ def process_single_file(file_path, output_folder, parameters):
         wb_data = Workbook()  # Fichier Excel pour les résultats agrégés
         ALL_FAILS = []  # Pourcentage d'échec (zscore <= 2) pour chaque pic
         for peak in range(parameters['n_peaks']):
-            EP, PEAK, ZSCORE, AMP, NS_AMP, STD_NS, STD_AMP = [], [], [], [], [], [], []
+            EP, PEAK, ZSCORE, AMP, NS_AMP, STD_NS, STD_AMP, PERCENTILE = [], [], [], [], [], [], [], []
             df_episodes = pd.DataFrame(index=None, columns=None)
             print(f'BOOTSTRAP PEAK{peak+1}')
+            
             for item in range(len(WINDOWS_AMP[peak])):
                 EP.append(f'Episode {item}')
-                # Bootstrap sur la fenêtre du pic
+                
+                # Bootstrap on peak window (unchanged)
                 amp_mean, amp_std, amp_cycle = bootstrap_patterns(WINDOWS_AMP[peak][item], N=len(WINDOWS_AMP[peak][item]))
-                # Bootstrap bruit (tirages aléatoires dans la fenêtre bruit)
-                ns_cycle = [np.mean(random.sample(windows_ns[item].tolist(), len(WINDOWS_AMP[peak][item]))) 
-                           for i in range(len(amp_cycle))]
-                ns_mean = np.mean(ns_cycle)
-                ns_std = np.std(ns_cycle)
+                
+                # CHANGED: Contiguous window baseline analysis
+                baseline_flat = np.array(WINDOWS_NS[peak][item]).flatten()  # Flatten baseline data robustly
+                peak_window_size = len(WINDOWS_AMP[peak][item])  # Size of peak window
+                
+                # Extract contiguous baseline windows (step=1 for overlapping, step=peak_window_size for non-overlapping)
+                baseline_windows = extract_contiguous_baseline_windows(baseline_flat, peak_window_size, step_size=1)
+                
+                if len(baseline_windows) < 10:  # Need minimum windows for statistics
+                    print(f"Warning: Only {len(baseline_windows)} baseline windows available")
+                
+                ns_mean = np.mean(baseline_windows)
+                ns_std = np.std(baseline_windows)
+                
+                # Net signal calculation
+                amp = amp_mean - ns_mean
+                AMP.append(amp)
                 NS_AMP.append(ns_mean)
                 STD_AMP.append(amp_std)
                 STD_NS.append(ns_std)
-                amp = amp_mean - ns_mean
-                AMP.append(amp)
-                df_episodes[f'noise{item}'] = ns_cycle
-                df_episodes[f'amp{item}'] = amp_cycle
-                z_score = amp/ns_std
-                ZSCORE.append(z_score)
-                if z_score <= 2:
-                    PEAK.append('Fail')
-                else:
+                
+                # CHANGED: Use optimal statistical test
+                significant, percentile, z_equiv = statistical_test_vs_baseline(amp_mean, baseline_windows)
+                
+                PERCENTILE.append(percentile)
+                ZSCORE.append(z_equiv)
+                
+                if significant:
                     PEAK.append('Success')
-            # Calcul du pourcentage d'échec pour ce pic
+                else:
+                    PEAK.append('Fail')
+                
+                # Store bootstrap cycles for Excel output
+                df_episodes[f'baseline_windows{item}'] = baseline_windows[:len(amp_cycle)] if len(baseline_windows) >= len(amp_cycle) else list(baseline_windows) + [np.nan]*(len(amp_cycle)-len(baseline_windows))
+                df_episodes[f'amp{item}'] = amp_cycle
+
+            # Calculate failure percentage and save results
             percentage_failures = (PEAK.count('Fail')/len(WINDOWS_AMP[peak]))*100
             ALL_FAILS.append(percentage_failures)
-            # Tableaux de résultats pour Excel
+            
+            # Updated dataframe with percentile information
             df_ep = pd.concat((pd.DataFrame(EP), pd.DataFrame(PEAK), pd.DataFrame(AMP), pd.DataFrame(NS_AMP),
-                               pd.DataFrame(STD_AMP), pd.DataFrame(STD_NS), pd.DataFrame(ZSCORE)), axis=1)
-            df_ep.columns = ['Episode','PEAK','AMP','AMPns','Std_amp','Std_ns','Zscore']
+                               pd.DataFrame(STD_AMP), pd.DataFrame(STD_NS), pd.DataFrame(ZSCORE), pd.DataFrame(PERCENTILE)), axis=1)
+            df_ep.columns = ['Episode','PEAK','AMP','AMPns','Std_amp','Std_ns','Zscore','Percentile']
             df_ep['PercFail'] = percentage_failures
+
             sheet_hist = wb_hist.create_sheet(f'PEAK{peak+1}')
             sheet_data = wb_data.create_sheet(f'PEAK{peak+1}')
             for r in dataframe_to_rows(df_episodes, index=False, header=True):
@@ -455,10 +506,114 @@ def process_single_file(file_path, output_folder, parameters):
         print(f"Fichiers sauvegardés: {hist_path}, {data_path}")
         
         # 7. Retourne True, nom du fichier, et liste des pourcentages d'échec pour le récapitulatif
+        # Nouvelle étape : Génération de la figure par fichier
+        plot_results_per_file(file_path, data_path, parameters)
         return True, file_name, ALL_FAILS
     except Exception as e:
         print(f"Erreur lors du traitement de {file_path}: {e}")
         return False, None, None
+
+# Nouvelle fonction pour générer la figure par fichier
+import matplotlib.colors as mcolors
+
+def plot_results_per_file(input_file, data_bootstrap_file, parameters):
+    """
+    Génère une seule figure par fichier input, avec toutes les traces complètes.
+    Les failures sont en gradient de rouge, les success en gradient de bleu (statut PEAK1).
+    Légende : numéro d'épisode (data_bootstrap) et numéro d'essai (input, index réel de la colonne sweep).
+    Axe X = colonne Time du fichier source.
+    Ajoute des barres pour toutes les fenêtres de pics étudiés.
+    """
+    try:
+        # Chargement des sweeps et du temps du fichier input
+        time, _, sweeps = load_xls(input_file)
+        if sweeps is None or len(sweeps) == 0 or time is None:
+            print(f"Impossible de charger les sweeps ou le temps pour {input_file}")
+            return
+        # Chargement des résultats bootstrap pour tous les pics
+        df = pd.read_excel(data_bootstrap_file, sheet_name=None)
+        # Récupérer les dataframes pour chaque pic
+        df_peaks = []
+        for i in range(1, parameters['n_peaks']+1):
+            sheet = f'PEAK{i}'
+            if sheet in df:
+                df_peaks.append(df[sheet])
+            else:
+                df_peaks.append(None)
+        if df_peaks[0] is None:
+            print(f"Aucune feuille PEAK1 trouvée dans {data_bootstrap_file}")
+            return
+        fig, ax = plt.subplots(figsize=(12,7))
+        # Préparer les couleurs selon PEAK1
+        fails = df_peaks[0]['PEAK'] == 'Fail'
+        success = df_peaks[0]['PEAK'] == 'Success'
+        reds = plt.cm.Reds(np.linspace(0.4, 1, max(1, sum(fails))))
+        blues = plt.cm.Blues(np.linspace(0.4, 1, max(1, sum(success))))
+        fail_idx = 0
+        succ_idx = 0
+        for i, row in df_peaks[0].iterrows():
+            if row['PEAK'] == 'Fail':
+                color = reds[fail_idx]
+                fail_idx += 1
+            else:
+                color = blues[succ_idx]
+                succ_idx += 1
+            if i < len(sweeps):
+                trace = sweeps[i]
+            else:
+                continue
+            # Récupérer les percentiles et statut pour chaque pic
+            perc_str = []
+            for k in range(len(df_peaks)):
+                if df_peaks[k] is not None and i < len(df_peaks[k]):
+                    perc = df_peaks[k].iloc[i]['Percentile']
+                    status = df_peaks[k].iloc[i]['PEAK']
+                    status_letter = 'S' if status == 'Success' else 'X'
+                    perc_str.append(f"{round(perc,1)}{status_letter}")
+                else:
+                    perc_str.append("-")
+            # Légende : Ep X / Perc1 = YS / Perc2 = ZX / ...
+            perc_legend = " / ".join([f"Perc{k+1} = {perc_str[k]}" for k in range(len(perc_str))])
+            ax.plot(time, trace, color=color, label=f"Ep {i} / {perc_legend}", alpha=0.8)
+        # Barre horizontale à 0
+        ax.axhline(0, color='grey', linestyle='--', linewidth=1)
+        # Barres verticales et % failure pour chaque pic
+        n_peaks = parameters['n_peaks']
+        freq = parameters['frequency']
+        t0 = parameters['peak_start']
+        t1 = parameters['peak_stop']
+        for i in range(n_peaks):
+            ax.axvline(t0, color='black', linestyle=':', linewidth=1)
+            ax.axvline(t1, color='black', linestyle=':', linewidth=1)
+            # % failure pour ce pic
+            dfp = df_peaks[i]
+            if dfp is not None:
+                perc_fail = (dfp['PEAK'].value_counts().get('Fail',0)/len(dfp))*100
+                x_text = (t0 + t1)/2
+                y_text = ax.get_ylim()[1] - 0.05*(ax.get_ylim()[1]-ax.get_ylim()[0])
+                ax.text(x_text, y_text, f"{perc_fail:.1f}% Fail", color='black', fontsize=10, ha='center', va='top', bbox=dict(facecolor='white', alpha=0.7, edgecolor='none'))
+            # Décalage selon la fréquence
+            if freq == '20':
+                t0 += 0.05
+                t1 += 0.05
+            elif freq == '50':
+                t0 += 0.02
+                t1 += 0.02
+            elif freq == '100':
+                t0 += 0.01
+                t1 += 0.01
+        ax.set_title(f"{Path(input_file).stem}")
+        ax.set_xlabel('Time (s)')
+        ax.set_ylabel('Amplitude')
+        ax.legend(fontsize=7, loc='best', ncol=2)
+        plt.tight_layout()
+        # Sauvegarde
+        fig_name = f"{Path(input_file).stem}.png"
+        out_path = os.path.join(os.path.dirname(data_bootstrap_file), fig_name)
+        plt.savefig(out_path, dpi=200)
+        print(f"Figure sauvegardée : {out_path}")
+    except Exception as e:
+        print(f"Erreur lors de la génération de la figure pour {input_file}: {e}")
 
 def batch_process():
     """
@@ -476,19 +631,19 @@ def batch_process():
       [sg.InputText(size=(50,1), key='output_folder'), sg.FolderBrowse()],
       [sg.Frame('Paramètres de correction', [
           [sg.Text('Photobleaching:'), sg.InputText('0.01', size=(6,1), key='photo_start'), 
-           sg.Text('à'), sg.InputText('0.95', size=(6,1), key='photo_stop'), sg.Text('sec')],
-          [sg.Text('Leak:'), sg.InputText('0.85', size=(6,1), key='leak_start'), 
-           sg.Text('à'), sg.InputText('0.95', size=(6,1), key='leak_stop'), sg.Text('sec')],
-          [sg.Text('Résiduel:'), sg.InputText('0.99', size=(6,1), key='res_start'), 
-           sg.Text('à'), sg.InputText('1.0', size=(6,1), key='res_stop'), sg.Text('sec')]
+           sg.Text('à'), sg.InputText('0.45', size=(6,1), key='photo_stop'), sg.Text('sec')],
+          [sg.Text('Leak:'), sg.InputText('0.35', size=(6,1), key='leak_start'), 
+           sg.Text('à'), sg.InputText('0.45', size=(6,1), key='leak_stop'), sg.Text('sec')],
+          [sg.Text('Résiduel:'), sg.InputText('0.49', size=(6,1), key='res_start'), 
+           sg.Text('à'), sg.InputText('0.5', size=(6,1), key='res_stop'), sg.Text('sec')]
       ])],
       [sg.Frame('Paramètres d\'analyse', [
           [sg.Text('Fréquence (Hz):'), sg.InputText('20', size=(4,1), key='frequency'),
            sg.Text('Nombre de pics:'), sg.InputText('3', size=(4,1), key='n_peaks')],
-          [sg.Text('Fenêtre pic:'), sg.InputText('0.998', size=(6,1), key='peak_start'), 
-           sg.Text('à'), sg.InputText('1.020', size=(6,1), key='peak_stop')],
-          [sg.Text('Fenêtre bruit:'), sg.InputText('0.6', size=(6,1), key='noise_start'), 
-           sg.Text('à'), sg.InputText('0.9', size=(6,1), key='noise_stop')]
+          [sg.Text('Fenêtre pic:'), sg.InputText('0.498', size=(6,1), key='peak_start'), 
+           sg.Text('à'), sg.InputText('0.520', size=(6,1), key='peak_stop')],
+          [sg.Text('Fenêtre bruit:'), sg.InputText('0.1', size=(6,1), key='noise_start'), 
+           sg.Text('à'), sg.InputText('0.4', size=(6,1), key='noise_stop')]
       ])],
       [sg.Button('Traiter tous les fichiers', size=(20,2)), sg.Button('Quitter')]
     ]
