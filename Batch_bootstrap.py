@@ -355,7 +355,7 @@ def extract_contiguous_baseline_windows(baseline_data, window_size, step_size=1)
         windows.append(np.mean(window))  # Could also use np.max or np.sum
     return np.array(windows)
 
-def statistical_test_vs_baseline(peak_value, baseline_distribution, alpha=0.05):
+def statistical_test_vs_baseline(peak_value, baseline_distribution, alpha=0.15):
     """
     Optimal statistical test: percentile-based (non-parametric, robust to non-normality)
     """
@@ -543,7 +543,7 @@ def plot_results_per_file(input_file, data_bootstrap_file, parameters):
         if df_peaks[0] is None:
             print(f"Aucune feuille PEAK1 trouvée dans {data_bootstrap_file}")
             return
-        fig, ax = plt.subplots(figsize=(12,7))
+        fig, (ax, ax2) = plt.subplots(2, 1, figsize=(12,12), sharex=True, gridspec_kw={'height_ratios': [2, 1]})
         # Préparer les couleurs selon PEAK1
         fails = df_peaks[0]['PEAK'] == 'Fail'
         success = df_peaks[0]['PEAK'] == 'Success'
@@ -572,11 +572,24 @@ def plot_results_per_file(input_file, data_bootstrap_file, parameters):
                     perc_str.append(f"{round(perc,1)}{status_letter}")
                 else:
                     perc_str.append("-")
-            # Légende : Ep X / Perc1 = YS / Perc2 = ZX / ...
             perc_legend = " / ".join([f"Perc{k+1} = {perc_str[k]}" for k in range(len(perc_str))])
             ax.plot(time, trace, color=color, label=f"Ep {i} / {perc_legend}", alpha=0.8)
+            # Calcul z-score sur baseline (fenêtre bruit du premier pic)
+            noise_start = parameters['noise_start']
+            noise_stop = parameters['noise_stop']
+            idx1 = np.searchsorted(time, noise_start, side='left')
+            idx2 = np.searchsorted(time, noise_stop, side='right')
+            baseline = trace[idx1:idx2]
+            mean_bsl = np.mean(baseline)
+            std_bsl = np.std(baseline)
+            if std_bsl == 0:
+                z_trace = np.zeros_like(trace)
+            else:
+                z_trace = (trace - mean_bsl) / std_bsl
+            ax2.plot(time, z_trace, color=color, label=f"Ep {i}", alpha=0.8)
         # Barre horizontale à 0
         ax.axhline(0, color='grey', linestyle='--', linewidth=1)
+        ax2.axhline(0, color='grey', linestyle='--', linewidth=1)
         # Barres verticales et % failure pour chaque pic
         n_peaks = parameters['n_peaks']
         freq = parameters['frequency']
@@ -585,6 +598,8 @@ def plot_results_per_file(input_file, data_bootstrap_file, parameters):
         for i in range(n_peaks):
             ax.axvline(t0, color='black', linestyle=':', linewidth=1)
             ax.axvline(t1, color='black', linestyle=':', linewidth=1)
+            ax2.axvline(t0, color='black', linestyle=':', linewidth=1)
+            ax2.axvline(t1, color='black', linestyle=':', linewidth=1)
             # % failure pour ce pic
             dfp = df_peaks[i]
             if dfp is not None:
@@ -592,6 +607,8 @@ def plot_results_per_file(input_file, data_bootstrap_file, parameters):
                 x_text = (t0 + t1)/2
                 y_text = ax.get_ylim()[1] - 0.05*(ax.get_ylim()[1]-ax.get_ylim()[0])
                 ax.text(x_text, y_text, f"{perc_fail:.1f}% Fail", color='black', fontsize=10, ha='center', va='top', bbox=dict(facecolor='white', alpha=0.7, edgecolor='none'))
+                y2_text = ax2.get_ylim()[1] - 0.05*(ax2.get_ylim()[1]-ax2.get_ylim()[0])
+                ax2.text(x_text, y2_text, f"{perc_fail:.1f}% Fail", color='black', fontsize=10, ha='center', va='top', bbox=dict(facecolor='white', alpha=0.7, edgecolor='none'))
             # Décalage selon la fréquence
             if freq == '20':
                 t0 += 0.05
@@ -606,6 +623,9 @@ def plot_results_per_file(input_file, data_bootstrap_file, parameters):
         ax.set_xlabel('Time (s)')
         ax.set_ylabel('Amplitude')
         ax.legend(fontsize=7, loc='best', ncol=2)
+        ax2.set_ylabel('Z-score (baseline)')
+        ax2.set_xlabel('Time (s)')
+        ax2.legend(fontsize=7, loc='best', ncol=2)
         plt.tight_layout()
         # Sauvegarde
         fig_name = f"{Path(input_file).stem}.png"
@@ -640,7 +660,7 @@ def batch_process():
       [sg.Frame('Paramètres d\'analyse', [
           [sg.Text('Fréquence (Hz):'), sg.InputText('20', size=(4,1), key='frequency'),
            sg.Text('Nombre de pics:'), sg.InputText('3', size=(4,1), key='n_peaks')],
-          [sg.Text('Fenêtre pic:'), sg.InputText('0.498', size=(6,1), key='peak_start'), 
+          [sg.Text('Fenêtre pic:'), sg.InputText('0.488', size=(6,1), key='peak_start'), 
            sg.Text('à'), sg.InputText('0.520', size=(6,1), key='peak_stop')],
           [sg.Text('Fenêtre bruit:'), sg.InputText('0.1', size=(6,1), key='noise_start'), 
            sg.Text('à'), sg.InputText('0.4', size=(6,1), key='noise_stop')]
