@@ -70,6 +70,9 @@ KEEP_FIGS_OPEN_ON_FINISH      = True
 USE_GUI                       = False  # Optional Tk navigation GUI
 RUN_BATCH_EXPORT              = True
 
+# Optional: overlay all trials for a file on one figure for quick visual QC
+ENABLE_TRIAL_OVERLAY_PLOT     = True
+
 # Kinetics search grids (ms); broadened to better capture long tails
 KIN_TAUR_GRID_MS    = [0.6, 0.8, 1.0, 1.2, 1.5, 2.0]
 # Include shorter decays to avoid overly slow tails
@@ -106,7 +109,7 @@ NULL_FAIL_THRESHOLD_PARAM = 1.0
 # Individual trace visibility toggles (cannot hide a trace if its data were computed)
 SHOW_TRACE_RAW    = False
 SHOW_TRACE_SAVGOL = False
-SHOW_TRACE_NNLS   = False
+SHOW_TRACE_NNLS   = True
 
 # Measurement role split:
 # - AMP_MEASUREMENT_METHOD: which method provides reported amplitudes in export
@@ -1020,7 +1023,8 @@ def plot_trace_and_ppr(time, raw_series, y_sg, stim_times, tau_r_fit, tau_d0_fit
                         rand_amps=None, fail_threshold=None, success_threshold=None,
                         baseline_mask=None, tau_r_for_null=None, tau_d0_for_null=None,
                         show_raw=True, show_sg=True, show_nnls=True, has_nnls=True,
-                        thr_label_override: str = None):
+                        thr_label_override: str = None,
+                        amp1_value: float = None):
     # Ensure computed data cannot be hidden
     if raw_series is not None:
         show_raw = True
@@ -1289,6 +1293,17 @@ def plot_trace_and_ppr(time, raw_series, y_sg, stim_times, tau_r_fit, tau_d0_fit
                 rug = np.sort(data)[::step]
                 ax_hist.vlines(rug, 0, 0.02 * ymax, color='0.2', alpha=0.15, linewidth=0.5)
 
+            # A1 marker
+            if 'amp1_value' in locals() and amp1_value is not None and np.isfinite(amp1_value):
+                ymark = 0.06 * ymax
+                ax_hist.plot([amp1_value], [ymark], marker='v', color='red', markersize=6,
+                             markeredgecolor='k', markeredgewidth=0.4)
+
+            # A1 marker (downward triangle)
+            if amp1_value is not None and np.isfinite(amp1_value):
+                ymark = 0.06 * ymax
+                ax_hist.plot([amp1_value], [ymark], marker='v', color='red', markersize=6,
+                             markeredgecolor='k', markeredgewidth=0.4)
             ax_hist.set_xlabel("Null amplitude")
             ax_hist.set_ylabel("Count")
         else:
@@ -1512,8 +1527,6 @@ def compute_metrics_for_file(xlsx_path: str,
                 plt.close(fig)
         # Trial rows with null amplitude sampling from SG trace only
         for t in range(n_trials):
-            if SHOW_PROGRESS and t % max(1, n_trials//5) == 0:
-                progress_print(f"Trial {t+1}/{n_trials}")
             y_t = Y_all[:, t]
             y_sg_t = Y_sg_all[:, t]
             # Null sampling times (deterministic, limited)
@@ -1527,7 +1540,14 @@ def compute_metrics_for_file(xlsx_path: str,
             amp_sg_t = windowed_max(time, y_sg_t, stim_times, peak_win_ms, avg_N_points, peak_search_pre_ms)
             row_sg = row_for("SG-windowedMax", amp_sg_t, "trial", t+1, extra={"thr_max_amp1": thr_max, "pval_amp1": pval_fun(amp_sg_t[0]) if amp_sg_t.size else np.nan, "noise_std": float(np.nanstd(null_amps)) if null_amps.size else np.nan})
             rows.append(row_sg)
+            if SHOW_PROGRESS:
+                if amp_sg_t.size and np.isfinite(amp_sg_t[0]) and np.isfinite(thr_max):
+                    status = 'success' if amp_sg_t[0] > thr_max else 'failure'
+                else:
+                    status = 'NA'
+                progress_print(f"Processing trial {t+1}/{n_trials}: {status}")
             if ENABLE_PER_TRIAL_PLOTS and (SHOW_PLOTS_DURING_BATCH or SAVE_PLOTS):
+                amp1_mark = float(amp_sg_t[0]) if amp_sg_t.size else np.nan
                 fig_t, _, _, _ = plot_trace_and_ppr(
                     time, y_t, y_sg_t, stim_times,
                     tau_r_fit=0.0, tau_d0_fit=0.0,
@@ -1541,7 +1561,8 @@ def compute_metrics_for_file(xlsx_path: str,
                     rand_amps=null_amps, fail_threshold=thr_max, success_threshold=None,
                     baseline_mask=baseline_mask, tau_r_for_null=None, tau_d0_for_null=None,
                     show_raw=SHOW_TRACE_RAW, show_sg=SHOW_TRACE_SAVGOL, show_nnls=False, has_nnls=False,
-                    thr_label_override=_format_fail_threshold_label(NULL_FAIL_THRESHOLD_PARAM, mode='sd')
+                    thr_label_override=_format_fail_threshold_label(NULL_FAIL_THRESHOLD_PARAM, mode='sd'),
+                    amp1_value=amp1_mark
                 )
                 if SAVE_PLOTS:
                     os.makedirs(os.path.join(BATCH_EXPORT_DIR, PLOTS_SUBDIR), exist_ok=True)
@@ -1638,15 +1659,15 @@ def compute_metrics_for_file(xlsx_path: str,
     rows = []
     def row_for(method, amps, pprs, level, trial_num, noise_std=np.nan, extra=None):
         row = {
-            "file": os.path.basename(xlsx_path),
-            "bouton": extract_bouton_name(xlsx_path),
-            "n_trials": int(n_trials),
-            "method": method, "level": level, "trial": int(trial_num),
-            "noise_std": float(noise_std),
+            'file': os.path.basename(xlsx_path),
+            'bouton': extract_bouton_name(xlsx_path),
+            'n_trials': int(n_trials),
+            'method': method, 'level': level, 'trial': int(trial_num),
+            'noise_std': float(noise_std),
         }
         for i in range(n_pulses):
-            row[f"amp_{i+1}"] = float(amps[i]) if i < len(amps) else np.nan
-            row[f"ppr_{i+1}"] = float(pprs[i]) if i < len(pprs) else np.nan
+            row[f'amp_{i+1}'] = float(amps[i]) if i < len(amps) else np.nan
+            row[f'ppr_{i+1}'] = float(pprs[i]) if i < len(pprs) else np.nan
         if extra:
             row.update(extra)
         return row
@@ -1666,8 +1687,6 @@ def compute_metrics_for_file(xlsx_path: str,
 
     # Individual trials
     for t in range(n_trials):
-        if SHOW_PROGRESS and t % max(1, n_trials//5) == 0:
-            progress_print(f"Processing trial {t+1}/{n_trials}")
 
         y_t = Y_all[:, t]
         y_sg_t = sg_smooth(y_t, sg_window, sg_poly)
@@ -1762,23 +1781,49 @@ def compute_metrics_for_file(xlsx_path: str,
         # noise_std based on chosen failure null
         noise_std_t = float(np.nanstd(null_amps_fail)) if np.size(null_amps_fail) else np.nan
 
+        # Progress line with success/failure based on AMP1 vs threshold1
+        if SHOW_PROGRESS:
+            # Use failure method's AMP1 for status so it matches %Fail
+            a1 = (a_t[0] if fail_method_u == 'NNLS' and a_t.size else
+                  (amp_sg_t[0] if fail_method_u == 'SAVGOL' and amp_sg_t.size else
+                   (amp_raw_t[0] if fail_method_u == 'RAW' and amp_raw_t.size else np.nan)))
+            thr1 = per_pulse_thr.get(1, np.nan)
+            if np.isfinite(a1) and np.isfinite(thr1):
+                status = 'success' if a1 > thr1 else 'failure'
+            else:
+                status = 'NA'
+            progress_print(f"Processing trial {t+1}/{n_trials}: {status}")
+
         ppr_raw_t  = normalize_amplitudes(amp_raw_t)
         ppr_sg_t   = normalize_amplitudes(amp_sg_t)
         ppr_nnls_t = normalize_amplitudes(a_t)
-        rows.append(row_for("Raw-windowedMax",   amp_raw_t,  ppr_raw_t,  "trial", t+1))
-        rows.append(row_for("SG-windowedMax",    amp_sg_t,   ppr_sg_t,   "trial", t+1))
-        # Common extras with per-pulse thresholds
+        rows.append(row_for('Raw-windowedMax', amp_raw_t, ppr_raw_t, 'trial', t+1))
+        rows.append(row_for('SG-windowedMax', amp_sg_t, ppr_sg_t, 'trial', t+1))
         extras_coeff = {
-            "thr_max_amp1": per_pulse_thr.get(1, np.nan),
-            "pval_amp1": per_pulse_pval.get(1, np.nan)
+            'thr_max_amp1': per_pulse_thr.get(1, np.nan),
+            'pval_amp1': per_pulse_pval.get(1, np.nan)
         }
         if 2 in per_pulse_thr:
-            extras_coeff["thr_max_amp2"] = per_pulse_thr[2]; extras_coeff["pval_amp2"] = per_pulse_pval[2]
+            extras_coeff['thr_max_amp2'] = per_pulse_thr[2]; extras_coeff['pval_amp2'] = per_pulse_pval[2]
         if 3 in per_pulse_thr:
-            extras_coeff["thr_max_amp3"] = per_pulse_thr[3]; extras_coeff["pval_amp3"] = per_pulse_pval[3]
-        rows.append(row_for("RobustNNLS-coeff",  a_t,        ppr_nnls_t, "trial", t+1,
-                    noise_std=noise_std_t,
-                    extra=extras_coeff))
+            extras_coeff['thr_max_amp3'] = per_pulse_thr[3]; extras_coeff['pval_amp3'] = per_pulse_pval[3]
+        # Per-pulse failure flags (True/False) based strictly on chosen failure method amplitudes
+        # Determine the amplitude vector used for failure classification
+        if fail_method_u == 'NNLS':
+            amp_for_fail = a_t
+        elif fail_method_u == 'SAVGOL':
+            amp_for_fail = amp_sg_t
+        else:  # RAW
+            amp_for_fail = amp_raw_t
+        for p_idx in range(1, min(3, n_pulses)+1):
+            thr_p = per_pulse_thr.get(p_idx, np.nan)
+            amp_val = amp_for_fail[p_idx-1] if np.size(amp_for_fail) >= p_idx else np.nan
+            if np.isfinite(amp_val) and np.isfinite(thr_p):
+                extras_coeff[f'fail_flag_amp{p_idx}'] = bool(amp_val <= thr_p)
+            else:
+                extras_coeff[f'fail_flag_amp{p_idx}'] = np.nan
+        rows.append(row_for('RobustNNLS-coeff', a_t, ppr_nnls_t, 'trial', t+1,
+                             noise_std=noise_std_t, extra=extras_coeff))
 
         # Residual-corrected NNLS
         amp_model_t = windowed_max(time, yhat_t, stim_times, peak_win_ms, avg_N_points, peak_search_pre_ms)
@@ -1872,6 +1917,61 @@ def compute_metrics_for_file(xlsx_path: str,
                 _show_now(fig, pause=PAUSE_PLOTS_DURING_BATCH)
             else:
                 plt.close(fig)
+
+    # Optional overlay of all trials in a single figure (raw vs SG shown as selected)
+    try:
+        if ENABLE_TRIAL_OVERLAY_PLOT and (SHOW_PLOTS_DURING_BATCH or SAVE_PLOTS):
+            zmask, z0, z1 = time_zoom_mask(time, train_start_local, isi_s, n_pulses, pre_zoom, post_zoom)
+            fig_ov, ax_ov = plt.subplots(figsize=(11, 5))
+            # Determine which per-trial rows to use for classification (failure method)
+            fail_map = {
+                'NNLS': 'RobustNNLS-coeff',
+                'RAW': 'Raw-windowedMax',
+                'SAVGOL': 'SG-windowedMax',
+            }
+            target_method = fail_map.get(fail_method_u, 'RobustNNLS-coeff')
+            df_rows = pd.DataFrame(rows) if rows else pd.DataFrame()
+            classify = {}
+            if not df_rows.empty:
+                tsel = df_rows[(df_rows.get('method') == target_method) & (df_rows.get('level') == 'trial')]
+                for _, rr in tsel.iterrows():
+                    tr = int(rr.get('trial', np.nan))
+                    a1 = pd.to_numeric(rr.get('amp_1'), errors='coerce')
+                    thr = pd.to_numeric(rr.get('thr_max_amp1'), errors='coerce')
+                    if np.isfinite(a1) and np.isfinite(thr):
+                        classify[tr] = ('success' if a1 > thr else 'failure')
+                    else:
+                        classify[tr] = 'NA'
+            n_succ = n_fail = n_na = 0
+            for t in range(n_trials):
+                lab = classify.get(t+1, 'NA')
+                if lab == 'success':
+                    color, alpha = 'tab:green', 0.5; n_succ += 1
+                elif lab == 'failure':
+                    color, alpha = 'tab:red', 0.5; n_fail += 1
+                else:
+                    color, alpha = '0.5', 0.3; n_na += 1
+                ax_ov.plot(time[zmask], Y_all[zmask, t], color=color, alpha=alpha, linewidth=0.8)
+            for st in stim_times:
+                if z0 <= st <= z1:
+                    ax_ov.axvline(st, ls=':', color='k', lw=0.6, alpha=0.6)
+            ax_ov.set_title(f"Trials overlay — {os.path.basename(xlsx_path)}  (succ={n_succ}, fail={n_fail}, NA={n_na})")
+            ax_ov.set_xlabel('Time (s)')
+            ax_ov.set_ylabel('ΔF/F0' if USE_DF_OVER_F0 else 'ΔF (baseline-subtracted)')
+            plt.tight_layout()
+            if SAVE_PLOTS:
+                os.makedirs(os.path.join(BATCH_EXPORT_DIR, PLOTS_SUBDIR), exist_ok=True)
+                base_name = os.path.splitext(os.path.basename(xlsx_path))[0]
+                parent_tag = os.path.basename(os.path.dirname(xlsx_path)) or 'root'
+                out_png = os.path.join(BATCH_EXPORT_DIR, PLOTS_SUBDIR,
+                                       f"{parent_tag}_{base_name}_trials_overlay.png")
+                fig_ov.savefig(out_png, dpi=150)
+            if SHOW_PLOTS_DURING_BATCH and PLOT_MODE != 'none':
+                _show_now(fig_ov, pause=PAUSE_PLOTS_DURING_BATCH)
+            else:
+                plt.close(fig_ov)
+    except Exception:
+        pass
 
     progress_print("Finished processing all trials")
     return rows
@@ -2074,6 +2174,7 @@ def batch_measure_complex(paths,
 
     wrote_any = False
     per_trial_rows = []  # For secondary Excel: individual AMP1 outcomes
+    # Open summary workbook (no fallback path logic)
     with pd.ExcelWriter(out_file) as writer:
         # Pre-create a hidden placeholder sheet so that even if nothing gets written
         # the workbook remains valid (will be removed/replaced if real sheets added)
@@ -2132,28 +2233,54 @@ def batch_measure_complex(paths,
                     & (df_metrics.get("level") == "trial")
                 ]
 
+                # Also capture rows from the failure classification method (often 'RobustNNLS-coeff')
+                fail_method_map = {"NNLS": "RobustNNLS-coeff", "SAVGOL": "SG-windowedMax", "RAW": "Raw-windowedMax"}
+                fail_method_key = fail_method_map.get(fail_key, method_key)
+                trial_sel_fail_method = df_metrics[
+                    (df_metrics.get("method") == fail_method_key)
+                    & (df_metrics.get("level") == "trial")
+                ]
+
                 # Collect per-trial AMP1 classification data (one row per trial)
-                try:
-                    if not trial_sel.empty and 'amp_1' in trial_sel.columns:
-                        folder_name = os.path.basename(os.path.normpath(path))
-                        base_file = os.path.splitext(os.path.basename(fp))[0]
-                        for _, rtrial in trial_sel.iterrows():
+                # Be robust to method_key mismatches: fall back to any 'level==trial' rows.
+                trial_sel_any = df_metrics[df_metrics.get("level") == "trial"]
+                # Prefer failure-method rows for classification; fall back to amplitude method; then any.
+                if not trial_sel_fail_method.empty:
+                    tsel = trial_sel_fail_method
+                elif not trial_sel.empty:
+                    tsel = trial_sel
+                else:
+                    tsel = trial_sel_any
+                if not tsel.empty and 'amp_1' in tsel.columns:
+                    folder_name = os.path.basename(os.path.normpath(path))
+                    base_file = os.path.splitext(os.path.basename(fp))[0]
+                    for _, rtrial in tsel.iterrows():
+                        try:
                             a_val = pd.to_numeric(rtrial.get('amp_1'), errors='coerce')
-                            thr_val = pd.to_numeric(rtrial.get('thr_max_amp1'), errors='coerce') if 'thr_max_amp1' in trial_sel.columns else np.nan
-                            if not np.isfinite(a_val):
-                                status = 'NA'
+                        except Exception:
+                            a_val = np.nan
+                        try:
+                            thr_val = pd.to_numeric(rtrial.get('thr_max_amp1'), errors='coerce')
+                        except Exception:
+                            thr_val = np.nan
+                        if not np.isfinite(a_val):
+                            status = 'NA'
+                        else:
+                            if np.isfinite(thr_val):
+                                status = 'success' if a_val > thr_val else 'failure'
                             else:
-                                status = 'success' if (np.isfinite(thr_val) and a_val > thr_val) else (
-                                         'failure' if np.isfinite(thr_val) else 'NA')
-                            per_trial_rows.append({
-                                'AMP1': float(a_val) if np.isfinite(a_val) else np.nan,
-                                'status': status,
-                                'file': base_file,
-                                'folder': folder_name,
-                                'trial': int(rtrial.get('trial')) if 'trial' in rtrial else np.nan,
-                            })
-                except Exception:
-                    pass
+                                status = 'NA'
+                        try:
+                            tnum = int(rtrial.get('trial')) if pd.notna(rtrial.get('trial')) else np.nan
+                        except Exception:
+                            tnum = np.nan
+                        per_trial_rows.append({
+                            'AMP1': float(a_val) if np.isfinite(a_val) else np.nan,
+                            'status': status,
+                            'file': base_file,
+                            'folder': folder_name,
+                            'trial': tnum,
+                        })
                 if avg_sel.empty:
                     continue
                 row = {"measurement": amp_key, "ID": format_fiber_id(fp)}
@@ -2168,22 +2295,43 @@ def batch_measure_complex(paths,
                         else np.nan
                     )
                 # New failure definition: each of pulses 1-3 uses its own baseline-derived threshold thr_max_amp{i}.
-                # If a per-pulse threshold is missing, leave %Fail{i} as NaN (no fallback classification).
+                # Use failure-method rows for classification to match per-trial status.
+                fail_method_map = {"NNLS": "RobustNNLS-coeff", "SAVGOL": "SG-windowedMax", "RAW": "Raw-windowedMax"}
+                fail_method_key = fail_method_map.get(fail_key, method_key)
+                trial_sel_fail = df_metrics[
+                    (df_metrics.get("method") == fail_method_key) & (df_metrics.get("level") == "trial")
+                ]
                 for i in range(1, min(3, n_pulses)+1):
-                    amp_vals = pd.to_numeric(trial_sel.get(f"amp_{i}"), errors="coerce")
-                    thr_col = f"thr_max_amp{i}"
-                    if thr_col in trial_sel.columns:
-                        thr_vals = pd.to_numeric(trial_sel.get(thr_col), errors="coerce")
-                        valid = (~amp_vals.isna()) & (~thr_vals.isna())
-                        row[f"%Fail{i}"] = (float(np.mean(amp_vals[valid] <= thr_vals[valid])) * 100.0) if valid.any() else np.nan
-                        if SHOW_PROGRESS and valid.any():
-                            try:
-                                n_valid = int(valid.sum()); n_fail = int((amp_vals[valid] <= thr_vals[valid]).sum())
-                                progress_print(f"    [%Fail debug] {format_fiber_id(fp)} pulse{i}: fails={n_fail}/{n_valid} (thr{i})")
-                            except Exception:
-                                pass
+                    # Prefer precomputed failure flags if present
+                    flag_col = f'fail_flag_amp{i}'
+                    if flag_col in trial_sel_fail.columns:
+                        flags = trial_sel_fail[flag_col]
+                        valid_mask = flags.isin([True, False])
+                        if valid_mask.any():
+                            n_valid = int(valid_mask.sum())
+                            n_fail = int((flags[valid_mask] == True).sum())
+                            row[f"%Fail{i}"] = round((n_fail / n_valid) * 100.0, 2)
+                            if SHOW_PROGRESS:
+                                progress_print(f"    [%Fail debug] {format_fiber_id(fp)} pulse{i}: fails={n_fail}/{n_valid} (flags)")
+                        else:
+                            row[f"%Fail{i}"] = np.nan
                     else:
-                        row[f"%Fail{i}"] = np.nan
+                        # Fallback: compute from amplitudes & thresholds (no pooling)
+                        amp_vals = pd.to_numeric(trial_sel_fail.get(f"amp_{i}"), errors="coerce")
+                        thr_col = f"thr_max_amp{i}"
+                        if thr_col in trial_sel_fail.columns:
+                            thr_vals = pd.to_numeric(trial_sel_fail.get(thr_col), errors="coerce")
+                            valid = (~amp_vals.isna()) & (~thr_vals.isna())
+                            if valid.any():
+                                cmp = amp_vals[valid] <= thr_vals[valid]
+                                n_valid = int(valid.sum()); n_fail = int(cmp.sum())
+                                row[f"%Fail{i}"] = round((n_fail / n_valid) * 100.0, 2)
+                                if SHOW_PROGRESS:
+                                    progress_print(f"    [%Fail debug] {format_fiber_id(fp)} pulse{i}: fails={n_fail}/{n_valid} (recomputed)")
+                            else:
+                                row[f"%Fail{i}"] = np.nan
+                        else:
+                            row[f"%Fail{i}"] = np.nan
                 rows.append(row)
             if not rows:
                 continue
