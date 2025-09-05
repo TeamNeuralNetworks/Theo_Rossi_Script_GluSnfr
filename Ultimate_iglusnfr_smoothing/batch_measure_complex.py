@@ -71,9 +71,14 @@ USE_GUI                       = False  # Optional Tk navigation GUI
 RUN_BATCH_EXPORT              = True
 
 # Kinetics search grids (ms); broadened to better capture long tails
-KIN_TAUR_GRID_MS    = [1.0, 2.0, 3.0]
-KIN_TAUD0_GRID_MS   = [8.0, 12.0, 16.0, 20.0, 24.0, 30.0]
-KIN_SLOPE_GRID_MS   = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0]  # per pulse
+KIN_TAUR_GRID_MS    = [0.6, 0.8, 1.0, 1.2, 1.5, 2.0]
+# Include shorter decays to avoid overly slow tails
+KIN_TAUD0_GRID_MS   = [1.6, 2.0, 2.5, 3.0, 4.0, 6.0, 8.0, 10.0]
+# Nonnegative slopes only (later pulses same or slower)
+KIN_SLOPE_GRID_MS   = [0.0, 0.25, 0.5, 1.0, 2.0]  # per pulse (nonnegative)
+
+# Constraint: keep τd non-decreasing across pulses (off by default to allow faster end-of-train)
+ENFORCE_NONDECREASING_TAUD = True
 
 ###############################
 #  C. PLOTTING / VISUAL       #
@@ -139,7 +144,7 @@ PEAK_SEARCH_POST_S = peak_search_post_ms / 1000.0
 ###############################
 USE_LINEAR_TAUD   = True
 SLOPE_BOUNDS      = (0.0, 0.015)    # Bounds on τd slope per pulse (s)
-TAUD_MIN_MARGIN   = 0.0005          # Min separation guard
+TAUD_MIN_MARGIN   = 0.0002          # Min separation guard (s); allow slightly faster decays
 FORCE_TAUD_MS     = None            # Force all τd if not None (debug)
 
 ###############################
@@ -169,9 +174,6 @@ DEFAULT_BATCH_INPUT_DIRS  = [ r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\S
                               #r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\WT_Theo",
                               #r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\WT_Theo_1scd"
 ]
-# Deprecated: BATCH_MEASUREMENT replaced by AMP_MEASUREMENT_METHOD/FAILURE_MEASUREMENT_METHOD
-# Kept only for CLI default fallback if not provided explicitly
-BATCH_MEASUREMENT       = "NNLS"
 BATCH_FILE_LIMIT        = 4     # Set small int for quick tests during development (e.g., 3)
 
 ###############################
@@ -464,14 +466,7 @@ def sample_null_amplitudes_consistent(
             k_fit = iglusnfr_kernel(t_fit - (st + d_hat), tau_r, tau_d)
             peak_amp = float(a_hat * np.max(k_fit))
             amps.append(peak_amp)
-    arr = np.asarray(amps, float)
-    if SHOW_PROGRESS:
-        mode_tag = 'bootstrap' if shuffle_bootstrap else 'det'
-        progress_print(
-            f"[null-fit-{mode_tag}] baseline=({baseline_start:.3f},{baseline_end:.3f}) null_window=({null_window_start:.3f},{null_window_end:.3f}) "
-            f"n_draw={len(starts)} n_amps={arr.size}"
-        )
-    return arr
+    return np.asarray(amps, float)
 def baseline_threshold_and_pval(null_amps, N: float, mode: str):
     """Return (thr, pval_func) over baseline null amplitudes using a single rule.
 
@@ -1567,8 +1562,9 @@ def compute_metrics_for_file(xlsx_path: str,
         time, Y_all, stim_times, baseline_mask
     )
 
-    # Ensure non-decreasing decay across pulses
-    tau_d_vec = np.maximum.accumulate(tau_d_vec)
+    # Optional: enforce non-decreasing τd across pulses
+    if ENFORCE_NONDECREASING_TAUD:
+        tau_d_vec = np.maximum.accumulate(tau_d_vec)
 
     # === Test override: force all τd to a fixed value ===
     if FORCE_TAUD_MS is not None:
@@ -2013,7 +2009,7 @@ def run_batch_export(gui: bool = False, amp_method: str = None, fail_method: str
         else:
             return run_batch_export_gui()
     progress_print("Starting batch export...")
-    meas_amp = (amp_method or AMP_MEASUREMENT_METHOD or BATCH_MEASUREMENT or "NNLS").upper()
+    meas_amp = (amp_method or AMP_MEASUREMENT_METHOD or "NNLS").upper()
     meas_fail = (fail_method or FAILURE_MEASUREMENT_METHOD or "NNLS").upper()
     try:
         batch_measure_complex(
@@ -2116,7 +2112,7 @@ def batch_measure_complex(paths,
                 # If compute_metrics_for_file returned nothing (e.g., BLEACH_INTERRUPT),
                 # insert a placeholder row so the folder is not skipped entirely.
                 if not metrics:
-                    placeholder = {"measurement": measurement, "ID": format_fiber_id(fp)}
+                    placeholder = {"measurement": amp_key, "ID": format_fiber_id(fp)}
                     for i in range(1, n_pulses+1):
                         placeholder[f"AMP{i}"] = np.nan
                     for i in range(2, n_pulses+1):
@@ -2136,9 +2132,6 @@ def batch_measure_complex(paths,
                     & (df_metrics.get("level") == "trial")
                 ]
 
-                # Hybrid handling: if exporting SAVGOL but hybrid flag active, we still used NNLS for thresholds.
-                # In that case method_key already points to SG-windowedMax; thresholds were copied onto SG rows.
-                # Nothing to change here, but we keep comment for clarity.
                 # Collect per-trial AMP1 classification data
                 try:
                     if not trial_sel.empty and 'amp_1' in trial_sel.columns:
