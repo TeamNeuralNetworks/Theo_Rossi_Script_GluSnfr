@@ -70,6 +70,11 @@ KEEP_FIGS_OPEN_ON_FINISH      = True
 USE_GUI                       = False  # Optional Tk navigation GUI
 RUN_BATCH_EXPORT              = True
 
+# Kinetics search grids (ms); broadened to better capture long tails
+KIN_TAUR_GRID_MS    = [1.0, 2.0, 3.0]
+KIN_TAUD0_GRID_MS   = [8.0, 12.0, 16.0, 20.0, 24.0, 30.0]
+KIN_SLOPE_GRID_MS   = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0]  # per pulse
+
 ###############################
 #  C. PLOTTING / VISUAL       #
 ###############################
@@ -91,7 +96,7 @@ SHUFFLE_BASELINE_BOOTSTRAP = False  # When True, null distribution uses random b
 #  - For NNLS   nulls: threshold = median(null) + N * (1.4826 * MAD(null))
 # Set N=2.0 to emulate a classic "2 SD" rule for SG and a robust
 #   "2 MAD-equiv" rule for NNLS.
-NULL_FAIL_THRESHOLD_PARAM = 2.0
+NULL_FAIL_THRESHOLD_PARAM = 5.0
 
 # Individual trace visibility toggles (cannot hide a trace if its data were computed)
 SHOW_TRACE_RAW    = False
@@ -181,11 +186,6 @@ TRAIN_START_OVERRIDE_MAP: Dict[str, float] = { r"C:\Users\Antoine.Valera\Desktop
 
 ###############################
 #  K. MISC / INTERNAL         #
-###############################
-F0_EPS = 1e-12  # small guard for F0 denominator
-
-###############################
-#  L. MISC / INTERNAL         #
 ###############################
 F0_EPS = 1e-12  # small guard for F0 denominator
 
@@ -915,12 +915,10 @@ def estimate_kinetics_from_average(time, y_avg, stim_times, baseline_mask,
                                    tau_d0_fixed=None, tau_d_end_fixed=None):
     progress_print("Fast kinetics estimation from average trace...")
 
-    # tau_r grid (1–3 ms)
-    tau_r_grid = np.linspace(0.001, 0.003, 3)
-
-    # Default: broad grids when endpoints not fixed
-    tau_d0_grid = np.linspace(0.008, 0.020, 7)     # 8–20 ms
-    slope_grid = np.linspace(0.0, 0.003, 3)        # 0–3 ms/pulse
+    # Grids (ms) -> seconds
+    tau_r_grid = np.array(KIN_TAUR_GRID_MS, float) / 1000.0
+    tau_d0_grid = np.array(KIN_TAUD0_GRID_MS, float) / 1000.0
+    slope_grid = np.array(KIN_SLOPE_GRID_MS, float) / 1000.0
 
     zmask, _, _ = time_zoom_mask(time, stim_times[0], isi_s, n_pulses, pre_zoom, post_zoom)
 
@@ -1212,33 +1210,91 @@ def plot_trace_and_ppr(time, raw_series, y_sg, stim_times, tau_r_fit, tau_d0_fit
 
     if ax_hist is not None:
         if rand_amps is not None and np.size(rand_amps):
-            bins = min(30, max(5, int(np.sqrt(len(rand_amps)))))
-            counts, edges, _ = ax_hist.hist(rand_amps, bins=bins, color="0.7", edgecolor="k")
-            zero_idx = np.searchsorted(edges, 0.0, side="right") - 1
-            if 0 <= zero_idx < len(counts):
-                zero_count = int(counts[zero_idx])
-                nonzero_max = counts[np.arange(len(counts)) != zero_idx].max() if len(counts) > 1 else 0
-                ymax = max(1.0, nonzero_max * 1.1)
-                ax_hist.set_ylim(0, ymax)
-                zero_right = edges[zero_idx+1]
-                x_span = edges[-1] - edges[0]
-                ax_hist.text(zero_right + 0.01 * x_span, ymax, str(zero_count),
-                             ha="left", va="bottom", clip_on=False)
-            else:
-                ymax = counts.max() * 1.1 if counts.size else 1.0
-                ax_hist.set_ylim(0, ymax)
+            # Clean finite data
+            data = np.asarray(rand_amps, float)
+            data = data[np.isfinite(data)]
+
+            # Freedman–Diaconis binning (robust), clamped to [10, 60]
+            def _fd_bins(x):
+                x = np.asarray(x, float)
+                n = x.size
+                if n < 2:
+                    return 10
+                q75, q25 = np.percentile(x, [75, 25])
+                iqr = float(q75 - q25)
+                if iqr <= 0:
+                    return int(max(10, min(60, np.sqrt(n))))
+                h = 2.0 * iqr * (n ** (-1/3))
+                if h <= 0:
+                    return int(max(10, min(60, np.sqrt(n))))
+                k = int(np.ceil((np.nanmax(x) - np.nanmin(x)) / h))
+                return int(max(10, min(60, k if np.isfinite(k) and k > 0 else 10)))
+
+            bins = _fd_bins(data)
+
+            # Draw histogram with subtle styling
+            counts, edges, patches = ax_hist.hist(
+                data, bins=bins, color="0.80", edgecolor="0.35", linewidth=0.6
+            )
+
+            # Zero line for reference
+            ax_hist.axvline(0.0, color="0.2", alpha=0.25, linewidth=0.8)
+
+            # Highlight region >= threshold
+            thr = fail_threshold if (fail_threshold is not None and np.isfinite(fail_threshold)) else None
+            if thr is not None:
+                ax_hist.axvspan(thr, edges[-1], facecolor="tab:red", alpha=0.08, zorder=0)
+
+            # Recolor bars by threshold
+            if patches is not None and len(edges) >= 2 and thr is not None:
+                for i, p in enumerate(patches):
+                    mid = 0.5 * (edges[i] + edges[i+1])
+                    if mid >= thr:
+                        p.set_facecolor("#f4a3a3")
+                        p.set_edgecolor("#cc4444")
+                    else:
+                        p.set_facecolor("#c9d4e8")
+                        p.set_edgecolor("#4f6aa3")
+
+            # Stats box
+            with np.errstate(all='ignore'):
+                mu = float(np.nanmean(data)) if data.size else np.nan
+                sd = float(np.nanstd(data)) if data.size else np.nan
+                med = float(np.nanmedian(data)) if data.size else np.nan
+                mad = float(np.nanmedian(np.abs(data - med))) if data.size else np.nan
+                sigma_hat = 1.4826 * mad if np.isfinite(mad) else np.nan
+            stats_txt = f"μ={mu:.3g}  σ={sd:.3g}\nmedian={med:.3g}  σMAD={sigma_hat:.3g}"
+            ax_hist.text(
+                0.02, 0.98, stats_txt, transform=ax_hist.transAxes,
+                ha="left", va="top", fontsize=8,
+                bbox=dict(boxstyle='round,pad=0.25', facecolor='white', edgecolor='0.8', alpha=0.85)
+            )
+
+            # Y-limits and grid
+            ymax = counts.max() * 1.15 if counts.size else 1.0
+            ax_hist.set_ylim(0, ymax)
+            ax_hist.grid(axis='y', color='0.85', linestyle='-', linewidth=0.5)
+
             # Primary threshold (rule-dependent)
-            if fail_threshold is not None and np.isfinite(fail_threshold):
+            if thr is not None:
                 thr_label = thr_label_override or "thr"
-                ax_hist.axvline(fail_threshold, color="red", linestyle="--", linewidth=1.2)
-                ax_hist.text(fail_threshold, 0.9 * ymax, f"{thr_label}={fail_threshold:.3g}",
+                ax_hist.axvline(thr, color="red", linestyle="--", linewidth=1.2)
+                ax_hist.text(thr, 0.92 * ymax, f"{thr_label}={thr:.3g}",
                              color="red", ha="right", va="top")
+
             # Secondary success threshold (e.g. 2x primary threshold)
             if success_threshold is not None and np.isfinite(success_threshold):
                 ax_hist.axvline(success_threshold, color="orange", linestyle=":", linewidth=1.2)
-                ax_hist.text(success_threshold, 0.75 * ymax, f"2x={success_threshold:.3g}",
+                ax_hist.text(success_threshold, 0.78 * ymax, f"2x={success_threshold:.3g}",
                              color="orange", ha="right", va="top")
-            ax_hist.set_xlabel("Null amp (baseline)")
+
+            # Rug plot (subsampled if large)
+            if data.size:
+                step = max(1, int(data.size // 150))
+                rug = np.sort(data)[::step]
+                ax_hist.vlines(rug, 0, 0.02 * ymax, color='0.2', alpha=0.15, linewidth=0.5)
+
+            ax_hist.set_xlabel("Null amplitude")
             ax_hist.set_ylabel("Count")
         else:
             ax_hist.set_axis_off()
