@@ -72,6 +72,7 @@ RUN_BATCH_EXPORT              = True
 
 # Optional: overlay all trials for a file on one figure for quick visual QC
 ENABLE_TRIAL_OVERLAY_PLOT     = True
+DISPLAY_DECAY                 = True   # Overlay previous event (N-1) decay as dotted line
 
 # Kinetics search grids (ms); broadened to better capture long tails
 KIN_TAUR_GRID_MS    = [0.6, 0.8, 1.0, 1.2, 1.5, 2.0]
@@ -467,7 +468,10 @@ def sample_null_amplitudes_consistent(
         t_fit = time[(time >= st - pre_zoom) & (time <= st + avail_post)]
         if t_fit.size:
             k_fit = iglusnfr_kernel(t_fit - (st + d_hat), tau_r, tau_d)
-            peak_amp = float(a_hat * np.max(k_fit))
+            y_evt = a_hat * k_fit
+            # Use the same windowed-max with N-point averaging around the peak
+            val = windowed_max(t_fit, y_evt, [st], peak_win_ms, avg_N_points, peak_search_pre_ms)
+            peak_amp = float(val[0]) if np.size(val) else 0.0
             amps.append(peak_amp)
     return np.asarray(amps, float)
 def baseline_threshold_and_pval(null_amps, N: float, mode: str):
@@ -1014,6 +1018,73 @@ def build_os_reconstruction(time, stim_times, tau_r_fit, tau_d_vec, deltas, a_ve
         y_os += a_vec[p] * iglusnfr_kernel(t_os - (st + sh), tau_r_fit, td)
     return t_os, y_os, t_zoom, zmask, z0, z1
 
+# Helper: compute per-pulse amplitudes as the peak of the scaled template
+def compute_template_peak_amps(
+    time,
+    stim_times,
+    tau_r,
+    tau_d_vec,
+    deltas,
+    a_vec,
+    win_ms,
+    N_points,
+    pre_ms
+):
+    try:
+        if (tau_d_vec is None) or (deltas is None) or (a_vec is None):
+            return np.zeros(len(stim_times), float)
+        amps = []
+        for p, st in enumerate(stim_times):
+            td = float(tau_d_vec[p])
+            sh = float(deltas[p])
+            amp = float(a_vec[p])
+            y_evt = amp * iglusnfr_kernel(time - (st + sh), tau_r, td)
+            val = windowed_max(time, y_evt, [st], win_ms, int(N_points), pre_ms)
+            amps.append(float(val[0]) if np.size(val) else 0.0)
+        return np.asarray(amps, float)
+    except Exception:
+        return np.zeros(len(stim_times), float)
+
+# Helper: local averaged max per pulse with correction for previous-event residual using NNLS model
+def compute_localmax_corrected_amps(
+    series_t,
+    series_y,
+    stim_times,
+    win_ms,
+    N_points,
+    pre_ms,
+    a_vec,
+    deltas,
+    tau_r,
+    tau_d_vec,
+):
+    series_t = np.asarray(series_t, float)
+    series_y = np.asarray(series_y, float) if series_y is not None else None
+    if series_y is None or series_t.size == 0 or np.size(series_y) == 0:
+        return np.zeros(len(stim_times), float)
+    amps = []
+    for p, st in enumerate(stim_times):
+        # Local averaged max around stim on the provided series
+        amp_win = windowed_max(series_t, series_y, [st], win_ms, int(N_points), pre_ms)
+        amp_val = float(amp_win[0]) if np.size(amp_win) else 0.0
+        # Peak time for residual evaluation
+        tp, _ = pick_peak_on_series(series_t, series_y, st, win_ms, pre_ms)
+        # Subtract previous event's modeled residual at tp if available
+        if (
+            p > 0 and a_vec is not None and deltas is not None and tau_d_vec is not None
+            and len(a_vec) > (p-1) and len(deltas) > (p-1) and len(tau_d_vec) > (p-1)
+        ):
+            st_prev = stim_times[p-1]
+            td_prev = float(tau_d_vec[p-1])
+            sh_prev = float(deltas[p-1])
+            a_prev  = float(a_vec[p-1])
+            # Build full previous-event vector on the same time grid, then interpolate at tp
+            prev_vec = a_prev * iglusnfr_kernel(series_t - (st_prev + sh_prev), tau_r, td_prev)
+            prev_at_tp = float(np.interp(tp, series_t, prev_vec)) if np.isfinite(tp) else 0.0
+            amp_val = amp_val - prev_at_tp
+        amps.append(amp_val)
+    return np.asarray(amps, float)
+
 def plot_trace_and_ppr(time, raw_series, y_sg, stim_times, tau_r_fit, tau_d0_fit,
                         t_os, y_os, peak_win_ms, avg_N_points, n_pulses,
                         ppr_nnls_center=None, ppr_band=None,
@@ -1032,8 +1103,20 @@ def plot_trace_and_ppr(time, raw_series, y_sg, stim_times, tau_r_fit, tau_d0_fit
         show_sg = True
     if has_nnls and (t_os is not None) and (y_os is not None):
         show_nnls = True
-    amp_raw = windowed_max(time, raw_series, stim_times, peak_win_ms, avg_N_points, peak_search_pre_ms)
-    amp_sg  = windowed_max(time, y_sg,      stim_times, peak_win_ms, avg_N_points, peak_search_pre_ms)
+    # Compute corrected amplitudes for RAW and SG using previous-event residual subtraction
+    if (tau_d_vec is not None and deltas is not None and a_vec is not None):
+        amp_raw = compute_localmax_corrected_amps(
+            time, raw_series, stim_times, peak_win_ms, avg_N_points, peak_search_pre_ms,
+            a_vec, deltas, tau_r_fit, tau_d_vec
+        ) if raw_series is not None else np.zeros(n_pulses)
+        amp_sg  = compute_localmax_corrected_amps(
+            time, y_sg,      stim_times, peak_win_ms, avg_N_points, peak_search_pre_ms,
+            a_vec, deltas, tau_r_fit, tau_d_vec
+        ) if y_sg is not None else np.zeros(n_pulses)
+    else:
+        # Fallback: uncorrected local max if model not available
+        amp_raw = windowed_max(time, raw_series, stim_times, peak_win_ms, avg_N_points, peak_search_pre_ms)
+        amp_sg  = windowed_max(time, y_sg,      stim_times, peak_win_ms, avg_N_points, peak_search_pre_ms)
 
     ppr_raw = normalize_amplitudes(amp_raw)
     ppr_sg  = normalize_amplitudes(amp_sg)
@@ -1065,11 +1148,48 @@ def plot_trace_and_ppr(time, raw_series, y_sg, stim_times, tau_r_fit, tau_d0_fit
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), gridspec_kw={"height_ratios": [3, 1]})
         ax_hist = None
     if show_raw and raw_series is not None:
-        ax1.plot(time[zmask], raw_series[zmask], linewidth=1.2, label=("Average raw" if avg_mode else "Raw (baseline-subtracted)"))
+        ax1.plot(time[zmask], raw_series[zmask], linewidth=0.5, color="0.5", label=("Average raw" if avg_mode else "Raw (baseline-subtracted)"))
     if show_sg and y_sg is not None:
-        ax1.plot(time[zmask], y_sg[zmask], linewidth=1.6, label=("Average SG(9,2)" if avg_mode else "Savitzky–Golay (9,2)"))
+        ax1.plot(time[zmask], y_sg[zmask], linewidth=0.5, color="green", label=("Average SG(9,2)" if avg_mode else "Savitzky–Golay (9,2)"))
     if show_nnls and has_nnls and (t_os is not None) and (y_os is not None):
-        ax1.plot(t_os, y_os, linewidth=1.8, label=("Average robust NNLS + shifts" if avg_mode else "Robust NNLS + shifts"))
+        ax1.plot(t_os, y_os, linewidth=0.5, color="red", label=("Average robust NNLS + shifts" if avg_mode else "Robust NNLS + shifts"))
+
+    # Optional: overlay previous event decays (N-1) as dotted lines to visualize estimated residuals
+    try:
+        if DISPLAY_DECAY and (tau_d_vec is not None and deltas is not None and a_vec is not None):
+            tt = t_os if (t_os is not None and y_os is not None) else time[zmask]
+            label_shown = False
+            # Choose peak times for markers: prefer NNLS os trace, then SG, then RAW
+            tp_list = []
+            for st in stim_times:
+                if (t_os is not None and y_os is not None):
+                    tp, _ = pick_peak_on_series(t_os, y_os, st, peak_win_ms, peak_search_pre_ms)
+                elif y_sg is not None:
+                    tp, _ = pick_peak_on_series(time, y_sg, st, peak_win_ms, peak_search_pre_ms)
+                else:
+                    tp, _ = pick_peak_on_series(time, raw_series if raw_series is not None else np.zeros_like(time), st, peak_win_ms, peak_search_pre_ms)
+                tp_list.append(tp)
+            for p in range(1, len(stim_times)):
+                prev = p - 1
+                st_prev = stim_times[prev]
+                td_prev = float(tau_d_vec[prev])
+                sh_prev = float(deltas[prev])
+                a_prev  = float(a_vec[prev])
+                y_prev = a_prev * iglusnfr_kernel(tt - (st_prev + sh_prev), tau_r_fit, td_prev)
+                # Only show forward decay from st_prev within the zoomed window
+                m = (tt >= st_prev)
+                if np.any(m):
+                    ax1.plot(tt[m], y_prev[m], linestyle=":", color="0.25", alpha=0.9, linewidth=0.8,
+                             label=("prev decay (N-1)" if not label_shown else None))
+                    label_shown = True
+                # Marker at the exact peak time where subtraction occurs for pulse p
+                tp = tp_list[p]
+                if np.isfinite(tp) and (tp >= st_prev) and (tp >= tt.min()) and (tp <= tt.max()):
+                    # Interpolate previous decay at tp for marker placement
+                    y_prev_tp = float(np.interp(tp, tt, y_prev))
+                    ax1.plot([tp], [y_prev_tp], marker='o', markersize=3, color='black', linestyle='None')
+    except Exception:
+        pass
 
 
     # Overlay baseline null fits directly on main axis if requested
@@ -1100,41 +1220,24 @@ def plot_trace_and_ppr(time, raw_series, y_sg, stim_times, tau_r_fit, tau_d0_fit
             if SHOW_PROGRESS:
                 progress_print(f"[null-main-overlay] failed: {ex}")
 
-    # Calculate NNLS-OS peak markers first
-    pt, pv = [], []
-    if has_nnls and t_os is not None and y_os is not None and show_nnls:
+    # Compute NNLS corrected amplitudes from the oversampled reconstruction if available
+    if has_nnls and (t_os is not None) and (y_os is not None) and (tau_d_vec is not None and deltas is not None and a_vec is not None):
+        amp_corrected = compute_localmax_corrected_amps(
+            t_os, y_os, stim_times, peak_win_ms, avg_N_points, peak_search_pre_ms,
+            a_vec, deltas, tau_r_fit, tau_d_vec
+        )
+        # Collect peak times and values for markers on y_os
+        pt, pv = [], []
         for st in stim_times:
-            tp, _ = pick_peak_on_series(t_os, y_os, st, peak_win_ms, peak_search_pre_ms)
+            tp, val = pick_peak_on_series(t_os, y_os, st, peak_win_ms, peak_search_pre_ms)
+            # average N points around tp as in ppr computation for visual consistency
             idx = np.searchsorted(t_os, tp)
-            halfN = avg_N_points//2
+            halfN = avg_N_points // 2
             i0 = max(0, idx - halfN); i1 = min(len(t_os)-1, idx + (avg_N_points-1-halfN))
             pt.append(tp); pv.append(np.mean(y_os[i0:i1+1]))
-
-    # Compute residual-corrected amplitudes without plotting individual model peaks
-    if tau_d_vec is not None and deltas is not None and a_vec is not None:
-        t_full_start = min(st + deltas[i] for i, st in enumerate(stim_times) if z0 <= st <= z1)
-        t_full_end = max(st + deltas[i] + 0.15 for i, st in enumerate(stim_times) if z0 <= st <= z1)
-        t_full = np.linspace(t_full_start, t_full_end, 1000)
-        amp_corrected = np.array(pv.copy()) if pv else np.zeros(n_pulses)
-        individual_traces = []
-        for p, st in enumerate(stim_times):
-            if z0 <= st <= z1:
-                td = float(tau_d_vec[p])
-                sh = float(deltas[p])
-                amp = float(a_vec[p])
-                t_start = st + sh
-                y_event_individual = np.zeros_like(t_full)
-                mask = t_full >= t_start
-                y_event_individual[mask] = amp * iglusnfr_kernel(t_full[mask] - t_start, tau_r_fit, td)
-                individual_traces.append((t_full, y_event_individual))
-                if p > 0 and p < len(amp_corrected):
-                    tp = pt[p] if p < len(pt) else t_start + tau_r_fit
-                    peak_idx = np.searchsorted(t_full, tp)
-                    prev_y = individual_traces[p-1][1]
-                    if 0 <= peak_idx < len(prev_y):
-                        amp_corrected[p] = amp_corrected[p] - prev_y[peak_idx]
     else:
-        amp_corrected = np.array(pv.copy()) if pv else np.zeros(n_pulses)
+        pt, pv = [], []
+        amp_corrected = np.zeros(n_pulses)
 
     for st in stim_times:
         if z0 <= st <= z1:
@@ -1149,11 +1252,11 @@ def plot_trace_and_ppr(time, raw_series, y_sg, stim_times, tau_r_fit, tau_d0_fit
 
     x = np.arange(1, n_pulses+1)
     if show_raw:
-        ax2.plot(x, ppr_raw,  marker="o", label="Raw (windowed max)")
+        ax2.plot(x, ppr_raw,  marker="o", label="Raw (corrected local max)")
     if show_sg:
-        ax2.plot(x, ppr_sg,   marker="o", label="SG(9,2) (windowed max)")
+        ax2.plot(x, ppr_sg,   marker="o", label="SG(9,2) (corrected local max)")
     if show_nnls and has_nnls:
-        ax2.plot(x, ppr_corrected, marker="s", color="darkred", label="NNLS residual-corrected", linewidth=2)
+        ax2.plot(x, ppr_corrected, marker="s", color="darkred", label="NNLS corrected", linewidth=2)
 
     if ppr_band is not None:
         lo, hi, epsf = ppr_band
@@ -1621,15 +1724,28 @@ def compute_metrics_for_file(xlsx_path: str,
             alt_iters=4
         )
     y_sg_avg = sg_smooth(y_avg, sg_window, sg_poly)
-    ppr_nnls_center = normalize_amplitudes(a_avg)
+    # NNLS amplitudes as corrected local maximums (Amp1 uncorrected; Amp2+ minus prev residual)
+    # Prefer oversampled reconstruction if available for peak timing
+    try:
+        t_os_avg, y_os_avg, _, _, _, _ = build_os_reconstruction(
+            time, stim_times, tau_r_fit, tau_d_vec, deltas_avg, a_avg, oversample_factor=10
+        )
+        amp_nnls_corr_avg = compute_localmax_corrected_amps(
+            t_os_avg, y_os_avg, stim_times, peak_win_ms, avg_N_points, peak_search_pre_ms,
+            a_avg, deltas_avg, tau_r_fit, tau_d_vec
+        )
+    except Exception:
+        amp_nnls_corr_avg = compute_localmax_corrected_amps(
+            time, y_avg if 'yhat_avg' not in locals() else yhat_avg,
+            stim_times, peak_win_ms, avg_N_points, peak_search_pre_ms,
+            a_avg, deltas_avg, tau_r_fit, tau_d_vec
+        )
+    ppr_nnls_center = normalize_amplitudes(amp_nnls_corr_avg)
 
 
     # Plot average
     if ENABLE_AVERAGE_PLOTS and (SHOW_PLOTS_DURING_BATCH or SAVE_PLOTS):
         progress_print("Generating average trace plot")
-        t_os_avg, y_os_avg, _, _, _, _ = build_os_reconstruction(
-            time, stim_times, tau_r_fit, tau_d_vec, deltas_avg, a_avg, oversample_factor=10
-        )
         fig, _amp_model_avg, amp_corrected_avg, ppr_corrected_avg = plot_trace_and_ppr(
             time, y_avg, y_sg_avg, stim_times, tau_r_fit, tau_d0_fit,
             t_os_avg, y_os_avg, peak_win_ms, avg_N_points, n_pulses,
@@ -1672,11 +1788,18 @@ def compute_metrics_for_file(xlsx_path: str,
             row.update(extra)
         return row
 
-    amp_raw_avg = windowed_max(time, y_avg,    stim_times, peak_win_ms, avg_N_points, peak_search_pre_ms)
-    amp_sg_avg  = windowed_max(time, y_sg_avg, stim_times, peak_win_ms, avg_N_points, peak_search_pre_ms)
+    amp_raw_avg = compute_localmax_corrected_amps(
+        time, y_avg, stim_times, peak_win_ms, avg_N_points, peak_search_pre_ms,
+        a_avg, deltas_avg, tau_r_fit, tau_d_vec
+    )
+    amp_sg_avg  = compute_localmax_corrected_amps(
+        time, y_sg_avg, stim_times, peak_win_ms, avg_N_points, peak_search_pre_ms,
+        a_avg, deltas_avg, tau_r_fit, tau_d_vec
+    )
     rows.append(row_for("Raw-windowedMax", amp_raw_avg,  amp_raw_avg/max(amp_raw_avg[0],1e-12), "average-trace", 0))
     rows.append(row_for("SG-windowedMax",  amp_sg_avg,   amp_sg_avg/max(amp_sg_avg[0],1e-12),  "average-trace", 0))
-    rows.append(row_for("RobustNNLS-coeff", a_avg,       ppr_nnls_center,                      "average-trace", 0))
+    # Report NNLS as corrected local-max amplitudes (kept under the same label for compatibility)
+    rows.append(row_for("RobustNNLS-coeff", amp_nnls_corr_avg, ppr_nnls_center, "average-trace", 0))
     if 'amp_corrected_avg' in locals() and 'ppr_corrected_avg' in locals():
         rows.append(row_for("RobustNNLS-corrected", amp_corrected_avg, ppr_corrected_avg, "average-trace", 0))
 
@@ -1708,9 +1831,20 @@ def compute_metrics_for_file(xlsx_path: str,
                 alt_iters=4
             )
 
-        # Compute raw/SG amplitudes for this trial (used for rows and p-values)
-        amp_raw_t = windowed_max(time, y_t,    stim_times, peak_win_ms, avg_N_points, peak_search_pre_ms)
-        amp_sg_t  = windowed_max(time, y_sg_t, stim_times, peak_win_ms, avg_N_points, peak_search_pre_ms)
+        # Compute corrected amplitudes for this trial (Amp1 local max; Amp2+ corrected for prev residual)
+        amp_raw_t = compute_localmax_corrected_amps(
+            time, y_t, stim_times, peak_win_ms, avg_N_points, peak_search_pre_ms,
+            a_t, deltas_t, tau_r_fit, tau_d_vec
+        )
+        amp_sg_t  = compute_localmax_corrected_amps(
+            time, y_sg_t, stim_times, peak_win_ms, avg_N_points, peak_search_pre_ms,
+            a_t, deltas_t, tau_r_fit, tau_d_vec
+        )
+        # NNLS amplitudes as corrected local maximums measured on the model reconstruction
+        amp_nnls_corr_t = compute_localmax_corrected_amps(
+            time, yhat_t, stim_times, peak_win_ms, avg_N_points, peak_search_pre_ms,
+            a_t, deltas_t, tau_r_fit, tau_d_vec
+        )
 
         # === Failure thresholds based on selected failure method ===
         per_pulse_thr = {}
@@ -1730,8 +1864,9 @@ def compute_metrics_for_file(xlsx_path: str,
                 n_samples=1000, seed=10_000 + t
             )
             thr_max1, pval_fun1 = baseline_threshold_and_pval(null_amps, NULL_FAIL_THRESHOLD_PARAM, mode='mad')
-            # p-value evaluated against amplitude from AMP method
-            amp_for_pval = a_t if amp_method_u == 'NNLS' else (amp_sg_t if amp_method_u == 'SAVGOL' else amp_raw_t)
+            # p-value evaluated against amplitude from AMP method (NNLS uses corrected local-max measure)
+            amp_for_pval = (amp_nnls_corr_t if amp_method_u == 'NNLS' else
+                            (amp_sg_t if amp_method_u == 'SAVGOL' else amp_raw_t))
             p_emp1 = pval_fun1(amp_for_pval[0]) if np.size(amp_for_pval) else np.nan
             per_pulse_thr = {1: thr_max1}
             per_pulse_pval = {1: p_emp1}
@@ -1769,7 +1904,7 @@ def compute_metrics_for_file(xlsx_path: str,
             thr_sg, pval_fun_sg = baseline_threshold_and_pval(null_amps_sg, NULL_FAIL_THRESHOLD_PARAM, mode='sd')
             for pulse_idx in range(1, min(3, n_pulses)+1):
                 per_pulse_thr[pulse_idx] = thr_sg
-            amp_for_pval = a_t if amp_method_u == 'NNLS' else (amp_sg_t if amp_method_u == 'SAVGOL' else amp_raw_t)
+            amp_for_pval = amp_nnls_corr_t if amp_method_u == 'NNLS' else (amp_sg_t if amp_method_u == 'SAVGOL' else amp_raw_t)
             if np.size(amp_for_pval):
                 per_pulse_pval[1] = pval_fun_sg(amp_for_pval[0])
                 if np.size(amp_for_pval) >= 2:
@@ -1784,9 +1919,11 @@ def compute_metrics_for_file(xlsx_path: str,
         # Progress line with success/failure based on AMP1 vs threshold1
         if SHOW_PROGRESS:
             # Use failure method's AMP1 for status so it matches %Fail
-            a1 = (a_t[0] if fail_method_u == 'NNLS' and a_t.size else
-                  (amp_sg_t[0] if fail_method_u == 'SAVGOL' and amp_sg_t.size else
-                   (amp_raw_t[0] if fail_method_u == 'RAW' and amp_raw_t.size else np.nan)))
+            a1 = (
+                amp_nnls_corr_t[0] if fail_method_u == 'NNLS' and np.size(amp_nnls_corr_t) else
+                (amp_sg_t[0] if fail_method_u == 'SAVGOL' and np.size(amp_sg_t) else
+                 (amp_raw_t[0] if fail_method_u == 'RAW' and np.size(amp_raw_t) else np.nan))
+            )
             thr1 = per_pulse_thr.get(1, np.nan)
             if np.isfinite(a1) and np.isfinite(thr1):
                 status = 'success' if a1 > thr1 else 'failure'
@@ -1796,7 +1933,7 @@ def compute_metrics_for_file(xlsx_path: str,
 
         ppr_raw_t  = normalize_amplitudes(amp_raw_t)
         ppr_sg_t   = normalize_amplitudes(amp_sg_t)
-        ppr_nnls_t = normalize_amplitudes(a_t)
+        ppr_nnls_t = normalize_amplitudes(amp_nnls_corr_t)
         rows.append(row_for('Raw-windowedMax', amp_raw_t, ppr_raw_t, 'trial', t+1))
         rows.append(row_for('SG-windowedMax', amp_sg_t, ppr_sg_t, 'trial', t+1))
         extras_coeff = {
@@ -1810,7 +1947,7 @@ def compute_metrics_for_file(xlsx_path: str,
         # Per-pulse failure flags (True/False) based strictly on chosen failure method amplitudes
         # Determine the amplitude vector used for failure classification
         if fail_method_u == 'NNLS':
-            amp_for_fail = a_t
+            amp_for_fail = amp_nnls_corr_t
         elif fail_method_u == 'SAVGOL':
             amp_for_fail = amp_sg_t
         else:  # RAW
@@ -1822,33 +1959,13 @@ def compute_metrics_for_file(xlsx_path: str,
                 extras_coeff[f'fail_flag_amp{p_idx}'] = bool(amp_val <= thr_p)
             else:
                 extras_coeff[f'fail_flag_amp{p_idx}'] = np.nan
-        rows.append(row_for('RobustNNLS-coeff', a_t, ppr_nnls_t, 'trial', t+1,
+        # Report NNLS as corrected local-max amplitudes (kept under the same label for compatibility)
+        rows.append(row_for('RobustNNLS-coeff', amp_nnls_corr_t, ppr_nnls_t, 'trial', t+1,
                              noise_std=noise_std_t, extra=extras_coeff))
 
-        # Residual-corrected NNLS
-        amp_model_t = windowed_max(time, yhat_t, stim_times, peak_win_ms, avg_N_points, peak_search_pre_ms)
-        amp_corrected_t = amp_model_t.copy()
-        if tau_d_vec is not None and deltas_t is not None and a_t is not None:
-            zmask_t, z0, z1 = time_zoom_mask(time, train_start_local, isi_s, n_pulses, pre_zoom, post_zoom)
-            t_full_start = min(st + deltas_t[i] for i, st in enumerate(stim_times) if z0 <= st <= z1)
-            t_full_end = max(st + deltas_t[i] + 0.15 for i, st in enumerate(stim_times) if z0 <= st <= z1)
-            t_full = np.linspace(t_full_start, t_full_end, 1000)
-            individual_traces = []
-            for p, st in enumerate(stim_times):
-                if z0 <= st <= z1:
-                    td = float(tau_d_vec[p]); sh = float(deltas_t[p]); amp = float(a_t[p])
-                    t_start = st + sh
-                    y_event_individual = np.zeros_like(t_full)
-                    mask = t_full >= t_start
-                    y_event_individual[mask] = amp * iglusnfr_kernel(t_full[mask] - t_start, tau_r_fit, td)
-                    individual_traces.append((t_full, y_event_individual))
-                    if p > 0:
-                        tp, _ = pick_peak_on_series(time, yhat_t, st, peak_win_ms, peak_search_pre_ms)
-                        peak_idx = np.searchsorted(t_full, tp)
-                        if 0 <= peak_idx < len(t_full):
-                            prev_y_event = individual_traces[p-1][1]
-                            amp_corrected_t[p] = amp_corrected_t[p] - prev_y_event[peak_idx]
-    ppr_corrected_t = normalize_amplitudes(amp_corrected_t)
+        # NNLS "corrected" measure equals corrected local-max amplitudes
+        amp_corrected_t = amp_nnls_corr_t.copy()
+        ppr_corrected_t = normalize_amplitudes(amp_corrected_t)
     extras_corr = {
         "thr_max_amp1": per_pulse_thr.get(1, np.nan),
         "pval_amp1": per_pulse_pval.get(1, np.nan)
