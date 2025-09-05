@@ -35,12 +35,12 @@ except Exception:
     tk = None
 
 
-def normalize_amplitudes(amp: np.ndarray, use_train_mean: bool = False, tiny: float = 1e-12):
-    """Return amplitudes normalized either to first pulse or to train mean."""
+def normalize_amplitudes(amp: np.ndarray, tiny: float = 1e-12):
+    """Return amplitudes normalized to first pulse (legacy train-mean option removed)."""
     amp = np.array(amp, dtype=float)
     if amp.size == 0:
         return amp
-    denom = np.nanmean(amp) if use_train_mean else amp[0]
+    denom = amp[0]
     if not np.isfinite(denom) or abs(denom) < tiny:
         return amp * np.nan
     with np.errstate(invalid='ignore', divide='ignore'):
@@ -63,7 +63,7 @@ ENABLE_ROBUST_FITTING         = True   # IRLS Huber weighting for NNLS
 ENABLE_PER_TRIAL_PLOTS        = True   # Generate individual trial plots
 ENABLE_AVERAGE_PLOTS          = True   # Generate average trace plot
 ENABLE_SEGMENTED_NO_OVERLAP   = True   # Backward segmented fitting (truncate at next stim)
-SHOW_PROGRESS                 = False  # Verbose progress lines
+SHOW_PROGRESS                 = True  # Verbose progress lines
 SHOW_PLOTS_DURING_BATCH       = True   # Display figures interactively
 SAVE_PLOTS                    = False  # Save plots to disk
 KEEP_FIGS_OPEN_ON_FINISH      = True
@@ -86,7 +86,24 @@ peak_search_pre_ms    = 0.0        # No pre-stimulus lookback (enforce causal pe
 peak_search_post_ms   = 10.0        # Post-stimulus peak search span (ms)
 SHOW_NULL_FITS_ON_MAIN    = True   # If True, overlay baseline null fits directly on main per-trial trace plot (extends window)
 SHUFFLE_BASELINE_BOOTSTRAP = False  # When True, null distribution uses random bootstrap windows (1000 draws) instead of deterministic scan
-NULL_FAIL_THRESHOLD_PARAM = 90.0   # 0-100 => percentile (100=max), >100 => max*(param/100). 50=median, 95=95th, 110=max+10%
+# Threshold multiplier (N):
+#  - For SAVGOL nulls: threshold = mean(null) + N * std(null)
+#  - For NNLS   nulls: threshold = median(null) + N * (1.4826 * MAD(null))
+# Set N=2.0 to emulate a classic "2 SD" rule for SG and a robust
+#   "2 MAD-equiv" rule for NNLS.
+NULL_FAIL_THRESHOLD_PARAM = 2.0
+
+# Individual trace visibility toggles (cannot hide a trace if its data were computed)
+SHOW_TRACE_RAW    = False
+SHOW_TRACE_SAVGOL = False
+SHOW_TRACE_NNLS   = False
+
+# Measurement role split:
+# - AMP_MEASUREMENT_METHOD: which method provides reported amplitudes in export
+# - FAILURE_MEASUREMENT_METHOD: which method generates null + thresholds for failure status
+# Valid values: 'NNLS', 'SAVGOL', 'RAW' (failure method typically 'NNLS' or 'SAVGOL')
+AMP_MEASUREMENT_METHOD = "NNLS"
+FAILURE_MEASUREMENT_METHOD = "NNLS"
 
 ###############################
 #  D. ROBUST NNLS / SHIFTS    #
@@ -132,40 +149,40 @@ SHOW_BLEACH_PLOTS           = False
 BLEACH_INTERRUPT            = False
 
 ###############################
-#  I. NORMALIZATION / PPR     #
-###############################
-PPR_NORMALIZE_TO_TRAIN_MEAN = False  # False: /A1, True: /train mean
-
-###############################
-#  J. BATCH / EXPORT          #
+#  I. BATCH / EXPORT          #
 ###############################
 BATCH_EXPORT_DIR          = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL"
-DEFAULT_BATCH_OUTPUT_FILE = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\ppr_results_higher_failure9xx.xlsx"
-DEFAULT_BATCH_INPUT_DIRS  = [
-    r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Stability_Before_05",
-    r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Stability_After_05",
-    r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Stability_Before",
-    r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Stability_After",
-    r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\WT_Anthime",
-    r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\WT_Theo_1scd",
-    r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\WT_Theo",
-    r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Theo_1_5Ca",
-    r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Theo_4Ca",
-    r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\SynII",
+DEFAULT_BATCH_OUTPUT_FILE = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\ppr_NNLS.xlsx"
+DEFAULT_BATCH_INPUT_DIRS  = [ r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Stability_After",
+                              #r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Stability_After_05",
+                              #r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Stability_Before",
+                              #r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Stability_Before_05",
+                              #r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\SynII",
+                              #r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Theo_1_5Ca",
+                              #r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Theo_4Ca",
+                              #r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\WT_Anthime",
+                              #r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\WT_Theo",
+                              #r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\WT_Theo_1scd"
 ]
+# Deprecated: BATCH_MEASUREMENT replaced by AMP_MEASUREMENT_METHOD/FAILURE_MEASUREMENT_METHOD
+# Kept only for CLI default fallback if not provided explicitly
 BATCH_MEASUREMENT       = "NNLS"
-BATCH_FILE_LIMIT        = None      # Set small int for quick tests during development (e.g., 3)
+BATCH_FILE_LIMIT        = 4     # Set small int for quick tests during development (e.g., 3)
 
 ###############################
-#  K. TRAIN START OVERRIDES   #
+#  J. TRAIN START OVERRIDES   #
 ###############################
-TRAIN_START_OVERRIDE_MAP: Dict[str, float] = {
-    r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Stability_Before_05": 0.5,
-    r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Stability_After_05": 0.5,
-    r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\WT_Theo": 0.5,
-    r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Theo_1_5Ca": 0.5,
-    r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Theo_4Ca": 0.5,
+TRAIN_START_OVERRIDE_MAP: Dict[str, float] = { r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Stability_After_05": 0.5,
+                                               r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Stability_Before_05": 0.5,
+                                               r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Theo_1_5Ca": 0.5,
+                                               r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Theo_4Ca": 0.5,
+                                               r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\WT_Theo": 0.5
 }
+
+###############################
+#  K. MISC / INTERNAL         #
+###############################
+F0_EPS = 1e-12  # small guard for F0 denominator
 
 ###############################
 #  L. MISC / INTERNAL         #
@@ -285,17 +302,6 @@ def _show_now(fig, pause=0.05):
     except Exception:
         pass
 
-# --------------------------
-# Random baseline amplitude sampling
-# --------------------------
-
-def sample_null_amplitudes(*args, **kwargs):  # pragma: no cover
-    """Deprecated placeholder for legacy null sampler.
-
-    Retained only so older serialized analyses referencing its name do not error.
-    New code uses sample_null_amplitudes_consistent.
-    """
-    return np.array([])
 
 def empirical_threshold(null_amps, alpha=0.05):
     """
@@ -318,15 +324,14 @@ def _fit_single_pulse_amp_consistent(
     robust=True, huber_delta=5.5, irls_iters=6,
     allow_shift=True, delta_max_s=0.001, delta_step_s=0.00025
 ):
-    """Estimate single-pulse amplitude at time 'st' with optional micro-shift (no whitening).
+    """Estimate single-pulse amplitude at time 'st' with optional micro-shift.
 
-    Simplified version after removal of whitening & Bayesian paths.
     Returns (a_hat, best_delta)."""
     zmask = (time >= (st - pre_zoom)) & (time <= (st + post_zoom))
     if not np.any(zmask):
         return 0.0, max(SHIFT_MIN_MS/1000.0, 0.0)
 
-    # Local segment (no whitening)
+    # Local segment
     y_seg = y[zmask]
 
     def _nnls_irls_singlecol(y_orig, k_col, robust_flag, delta_h, iters):
@@ -353,7 +358,7 @@ def _fit_single_pulse_amp_consistent(
         k_full = iglusnfr_kernel(time - (st + d), tau_r, tau_d)
         if not np.any(k_full):
             continue
-        # Direct kernel segment (no whitening)
+        # Direct kernel segment
         k_wz = k_full[zmask]
         if k_wz.size < 3 or np.all(k_wz == 0):
             continue
@@ -467,33 +472,55 @@ def sample_null_amplitudes_consistent(
             f"n_draw={len(starts)} n_amps={arr.size}"
         )
     return arr
+def baseline_threshold_and_pval(null_amps, N: float, mode: str):
+    """Return (thr, pval_func) over baseline null amplitudes using a single rule.
 
-def baseline_threshold_and_pval(null_amps, param):
-    """Return (thr, pval_func) using configurable rule over baseline null amplitudes.
+    mode:
+      - 'sd'  => thr = mean(null)   + N * std(null)
+      - 'mad' => thr = median(null) + N * (1.4826 * MAD(null))
 
-    param semantics:
-      0 <= param <= 100 : percentile of null_amps (50=median, 95=95th, 100=100th=max)
-      param  > 100      : scale above max => max(null_amps) * (param/100).
-                          e.g. 110 => max + 10% of max.
     If null_amps empty -> (NaN, lambda -> NaN).
     pval_func(x) = empirical one-sided p-value P(null >= x) with +1 smoothing.
     """
-    if null_amps is None or null_amps.size == 0 or not np.isfinite(param):
+    if null_amps is None or np.size(null_amps) == 0 or not np.isfinite(N):
         return np.nan, (lambda x: np.nan)
     a = np.asarray(null_amps, float)
     with np.errstate(all='ignore'):
-        a_max = float(np.nanmax(a))
-    if not np.isfinite(a_max):
-        return np.nan, (lambda x: np.nan)
-    if param <= 100.0:
-        p = min(100.0, max(0.0, float(param)))
-        with np.errstate(all='ignore'):
-            thr = float(np.nanpercentile(a, p))
-    else:
-        thr = a_max * (float(param) / 100.0)
+        mode_u = (mode or '').strip().lower()
+        if mode_u == 'sd':
+            mu = float(np.nanmean(a))
+            sd = float(np.nanstd(a))
+            thr = float(mu + float(N) * sd) if np.isfinite(sd) else np.nan
+        elif mode_u == 'mad':
+            med = float(np.nanmedian(a))
+            mad = float(np.nanmedian(np.abs(a - med)))
+            sigma_hat = 1.4826 * mad  # Normal-equiv scale
+            thr = float(med + float(N) * sigma_hat) if np.isfinite(sigma_hat) else np.nan
+        else:
+            return np.nan, (lambda x: np.nan)
     def pval(x):
         return float((np.sum(a >= x) + 1) / (a.size + 1))
     return thr, pval
+
+# Helper: human-readable threshold label based on NULL_FAIL_THRESHOLD_PARAM
+def _format_fail_threshold_label(N: float, mode: str) -> str:
+    """Return label string matching the active threshold rule.
+
+    Modes:
+      * 'sd'  -> 'thr{N}SD'  (e.g., N=2 => 'thr2SD')
+      * 'mad' -> 'thr{N}MAD' (N times 1.4826*MAD above median)
+    """
+    try:
+        if not np.isfinite(N):
+            return "thr"
+        mode_u = (mode or '').lower()
+        if mode_u == 'sd':
+            return f"thr{N:g}SD"
+        if mode_u == 'mad':
+            return f"thr{N:g}MAD"
+        return "thr"
+    except Exception:
+        return "thr"
 
 # --------------------------
 # Null fit animation helpers
@@ -682,7 +709,7 @@ zoom_mask = None
 # --------------------------
 
 def nnls_huber(y, X, time, zoom_mask, robust=True, delta=1.5, irls_iters=6):
-    """Robust (Huber) NNLS on a zoomed window (whitening removed)."""
+    """Robust (Huber) NNLS on a zoomed window."""
     if not ENABLE_ROBUST_FITTING:
         robust = False
         irls_iters = 1
@@ -724,10 +751,10 @@ def fit_amplitudes_and_shifts(y, time, stim_times, tau_r, tau_d_vec, baseline_ma
     """Alternating optimization of amplitudes and micro-shifts.
 
     A more efficient shift evaluation strategy is used here.  Baseline design
-    components and their whitened versions are precomputed once.  During shift
+    components are precomputed once.  During shift
     searches only the affected column is updated via interpolation on the
-    precomputed kernels, and the whitened residual is updated incrementally.
-    This avoids rebuilding the full design matrix or re-whitening the residual
+    precomputed kernels, and the residual is updated incrementally.
+    This avoids rebuilding the full design matrix
     for every candidate shift.
     """
 
@@ -882,9 +909,6 @@ def fit_amplitudes_no_overlap_backward(
     return a, deltas, X, yhat
 
 # --------------------------
-### Bayesian MAP code removed per cleanup request ###
-
-# --------------------------
 # Fast kinetics estimation from average trace
 # --------------------------
 def estimate_kinetics_from_average(time, y_avg, stim_times, baseline_mask, 
@@ -899,8 +923,6 @@ def estimate_kinetics_from_average(time, y_avg, stim_times, baseline_mask,
     slope_grid = np.linspace(0.0, 0.003, 3)        # 0–3 ms/pulse
 
     zmask, _, _ = time_zoom_mask(time, stim_times[0], isi_s, n_pulses, pre_zoom, post_zoom)
-
-    # Whitening removed
 
     def obj_for(tau_r, tau_d_vec):
         try:
@@ -1001,16 +1023,23 @@ def plot_trace_and_ppr(time, raw_series, y_sg, stim_times, tau_r_fit, tau_d0_fit
                         ppr_nnls_center=None, ppr_band=None,
                         title_prefix="", avg_mode=False, n_trials=1,
                         tau_d_vec=None, deltas=None, a_vec=None,
-                        # === NEW: optional Bayes overlay ===
-                        t_os_bayes=None, y_os_bayes=None, ppr_bayes=None, label_bayes="Bayes-MAP",
                         train_mean_norm: bool = False,
                         rand_amps=None, fail_threshold=None, success_threshold=None,
-                        baseline_mask=None, tau_r_for_null=None, tau_d0_for_null=None):
+                        baseline_mask=None, tau_r_for_null=None, tau_d0_for_null=None,
+                        show_raw=True, show_sg=True, show_nnls=True, has_nnls=True,
+                        thr_label_override: str = None):
+    # Ensure computed data cannot be hidden
+    if raw_series is not None:
+        show_raw = True
+    if y_sg is not None:
+        show_sg = True
+    if has_nnls and (t_os is not None) and (y_os is not None):
+        show_nnls = True
     amp_raw = windowed_max(time, raw_series, stim_times, peak_win_ms, avg_N_points, peak_search_pre_ms)
     amp_sg  = windowed_max(time, y_sg,      stim_times, peak_win_ms, avg_N_points, peak_search_pre_ms)
 
-    ppr_raw = normalize_amplitudes(amp_raw, use_train_mean=train_mean_norm)
-    ppr_sg  = normalize_amplitudes(amp_sg,  use_train_mean=train_mean_norm)
+    ppr_raw = normalize_amplitudes(amp_raw)
+    ppr_sg  = normalize_amplitudes(amp_sg)
 
     # If we intend to overlay baseline null fits on the main plot, extend left bound to full baseline range
     if SHOW_NULL_FITS_ON_MAIN and baseline_mask is not None and not avg_mode:
@@ -1038,13 +1067,13 @@ def plot_trace_and_ppr(time, raw_series, y_sg, stim_times, tau_r_fit, tau_d0_fit
         # Average trace: keep simpler layout (no dedicated histogram needed typically)
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), gridspec_kw={"height_ratios": [3, 1]})
         ax_hist = None
-    ax1.plot(time[zmask], raw_series[zmask], linewidth=1.2, label=("Average raw" if avg_mode else "Raw (baseline-subtracted)"))
-    ax1.plot(time[zmask], y_sg[zmask], linewidth=1.6, label=("Average SG(9,2)" if avg_mode else "Savitzky–Golay (9,2)"))
-    ax1.plot(t_os, y_os, linewidth=1.8, label=("Average robust NNLS + shifts" if avg_mode else "Robust NNLS + shifts"))
+    if show_raw and raw_series is not None:
+        ax1.plot(time[zmask], raw_series[zmask], linewidth=1.2, label=("Average raw" if avg_mode else "Raw (baseline-subtracted)"))
+    if show_sg and y_sg is not None:
+        ax1.plot(time[zmask], y_sg[zmask], linewidth=1.6, label=("Average SG(9,2)" if avg_mode else "Savitzky–Golay (9,2)"))
+    if show_nnls and has_nnls and (t_os is not None) and (y_os is not None):
+        ax1.plot(t_os, y_os, linewidth=1.8, label=("Average robust NNLS + shifts" if avg_mode else "Robust NNLS + shifts"))
 
-    # Optional Bayes overlay
-    if t_os_bayes is not None and y_os_bayes is not None:
-        ax1.plot(t_os_bayes, y_os_bayes, linewidth=2.0, label=label_bayes)
 
     # Overlay baseline null fits directly on main axis if requested
     if SHOW_NULL_FITS_ON_MAIN and baseline_mask is not None and not avg_mode and tau_r_for_null is not None and tau_d0_for_null is not None:
@@ -1076,12 +1105,13 @@ def plot_trace_and_ppr(time, raw_series, y_sg, stim_times, tau_r_fit, tau_d0_fit
 
     # Calculate NNLS-OS peak markers first
     pt, pv = [], []
-    for st in stim_times:
-        tp, _ = pick_peak_on_series(t_os, y_os, st, peak_win_ms, peak_search_pre_ms)
-        idx = np.searchsorted(t_os, tp)
-        halfN = avg_N_points//2
-        i0 = max(0, idx - halfN); i1 = min(len(t_os)-1, idx + (avg_N_points-1-halfN))
-        pt.append(tp); pv.append(np.mean(y_os[i0:i1+1]))
+    if has_nnls and t_os is not None and y_os is not None and show_nnls:
+        for st in stim_times:
+            tp, _ = pick_peak_on_series(t_os, y_os, st, peak_win_ms, peak_search_pre_ms)
+            idx = np.searchsorted(t_os, tp)
+            halfN = avg_N_points//2
+            i0 = max(0, idx - halfN); i1 = min(len(t_os)-1, idx + (avg_N_points-1-halfN))
+            pt.append(tp); pv.append(np.mean(y_os[i0:i1+1]))
 
     # Compute residual-corrected amplitudes without plotting individual model peaks
     if tau_d_vec is not None and deltas is not None and a_vec is not None:
@@ -1113,19 +1143,20 @@ def plot_trace_and_ppr(time, raw_series, y_sg, stim_times, tau_r_fit, tau_d0_fit
         if z0 <= st <= z1:
             ax1.axvline(st, linestyle=":", linewidth=1.0)
 
-    ppr_corrected = normalize_amplitudes(amp_corrected, use_train_mean=train_mean_norm) if len(amp_corrected) else np.zeros(n_pulses)
+    ppr_corrected = normalize_amplitudes(amp_corrected) if len(amp_corrected) else np.zeros(n_pulses)
 
     ttl = title_prefix or (f"Average of {n_trials} trials" if avg_mode else f"Single trial")
-    ax1.set_title(f"{ttl} — Raw vs SG vs NNLS(+δ){' vs Bayes' if ppr_bayes is not None else ''}\nτr={tau_r_fit*1e3:.1f} ms, τd0={tau_d0_fit*1e3:.1f} ms")
+    ax1.set_title(f"{ttl} — Raw vs SG vs NNLS(+δ)\nτr={tau_r_fit*1e3:.1f} ms, τd0={tau_d0_fit*1e3:.1f} ms")
     ax1.set_xlabel("Time (s)"); ax1.set_ylabel("ΔF/F0" if USE_DF_OVER_F0 else "ΔF (baseline-subtracted)")
     ax1.legend(loc="upper right")
 
     x = np.arange(1, n_pulses+1)
-    ax2.plot(x, ppr_raw,  marker="o", label="Raw (windowed max)")
-    ax2.plot(x, ppr_sg,   marker="o", label="SG(9,2) (windowed max)")
-    ax2.plot(x, ppr_corrected, marker="s", color="darkred", label="NNLS residual-corrected", linewidth=2)
-    if ppr_bayes is not None:
-        ax2.plot(x, ppr_bayes, marker="D", label=label_bayes, linewidth=2)
+    if show_raw:
+        ax2.plot(x, ppr_raw,  marker="o", label="Raw (windowed max)")
+    if show_sg:
+        ax2.plot(x, ppr_sg,   marker="o", label="SG(9,2) (windowed max)")
+    if show_nnls and has_nnls:
+        ax2.plot(x, ppr_corrected, marker="s", color="darkred", label="NNLS residual-corrected", linewidth=2)
 
     if ppr_band is not None:
         lo, hi, epsf = ppr_band
@@ -1158,20 +1189,19 @@ def plot_trace_and_ppr(time, raw_series, y_sg, stim_times, tau_r_fit, tau_d0_fit
     ppr_raw = sanitize_ppr(ppr_raw)
     ppr_sg = sanitize_ppr(ppr_sg)
     ppr_corrected = sanitize_ppr(ppr_corrected)
-    if ppr_bayes is not None:
-        ppr_bayes = sanitize_ppr(ppr_bayes)
     if ppr_band is not None:
         lo, hi, epsf = ppr_band
         lo = sanitize_ppr(lo)
         hi = sanitize_ppr(hi)
         ppr_band = (lo, hi, epsf)
-    ylim_top = max(
-        safe_series_max(ppr_raw),
-        safe_series_max(ppr_sg),
-        safe_series_max(ppr_corrected),
-        safe_series_max(ppr_bayes) if ppr_bayes is not None else 0.0,
-        safe_series_max(ppr_band[1]) if ppr_band is not None else 0.0,
-    )
+    series_for_ylim = []
+    if show_raw: series_for_ylim.append(ppr_raw)
+    if show_sg: series_for_ylim.append(ppr_sg)
+    if show_nnls and has_nnls: series_for_ylim.append(ppr_corrected)
+    if ppr_band is not None: series_for_ylim.append(ppr_band[1])
+    if not series_for_ylim:
+        series_for_ylim = [np.array([0,1])]
+    ylim_top = max(safe_series_max(s) for s in series_for_ylim)
     ax2.set_ylim(0, max(1.05, 1.1*ylim_top))
     if train_mean_norm:
         ax2.set_ylabel("Amplitude / train mean")
@@ -1197,12 +1227,13 @@ def plot_trace_and_ppr(time, raw_series, y_sg, stim_times, tau_r_fit, tau_d0_fit
             else:
                 ymax = counts.max() * 1.1 if counts.size else 1.0
                 ax_hist.set_ylim(0, ymax)
-            # Primary threshold (thr95)
+            # Primary threshold (rule-dependent)
             if fail_threshold is not None and np.isfinite(fail_threshold):
+                thr_label = thr_label_override or "thr"
                 ax_hist.axvline(fail_threshold, color="red", linestyle="--", linewidth=1.2)
-                ax_hist.text(fail_threshold, 0.9 * ymax, f"thr95={fail_threshold:.3g}",
+                ax_hist.text(fail_threshold, 0.9 * ymax, f"{thr_label}={fail_threshold:.3g}",
                              color="red", ha="right", va="top")
-            # Secondary success threshold (e.g. 2x thr95)
+            # Secondary success threshold (e.g. 2x primary threshold)
             if success_threshold is not None and np.isfinite(success_threshold):
                 ax_hist.axvline(success_threshold, color="orange", linestyle=":", linewidth=1.2)
                 ax_hist.text(success_threshold, 0.75 * ymax, f"2x={success_threshold:.3g}",
@@ -1217,6 +1248,7 @@ def plot_trace_and_ppr(time, raw_series, y_sg, stim_times, tau_r_fit, tau_d0_fit
     # Horizontal threshold lines over first 3 events on the TRACE axis (amplitude units)
     try:
         if fail_threshold is not None and np.isfinite(fail_threshold):
+            thr_label = thr_label_override or "thr"
             show_events = min(3, len(stim_times))
             for i in range(show_events):
                 st = stim_times[i]
@@ -1224,7 +1256,7 @@ def plot_trace_and_ppr(time, raw_series, y_sg, stim_times, tau_r_fit, tau_d0_fit
                 left = st - 0.002
                 right = st + 0.010
                 ax1.hlines(fail_threshold, left, right, colors='red', linestyles='dotted', linewidth=1.0)
-            ax1.text(stim_times[0], fail_threshold, 'thr95', color='red', ha='left', va='bottom')
+            ax1.text(stim_times[0], fail_threshold, thr_label, color='red', ha='left', va='bottom')
         if success_threshold is not None and np.isfinite(success_threshold):
             show_events = min(3, len(stim_times))
             for i in range(show_events):
@@ -1232,7 +1264,7 @@ def plot_trace_and_ppr(time, raw_series, y_sg, stim_times, tau_r_fit, tau_d0_fit
                 left = st - 0.002
                 right = st + 0.010
                 ax1.hlines(success_threshold, left, right, colors='orange', linestyles='dotted', linewidth=1.0)
-            ax1.text(stim_times[0], success_threshold, '2x thr95', color='orange', ha='left', va='bottom')
+            ax1.text(stim_times[0], success_threshold, '2x thr', color='orange', ha='left', va='bottom')
     except Exception:
         pass
 
@@ -1254,7 +1286,10 @@ def format_fiber_id(path: str) -> str:
     btn = extract_bouton_name(path)
     return f"{base}_{btn}" if btn else base
 
-def compute_metrics_for_file(xlsx_path: str, train_start_override: Optional[float] = None):
+def compute_metrics_for_file(xlsx_path: str,
+                             train_start_override: Optional[float] = None,
+                             amp_method: Optional[str] = None,
+                             fail_method: Optional[str] = None):
     progress_print(f"Loading data from {os.path.basename(xlsx_path)}")
     # Skip obvious batch output workbooks (avoid feeding our own summary back in)
     base_lower = os.path.basename(xlsx_path).lower()
@@ -1339,6 +1374,138 @@ def compute_metrics_for_file(xlsx_path: str, train_start_override: Optional[floa
     n_trials = Y_all.shape[1]
     progress_print(f"Processing {n_trials} trials with {n_pulses} pulses")
 
+    amp_method_u = (amp_method or AMP_MEASUREMENT_METHOD or "NNLS").upper()
+    fail_method_u = (fail_method or FAILURE_MEASUREMENT_METHOD or "NNLS").upper()
+    SAVGOL_ONLY = (amp_method_u == "SAVGOL" and fail_method_u == "SAVGOL")
+
+    # Enforce visibility of active measurement (cannot hide exported method)
+    global SHOW_TRACE_RAW, SHOW_TRACE_SAVGOL, SHOW_TRACE_NNLS
+    try:
+        if amp_method_u == 'RAW' and not SHOW_TRACE_RAW:
+            SHOW_TRACE_RAW = True
+        if amp_method_u == 'SAVGOL' and not SHOW_TRACE_SAVGOL:
+            SHOW_TRACE_SAVGOL = True
+        if amp_method_u == 'NNLS' or fail_method_u == 'NNLS':
+            # Ensure NNLS visible if either role needs it
+            SHOW_TRACE_NNLS = True
+            SHOW_TRACE_NNLS = True
+    except Exception:
+        pass
+
+    # If SAVGOL-only but NNLS visibility requested, compute NNLS too
+    if SAVGOL_ONLY and SHOW_TRACE_NNLS:
+        progress_print("SAVGOL-only requested, but NNLS trace visible -> computing NNLS as well")
+        SAVGOL_ONLY = False
+
+    # Pre-compute SG-smoothed per-trial traces (needed for both paths)
+    Y_sg_all = np.zeros_like(Y_all)
+    for j in range(n_trials):
+        Y_sg_all[:, j] = sg_smooth(Y_all[:, j], sg_window, sg_poly)
+
+    if SAVGOL_ONLY:
+        progress_print("SAVGOL mode: skipping kinetics & NNLS fitting; using SG windowed maxima only")
+        # Average trace amplitudes
+        y_avg = np.nanmean(Y_all, axis=1)
+        y_sg_avg = sg_smooth(y_avg, sg_window, sg_poly)
+        amp_raw_avg = windowed_max(time, y_avg,    stim_times, peak_win_ms, avg_N_points, peak_search_pre_ms)
+        amp_sg_avg  = windowed_max(time, y_sg_avg, stim_times, peak_win_ms, avg_N_points, peak_search_pre_ms)
+        rows = []
+        def row_for(method, amps, level, trial_num, extra=None):
+            row = {
+                "file": os.path.basename(xlsx_path),
+                "bouton": extract_bouton_name(xlsx_path),
+                "n_trials": int(n_trials),
+                "method": method, "level": level, "trial": int(trial_num),
+                "noise_std": np.nan,
+            }
+            for i in range(n_pulses):
+                row[f"amp_{i+1}"] = float(amps[i]) if i < len(amps) else np.nan
+                # PPR relative to first pulse
+                if i == 0 or not np.isfinite(amps[0]) or amps[0] == 0:
+                    row[f"ppr_{i+1}"] = 1.0 if i == 0 and np.isfinite(amps[0]) and amps[0] != 0 else np.nan
+                else:
+                    row[f"ppr_{i+1}"] = float(amps[i] / amps[0])
+            if extra:
+                row.update(extra)
+            return row
+        # Average rows
+        rows.append(row_for("Raw-windowedMax", amp_raw_avg, "average-trace", 0))
+        rows.append(row_for("SG-windowedMax",  amp_sg_avg,  "average-trace", 0))
+        # Optional average plot (raw + SG only)
+        if ENABLE_AVERAGE_PLOTS and (SHOW_PLOTS_DURING_BATCH or SAVE_PLOTS):
+            zmask_plot, _, _ = time_zoom_mask(time, stim_times[0], isi_s, n_pulses, pre_zoom, post_zoom)
+            # Provide dummy NNLS arrays as None
+            fig, _, _, _ = plot_trace_and_ppr(
+                time, y_avg, y_sg_avg, stim_times,
+                tau_r_fit=0.0, tau_d0_fit=0.0,
+                t_os=None, y_os=None,
+                peak_win_ms=peak_win_ms, avg_N_points=avg_N_points, n_pulses=n_pulses,
+                ppr_nnls_center=None, ppr_band=None,
+                title_prefix=f"{os.path.basename(xlsx_path)} — Average (SG only)",
+                avg_mode=True, n_trials=n_trials,
+                tau_d_vec=None, deltas=None, a_vec=None,
+                train_mean_norm=False,
+                rand_amps=None, fail_threshold=None, success_threshold=None,
+                show_raw=SHOW_TRACE_RAW, show_sg=SHOW_TRACE_SAVGOL, show_nnls=False, has_nnls=False
+            )
+            if SAVE_PLOTS:
+                os.makedirs(os.path.join(BATCH_EXPORT_DIR, PLOTS_SUBDIR), exist_ok=True)
+                base_name = os.path.splitext(os.path.basename(xlsx_path))[0]
+                parent_tag = os.path.basename(os.path.dirname(xlsx_path)) or "root"
+                out_png = os.path.join(BATCH_EXPORT_DIR, PLOTS_SUBDIR,
+                                       f"{parent_tag}_{base_name}_average_savgol.png")
+                fig.savefig(out_png, dpi=150)
+            if SHOW_PLOTS_DURING_BATCH and PLOT_MODE != 'none':
+                _show_now(fig, pause=PAUSE_PLOTS_DURING_BATCH)
+            else:
+                plt.close(fig)
+        # Trial rows with null amplitude sampling from SG trace only
+        for t in range(n_trials):
+            if SHOW_PROGRESS and t % max(1, n_trials//5) == 0:
+                progress_print(f"Trial {t+1}/{n_trials}")
+            y_t = Y_all[:, t]
+            y_sg_t = Y_sg_all[:, t]
+            # Null sampling times (deterministic, limited)
+            null_starts = compute_null_sim_times_simple(time, stim_times[0], F0_WINDOW_S, PEAK_SEARCH_POST_S, NULL_SIM_MAX_POINTS)
+            # Keep only starts whose window stays before the real train start
+            max_span = peak_win_ms / 1000.0
+            null_starts = [st for st in null_starts if st + max_span <= stim_times[0]]
+            null_amps = windowed_max(time, y_sg_t, null_starts, peak_win_ms, avg_N_points, peak_search_pre_ms) if len(null_starts) else np.array([])
+            # SAVGOL: SD-based threshold => mean + N * std
+            thr_max, pval_fun = baseline_threshold_and_pval(null_amps, NULL_FAIL_THRESHOLD_PARAM, mode='sd')
+            amp_sg_t = windowed_max(time, y_sg_t, stim_times, peak_win_ms, avg_N_points, peak_search_pre_ms)
+            row_sg = row_for("SG-windowedMax", amp_sg_t, "trial", t+1, extra={"thr_max_amp1": thr_max, "pval_amp1": pval_fun(amp_sg_t[0]) if amp_sg_t.size else np.nan, "noise_std": float(np.nanstd(null_amps)) if null_amps.size else np.nan})
+            rows.append(row_sg)
+            if ENABLE_PER_TRIAL_PLOTS and (SHOW_PLOTS_DURING_BATCH or SAVE_PLOTS):
+                fig_t, _, _, _ = plot_trace_and_ppr(
+                    time, y_t, y_sg_t, stim_times,
+                    tau_r_fit=0.0, tau_d0_fit=0.0,
+                    t_os=None, y_os=None,
+                    peak_win_ms=peak_win_ms, avg_N_points=avg_N_points, n_pulses=n_pulses,
+                    ppr_nnls_center=None, ppr_band=None,
+                    title_prefix=f"{os.path.basename(xlsx_path)} — Trial {t+1}/{n_trials} (SG only)",
+                    avg_mode=False, n_trials=n_trials,
+                    tau_d_vec=None, deltas=None, a_vec=None,
+                    train_mean_norm=False,
+                    rand_amps=null_amps, fail_threshold=thr_max, success_threshold=None,
+                    baseline_mask=baseline_mask, tau_r_for_null=None, tau_d0_for_null=None,
+                    show_raw=SHOW_TRACE_RAW, show_sg=SHOW_TRACE_SAVGOL, show_nnls=False, has_nnls=False,
+                    thr_label_override=_format_fail_threshold_label(NULL_FAIL_THRESHOLD_PARAM, mode='sd')
+                )
+                if SAVE_PLOTS:
+                    os.makedirs(os.path.join(BATCH_EXPORT_DIR, PLOTS_SUBDIR), exist_ok=True)
+                    base_name = os.path.splitext(os.path.basename(xlsx_path))[0]
+                    parent_tag = os.path.basename(os.path.dirname(xlsx_path)) or "root"
+                    out_png = os.path.join(BATCH_EXPORT_DIR, PLOTS_SUBDIR,
+                                           f"{parent_tag}_{base_name}_trial{t+1}_savgol.png")
+                    fig_t.savefig(out_png, dpi=150)
+                if SHOW_PLOTS_DURING_BATCH and PLOT_MODE != 'none':
+                    _show_now(fig_t, pause=PAUSE_PLOTS_DURING_BATCH)
+                else:
+                    plt.close(fig_t)
+        progress_print("SAVGOL mode complete for file")
+        return rows
+
     # Pooled kinetics from average trace
     tau_r_fit, tau_d0_fit, slope_fit, tau_d_vec = fit_kinetics_pooled(
         time, Y_all, stim_times, baseline_mask
@@ -1363,7 +1530,6 @@ def compute_metrics_for_file(xlsx_path: str, train_start_override: Optional[floa
     progress_print("Fitting average trace (NNLS + shifts)")
     y_avg = np.nanmean(Y_all, axis=1)
     zmask, _, _ = time_zoom_mask(time, train_start_local, isi_s, n_pulses, pre_zoom, post_zoom)
-    # Whitening removed
 
     # NNLS/template-matched on average
     if ENABLE_SEGMENTED_NO_OVERLAP:
@@ -1382,11 +1548,8 @@ def compute_metrics_for_file(xlsx_path: str, train_start_override: Optional[floa
             alt_iters=4
         )
     y_sg_avg = sg_smooth(y_avg, sg_window, sg_poly)
-    ppr_nnls_center = normalize_amplitudes(a_avg, use_train_mean=PPR_NORMALIZE_TO_TRAIN_MEAN)
+    ppr_nnls_center = normalize_amplitudes(a_avg)
 
-    # === NEW: Bayesian MAP on average trace (optional; mostly for overlay consistency) ===
-    a_bayes_avg = None; ppr_bayes_avg = None
-    t_os_bayes_avg = None; y_os_bayes_avg = None
 
     # Plot average
     if ENABLE_AVERAGE_PLOTS and (SHOW_PLOTS_DURING_BATCH or SAVE_PLOTS):
@@ -1401,9 +1564,10 @@ def compute_metrics_for_file(xlsx_path: str, train_start_override: Optional[floa
             title_prefix=f"{os.path.basename(xlsx_path)} — Average of {n_trials} trials",
             avg_mode=True, n_trials=n_trials,
             tau_d_vec=tau_d_vec, deltas=deltas_avg, a_vec=a_avg,
-            t_os_bayes=t_os_bayes_avg, y_os_bayes=y_os_bayes_avg, ppr_bayes=ppr_bayes_avg, label_bayes="Bayes-MAP",
-            train_mean_norm=PPR_NORMALIZE_TO_TRAIN_MEAN,
-            rand_amps=None, fail_threshold=None, success_threshold=None
+            
+            train_mean_norm=False,
+            rand_amps=None, fail_threshold=None, success_threshold=None,
+            show_raw=SHOW_TRACE_RAW, show_sg=SHOW_TRACE_SAVGOL, show_nnls=SHOW_TRACE_NNLS, has_nnls=True
         )
         if SAVE_PLOTS:
             os.makedirs(os.path.join(BATCH_EXPORT_DIR, PLOTS_SUBDIR), exist_ok=True)
@@ -1443,6 +1607,11 @@ def compute_metrics_for_file(xlsx_path: str, train_start_override: Optional[floa
     if 'amp_corrected_avg' in locals() and 'ppr_corrected_avg' in locals():
         rows.append(row_for("RobustNNLS-corrected", amp_corrected_avg, ppr_corrected_avg, "average-trace", 0))
 
+    # Mark NNLS average row for reference (not used by export selection)
+    for r in rows:
+        if r.get("method") == "RobustNNLS-coeff" and r.get("level") == "average-trace":
+            r["_nnls_ref"] = True
+
     # Individual trials
     for t in range(n_trials):
         if SHOW_PROGRESS and t % max(1, n_trials//5) == 0:
@@ -1450,7 +1619,6 @@ def compute_metrics_for_file(xlsx_path: str, train_start_override: Optional[floa
 
         y_t = Y_all[:, t]
         y_sg_t = sg_smooth(y_t, sg_window, sg_poly)
-    # Whitening removed; no AR filter
 
         # NNLS/template-matched per trial
         if ENABLE_SEGMENTED_NO_OVERLAP:
@@ -1469,36 +1637,96 @@ def compute_metrics_for_file(xlsx_path: str, train_start_override: Optional[floa
                 alt_iters=4
             )
 
-        # Optional Bayes per-trial amplitudes
-    # Bayes path removed
-
-        # === Consistent null & thresholds for pulse 1 (aligned with amp1 estimator)
-        null_amps = sample_null_amplitudes_consistent(
-            y_t, time, baseline_mask,
-            tau_r_fit, tau_d0_fit,
-            train_start=train_start_local, f0_window_s=F0_WINDOW_S,
-            pre_zoom=pre_zoom, post_zoom=post_zoom,
-            robust=ENABLE_ROBUST_FITTING and ROBUST_LOSS, huber_delta=HUBER_DELTA, irls_iters=IRLS_ITERS,
-            allow_shift=ENABLE_CONTINUOUS_SHIFTS,
-            delta_max_s=DELTA_MAX_MS/1000.0, delta_step_s=DELTA_STEP_MS/1000.0,
-            n_samples=1000, seed=10_000 + t
-        )
-        thr_max, pval_fun = baseline_threshold_and_pval(null_amps, NULL_FAIL_THRESHOLD_PARAM)
-        p_emp = pval_fun(a_t[0]) if a_t.size else np.nan
-
-        # Retain legacy noise_std (std of null) only for backward compatibility
-        noise_std_t = float(np.nanstd(null_amps)) if null_amps.size else np.nan
-
+        # Compute raw/SG amplitudes for this trial (used for rows and p-values)
         amp_raw_t = windowed_max(time, y_t,    stim_times, peak_win_ms, avg_N_points, peak_search_pre_ms)
         amp_sg_t  = windowed_max(time, y_sg_t, stim_times, peak_win_ms, avg_N_points, peak_search_pre_ms)
 
-        ppr_raw_t  = normalize_amplitudes(amp_raw_t, use_train_mean=PPR_NORMALIZE_TO_TRAIN_MEAN)
-        ppr_sg_t   = normalize_amplitudes(amp_sg_t,  use_train_mean=PPR_NORMALIZE_TO_TRAIN_MEAN)
-        ppr_nnls_t = normalize_amplitudes(a_t,       use_train_mean=PPR_NORMALIZE_TO_TRAIN_MEAN)
+        # === Failure thresholds based on selected failure method ===
+        per_pulse_thr = {}
+        per_pulse_pval = {}
+        null_amps_fail = np.array([])
+        label_mode = 'mad' if fail_method_u == 'NNLS' else 'sd'
+        if fail_method_u == 'NNLS':
+            # Consistent null & thresholds for pulse 1 (aligned with amp1 estimator)
+            null_amps = sample_null_amplitudes_consistent(
+                y_t, time, baseline_mask,
+                tau_r_fit, tau_d0_fit,
+                train_start=train_start_local, f0_window_s=F0_WINDOW_S,
+                pre_zoom=pre_zoom, post_zoom=post_zoom,
+                robust=ENABLE_ROBUST_FITTING and ROBUST_LOSS, huber_delta=HUBER_DELTA, irls_iters=IRLS_ITERS,
+                allow_shift=ENABLE_CONTINUOUS_SHIFTS,
+                delta_max_s=DELTA_MAX_MS/1000.0, delta_step_s=DELTA_STEP_MS/1000.0,
+                n_samples=1000, seed=10_000 + t
+            )
+            thr_max1, pval_fun1 = baseline_threshold_and_pval(null_amps, NULL_FAIL_THRESHOLD_PARAM, mode='mad')
+            # p-value evaluated against amplitude from AMP method
+            amp_for_pval = a_t if amp_method_u == 'NNLS' else (amp_sg_t if amp_method_u == 'SAVGOL' else amp_raw_t)
+            p_emp1 = pval_fun1(amp_for_pval[0]) if np.size(amp_for_pval) else np.nan
+            per_pulse_thr = {1: thr_max1}
+            per_pulse_pval = {1: p_emp1}
+            # Additional pulses 2 & 3 from matched tau_d
+            max_extra_pulse = min(3, n_pulses)
+            for pulse_idx in range(2, max_extra_pulse+1):
+                if a_t.size < pulse_idx:  # safety
+                    continue
+                try:
+                    tau_d_for_p = tau_d_vec[pulse_idx-1] if (tau_d_vec is not None and len(tau_d_vec) >= pulse_idx) else tau_d0_fit
+                    null_amps_p = sample_null_amplitudes_consistent(
+                        y_t, time, baseline_mask,
+                        tau_r_fit, tau_d_for_p,
+                        train_start=train_start_local, f0_window_s=F0_WINDOW_S,
+                        pre_zoom=pre_zoom, post_zoom=post_zoom,
+                        robust=ENABLE_ROBUST_FITTING and ROBUST_LOSS, huber_delta=HUBER_DELTA, irls_iters=IRLS_ITERS,
+                        allow_shift=ENABLE_CONTINUOUS_SHIFTS,
+                        delta_max_s=DELTA_MAX_MS/1000.0, delta_step_s=DELTA_STEP_MS/1000.0,
+                        n_samples=1000, seed=20_000 + 500*pulse_idx + t
+                    )
+                    thr_p, pval_fun_p = baseline_threshold_and_pval(null_amps_p, NULL_FAIL_THRESHOLD_PARAM, mode='mad')
+                    per_pulse_thr[pulse_idx] = thr_p
+                    amp_val = amp_for_pval[pulse_idx-1] if np.size(amp_for_pval) >= pulse_idx else np.nan
+                    per_pulse_pval[pulse_idx] = pval_fun_p(amp_val) if np.isfinite(amp_val) else np.nan
+                except Exception:
+                    per_pulse_thr[pulse_idx] = np.nan
+                    per_pulse_pval[pulse_idx] = np.nan
+            null_amps_fail = null_amps
+        else:
+            # SAVGOL: SD-based threshold from SG null windows; use same threshold for pulses 1-3
+            null_starts = compute_null_sim_times_simple(time, stim_times[0], F0_WINDOW_S, PEAK_SEARCH_POST_S, NULL_SIM_MAX_POINTS)
+            max_span = peak_win_ms / 1000.0
+            null_starts = [st for st in null_starts if st + max_span <= stim_times[0]]
+            null_amps_sg = windowed_max(time, y_sg_t, null_starts, peak_win_ms, avg_N_points, peak_search_pre_ms) if len(null_starts) else np.array([])
+            thr_sg, pval_fun_sg = baseline_threshold_and_pval(null_amps_sg, NULL_FAIL_THRESHOLD_PARAM, mode='sd')
+            for pulse_idx in range(1, min(3, n_pulses)+1):
+                per_pulse_thr[pulse_idx] = thr_sg
+            amp_for_pval = a_t if amp_method_u == 'NNLS' else (amp_sg_t if amp_method_u == 'SAVGOL' else amp_raw_t)
+            if np.size(amp_for_pval):
+                per_pulse_pval[1] = pval_fun_sg(amp_for_pval[0])
+                if np.size(amp_for_pval) >= 2:
+                    per_pulse_pval[2] = pval_fun_sg(amp_for_pval[1])
+                if np.size(amp_for_pval) >= 3:
+                    per_pulse_pval[3] = pval_fun_sg(amp_for_pval[2])
+            null_amps_fail = null_amps_sg
+
+        # noise_std based on chosen failure null
+        noise_std_t = float(np.nanstd(null_amps_fail)) if np.size(null_amps_fail) else np.nan
+
+        ppr_raw_t  = normalize_amplitudes(amp_raw_t)
+        ppr_sg_t   = normalize_amplitudes(amp_sg_t)
+        ppr_nnls_t = normalize_amplitudes(a_t)
         rows.append(row_for("Raw-windowedMax",   amp_raw_t,  ppr_raw_t,  "trial", t+1))
         rows.append(row_for("SG-windowedMax",    amp_sg_t,   ppr_sg_t,   "trial", t+1))
+        # Common extras with per-pulse thresholds
+        extras_coeff = {
+            "thr_max_amp1": per_pulse_thr.get(1, np.nan),
+            "pval_amp1": per_pulse_pval.get(1, np.nan)
+        }
+        if 2 in per_pulse_thr:
+            extras_coeff["thr_max_amp2"] = per_pulse_thr[2]; extras_coeff["pval_amp2"] = per_pulse_pval[2]
+        if 3 in per_pulse_thr:
+            extras_coeff["thr_max_amp3"] = per_pulse_thr[3]; extras_coeff["pval_amp3"] = per_pulse_pval[3]
         rows.append(row_for("RobustNNLS-coeff",  a_t,        ppr_nnls_t, "trial", t+1,
-                            extra={"thr_max_amp1": thr_max, "pval_amp1": p_emp}))
+                    noise_std=noise_std_t,
+                    extra=extras_coeff))
 
         # Residual-corrected NNLS
         amp_model_t = windowed_max(time, yhat_t, stim_times, peak_win_ms, avg_N_points, peak_search_pre_ms)
@@ -1523,18 +1751,43 @@ def compute_metrics_for_file(xlsx_path: str, train_start_override: Optional[floa
                         if 0 <= peak_idx < len(t_full):
                             prev_y_event = individual_traces[p-1][1]
                             amp_corrected_t[p] = amp_corrected_t[p] - prev_y_event[peak_idx]
-        ppr_corrected_t = normalize_amplitudes(amp_corrected_t, use_train_mean=PPR_NORMALIZE_TO_TRAIN_MEAN)
-        rows.append(row_for("RobustNNLS-corrected", amp_corrected_t, ppr_corrected_t, "trial", t+1,
-                            noise_std=noise_std_t,
-                            extra={"thr_max_amp1": thr_max, "pval_amp1": p_emp}))
+    ppr_corrected_t = normalize_amplitudes(amp_corrected_t)
+    extras_corr = {
+        "thr_max_amp1": per_pulse_thr.get(1, np.nan),
+        "pval_amp1": per_pulse_pval.get(1, np.nan)
+    }
+    if 2 in per_pulse_thr:
+        extras_corr["thr_max_amp2"] = per_pulse_thr[2]; extras_corr["pval_amp2"] = per_pulse_pval[2]
+    if 3 in per_pulse_thr:
+        extras_corr["thr_max_amp3"] = per_pulse_thr[3]; extras_corr["pval_amp3"] = per_pulse_pval[3]
+    rows.append(row_for("RobustNNLS-corrected", amp_corrected_t, ppr_corrected_t, "trial", t+1,
+                noise_std=noise_std_t,
+                extra=extras_corr))
 
-        # Bayes export removed
+    # Ensure the exported amplitude method row carries failure thresholds
+    target_method = None
+    if amp_method_u == 'SAVGOL':
+        target_method = 'SG-windowedMax'
+    elif amp_method_u == 'RAW':
+        target_method = 'Raw-windowedMax'
+    # For NNLS, the corrected row already has extras
+    if target_method is not None:
+        for r in reversed(rows):
+            if r.get("method") == target_method and r.get("level") == "trial" and r.get("trial") == t+1:
+                r["thr_max_amp1"] = per_pulse_thr.get(1, np.nan)
+                r["pval_amp1"] = per_pulse_pval.get(1, np.nan)
+                if 2 in per_pulse_thr:
+                    r["thr_max_amp2"] = per_pulse_thr[2]; r["pval_amp2"] = per_pulse_pval.get(2, np.nan)
+                if 3 in per_pulse_thr:
+                    r["thr_max_amp3"] = per_pulse_thr[3]; r["pval_amp3"] = per_pulse_pval.get(3, np.nan)
+                r["fail_amp_source"] = fail_method_u
+                break
 
-        if ENABLE_PER_TRIAL_PLOTS and (SHOW_PLOTS_DURING_BATCH or SAVE_PLOTS):
+
+    if ENABLE_PER_TRIAL_PLOTS and (SHOW_PLOTS_DURING_BATCH or SAVE_PLOTS):
             t_os, y_os, t_zoom, _, _, _ = build_os_reconstruction(
                 time, stim_times, tau_r_fit, tau_d_vec, deltas_t, a_t, oversample_factor=10
             )
-            t_os_bayes = None; y_os_bayes = None; ppr_bayes_t = None
 
             fig, _, _, _ = plot_trace_and_ppr(
                 time, y_t, y_sg_t, stim_times, tau_r_fit, tau_d0_fit,
@@ -1544,14 +1797,16 @@ def compute_metrics_for_file(xlsx_path: str, train_start_override: Optional[floa
                 title_prefix=f"{os.path.basename(xlsx_path)} — Trial {t+1}/{n_trials}",
                 avg_mode=False, n_trials=n_trials,
                 tau_d_vec=tau_d_vec, deltas=deltas_t, a_vec=a_t,
-                t_os_bayes=None, y_os_bayes=None, ppr_bayes=None, label_bayes="Bayes-MAP",
-                train_mean_norm=PPR_NORMALIZE_TO_TRAIN_MEAN,
-                rand_amps=null_amps,
-                fail_threshold=thr_max,
+                
+                train_mean_norm=False,
+                rand_amps=null_amps_fail,
+                fail_threshold=per_pulse_thr.get(1, np.nan),
                 success_threshold=None,
                 baseline_mask=baseline_mask,
                 tau_r_for_null=tau_r_fit,
-                tau_d0_for_null=tau_d0_fit
+                tau_d0_for_null=tau_d0_fit,
+                show_raw=SHOW_TRACE_RAW, show_sg=SHOW_TRACE_SAVGOL, show_nnls=SHOW_TRACE_NNLS, has_nnls=True,
+                thr_label_override=_format_fail_threshold_label(NULL_FAIL_THRESHOLD_PARAM, mode=label_mode)
             )
 
             if SAVE_PLOTS:
@@ -1590,7 +1845,6 @@ def run_batch_export_gui():
     var_fast = tk.BooleanVar(value=ENABLE_FAST_KINETICS)
     var_shift = tk.BooleanVar(value=ENABLE_CONTINUOUS_SHIFTS)
     var_robust = tk.BooleanVar(value=ENABLE_ROBUST_FITTING)
-    # AR whitening removed
     var_ar = tk.BooleanVar(value=False)
     var_trial = tk.BooleanVar(value=ENABLE_PER_TRIAL_PLOTS)
     var_avg = tk.BooleanVar(value=ENABLE_AVERAGE_PLOTS)
@@ -1599,7 +1853,6 @@ def run_batch_export_gui():
         ("Fast kinetics", var_fast),
         ("Continuous shifts", var_shift),
         ("Robust fitting", var_robust),
-        ("AR whitening", var_ar),
         ("Per-trial plots", var_trial),
         ("Average plots", var_avg),
     ]:
@@ -1637,7 +1890,9 @@ def run_batch_export_gui():
             pass
         fp = files[idx.get()]
         progress_print(f"Processing: {os.path.basename(fp)}")
-        rows = compute_metrics_for_file(fp)
+        rows = compute_metrics_for_file(fp,
+                                       amp_method=AMP_MEASUREMENT_METHOD,
+                                       fail_method=FAILURE_MEASUREMENT_METHOD)
         all_rows.extend(rows)
         progress_print(f"Completed: {os.path.basename(fp)} ({len(rows)} rows)")
         lbl_status.config(text=f"Processed {os.path.basename(fp)}")
@@ -1684,21 +1939,32 @@ def run_batch_export_gui():
     update_file_label()
     root.mainloop()
 
-def run_batch_export(gui=False):
+def run_batch_export(gui: bool = False, amp_method: str = None, fail_method: str = None):
+    """Run batch export using global defaults.
+
+    Parameters
+    ----------
+    gui : bool
+        If True and tkinter is available, launch interactive GUI.
+    amp_method : str, optional
+        Amplitude method ("NNLS", "RAW", "SAVGOL").
+    fail_method : str, optional
+        Failure/threshold method ("NNLS", "SAVGOL").
+    """
     if gui:
         if tk is None:
             progress_print("tkinter not available; running without GUI")
         else:
             return run_batch_export_gui()
     progress_print("Starting batch export...")
-    # Default (legacy) output name kept for backward compatibility; we override
-    # below with explicit filename passed to batch_measure_complex().
-    legacy_out_path = os.path.join(BATCH_EXPORT_DIR, "ppr_results.xlsx")
+    meas_amp = (amp_method or AMP_MEASUREMENT_METHOD or BATCH_MEASUREMENT or "NNLS").upper()
+    meas_fail = (fail_method or FAILURE_MEASUREMENT_METHOD or "NNLS").upper()
     try:
         batch_measure_complex(
             DEFAULT_BATCH_INPUT_DIRS,
             out_file=DEFAULT_BATCH_OUTPUT_FILE,
-            measurement="NNLS",
+            amp_method=meas_amp,
+            fail_method=meas_fail,
             max_files=BATCH_FILE_LIMIT,
             train_start_overrides=TRAIN_START_OVERRIDE_MAP,
         )
@@ -1707,7 +1973,12 @@ def run_batch_export(gui=False):
         progress_print(f"Batch export failed: {e}")
 
 
-def batch_measure_complex(paths, out_file="ppr_results.xlsx", measurement="NNLS", max_files=None, train_start_overrides: Optional[Dict[str, float]] = None):
+def batch_measure_complex(paths,
+                         out_file="ppr_results.xlsx",
+                         amp_method: str = None,
+                         fail_method: str = None,
+                         max_files=None,
+                         train_start_overrides: Optional[Dict[str, float]] = None):
     """Run batch processing on directories and export a multi-tab Excel workbook.
 
     For every ``.xlsx`` file in each input directory the function runs
@@ -1723,9 +1994,11 @@ def batch_measure_complex(paths, out_file="ppr_results.xlsx", measurement="NNLS"
         Directory path or list of paths to process.
     out_file : str
         Output Excel filename.
-    measurement : {"NNLS", "RAW", "SAVGOL"}, optional
-        Which measurement method to save. ``NNLS`` uses "RobustNNLS-corrected",
+    amp_method : {"NNLS", "RAW", "SAVGOL"}, optional
+        Which method supplies amplitudes in the export. ``NNLS`` uses "RobustNNLS-corrected",
         ``RAW`` uses "Raw-windowedMax", ``SAVGOL`` uses "SG-windowedMax".
+    fail_method : {"NNLS", "SAVGOL"}, optional
+        Which method supplies null/thresholds for failure classification.
     max_files : int, optional
         Process at most this many files per directory. Set to ``None`` to
         process all files.
@@ -1736,9 +2009,11 @@ def batch_measure_complex(paths, out_file="ppr_results.xlsx", measurement="NNLS"
         "RAW": "Raw-windowedMax",
         "SAVGOL": "SG-windowedMax",
     }
-    method_key = method_map.get(str(measurement).upper())
+    amp_key = (amp_method or AMP_MEASUREMENT_METHOD or "NNLS").upper()
+    fail_key = (fail_method or FAILURE_MEASUREMENT_METHOD or "NNLS").upper()
+    method_key = method_map.get(amp_key)
     if method_key is None:
-        raise ValueError(f"Unknown measurement '{measurement}'")
+        raise ValueError(f"Unknown amp_method '{amp_key}'")
 
     if isinstance(paths, str):
         paths = [paths]
@@ -1780,7 +2055,8 @@ def batch_measure_complex(paths, out_file="ppr_results.xlsx", measurement="NNLS"
                             L=len(nk)
                             if L>best_len:
                                 best_len=L; best_key=k; override_val=v
-                metrics = compute_metrics_for_file(fp, train_start_override=override_val)
+                metrics = compute_metrics_for_file(fp, train_start_override=override_val,
+                                                 amp_method=amp_key, fail_method=fail_key)
                 # If compute_metrics_for_file returned nothing (e.g., BLEACH_INTERRUPT),
                 # insert a placeholder row so the folder is not skipped entirely.
                 if not metrics:
@@ -1803,6 +2079,10 @@ def batch_measure_complex(paths, out_file="ppr_results.xlsx", measurement="NNLS"
                     (df_metrics.get("method") == method_key)
                     & (df_metrics.get("level") == "trial")
                 ]
+
+                # Hybrid handling: if exporting SAVGOL but hybrid flag active, we still used NNLS for thresholds.
+                # In that case method_key already points to SG-windowedMax; thresholds were copied onto SG rows.
+                # Nothing to change here, but we keep comment for clarity.
                 # Collect per-trial AMP1 classification data
                 try:
                     if not trial_sel.empty and 'amp_1' in trial_sel.columns:
@@ -1828,7 +2108,7 @@ def batch_measure_complex(paths, out_file="ppr_results.xlsx", measurement="NNLS"
                     pass
                 if avg_sel.empty:
                     continue
-                row = {"measurement": measurement, "ID": format_fiber_id(fp)}
+                row = {"measurement": amp_key, "ID": format_fiber_id(fp)}
                 for i in range(1, n_pulses+1):
                     row[f"AMP{i}"] = avg_sel.iloc[0].get(f"amp_{i}", np.nan)
                 amp1 = row.get("AMP1")
@@ -1839,20 +2119,30 @@ def batch_measure_complex(paths, out_file="ppr_results.xlsx", measurement="NNLS"
                         if (amp1 is not None and not np.isnan(amp1) and amp1 != 0)
                         else np.nan
                     )
+                # New failure definition: each of pulses 1-3 uses its own baseline-derived threshold thr_max_amp{i}.
+                # If a per-pulse threshold is missing, fallback to amp<=0 classification.
                 for i in range(1, min(3, n_pulses)+1):
                     amp_vals = pd.to_numeric(trial_sel.get(f"amp_{i}"), errors="coerce")
-                    # Use hard baseline max threshold for first pulse if present
-                    if i == 1 and "thr_max_amp1" in trial_sel.columns:
-                        thr_vals = pd.to_numeric(trial_sel.get("thr_max_amp1"), errors="coerce")
+                    thr_col = f"thr_max_amp{i}"
+                    if thr_col in trial_sel.columns:
+                        thr_vals = pd.to_numeric(trial_sel.get(thr_col), errors="coerce")
                         valid = (~amp_vals.isna()) & (~thr_vals.isna())
                         row[f"%Fail{i}"] = (float(np.mean(amp_vals[valid] <= thr_vals[valid])) * 100.0) if valid.any() else np.nan
-                        continue
-                    noise_vals = pd.to_numeric(trial_sel.get("noise_std"), errors="coerce")
-                    if noise_vals.isna().all():
-                        row[f"%Fail{i}"] = (float(np.mean(amp_vals <= 0)) * 100.0) if not amp_vals.isna().all() else np.nan
+                        if SHOW_PROGRESS and valid.any():
+                            try:
+                                n_valid = int(valid.sum()); n_fail = int((amp_vals[valid] <= thr_vals[valid]).sum())
+                                progress_print(f"    [%Fail debug] {format_fiber_id(fp)} pulse{i}: fails={n_fail}/{n_valid} (thr{i})")
+                            except Exception:
+                                pass
                     else:
-                        valid = (~amp_vals.isna()) & (~noise_vals.isna())
-                        row[f"%Fail{i}"] = (float(np.mean(amp_vals[valid] <= 2 * noise_vals[valid])) * 100.0) if valid.any() else np.nan
+                        # Fallback: threshold absent
+                        row[f"%Fail{i}"] = (float(np.mean(amp_vals <= 0)) * 100.0) if not amp_vals.isna().all() else np.nan
+                        if SHOW_PROGRESS and not amp_vals.isna().all():
+                            try:
+                                n_fail = int((amp_vals <= 0).sum()); n_tot = int((~amp_vals.isna()).sum())
+                                progress_print(f"    [%Fail debug] {format_fiber_id(fp)} pulse{i}: fails={n_fail}/{n_tot} (<=0 fallback)")
+                            except Exception:
+                                pass
                 rows.append(row)
             if not rows:
                 continue
@@ -1930,7 +2220,7 @@ def baseline_preview(xlsx_path: str, train_start_override: Optional[float] = Non
         data_raw = df.iloc[:, :N-2].apply(pd.to_numeric, errors="coerce").to_numpy(float)
         data_raw = data_raw[valid_t, :]
         stim_times = train_start_local + isi_s * np.arange(n_pulses)
-        # Interp + bleach
+        # Interpolate & optional bleach correction
         data_corr = np.zeros_like(data_raw)
         for j in range(data_raw.shape[1]):
             col = fill_nans_timewise(data_raw[:, j], time)
@@ -1982,7 +2272,7 @@ def baseline_preview(xlsx_path: str, train_start_override: Optional[float] = Non
         progress_print(f"Baseline preview failed: {e}")
 
 
-def process_single_file(xlsx_path: str, measurement="NNLS",
+def process_single_file(xlsx_path: str, amp_method="NNLS", fail_method="NNLS",
                          train_start_override: Optional[float] = None,
                          out_excel: Optional[str] = None,
                          train_start_overrides: Optional[Dict[str, float]] = None):
@@ -1994,7 +2284,9 @@ def process_single_file(xlsx_path: str, measurement="NNLS",
     try:
         metrics = compute_metrics_for_file(
             xlsx_path,
-            train_start_override=train_start_override
+            train_start_override=train_start_override,
+            amp_method=amp_method,
+            fail_method=fail_method
         )
         if not metrics:
             progress_print("No metrics returned (possibly interrupted or BLEACH_INTERRUPT).")
@@ -2004,16 +2296,16 @@ def process_single_file(xlsx_path: str, measurement="NNLS",
             "RAW": "Raw-windowedMax",
             "SAVGOL": "SG-windowedMax",
         }
-        method_key = method_map.get(str(measurement).upper())
+        method_key = method_map.get(str(amp_method).upper())
         if method_key is None:
-            progress_print(f"Unknown measurement '{measurement}'")
+            progress_print(f"Unknown amp_method '{amp_method}'")
             return None
         df = pd.DataFrame(metrics)
         avg_sel = df[(df.get("method") == method_key) & (df.get("level") == "average-trace")]
         if avg_sel.empty:
             progress_print(f"No average-trace row for method {method_key}")
             return None
-        row = {"measurement": measurement, "ID": format_fiber_id(xlsx_path)}
+        row = {"measurement": amp_method, "ID": format_fiber_id(xlsx_path)}
         for i in range(1, n_pulses+1):
             row[f"AMP{i}"] = avg_sel.iloc[0].get(f"amp_{i}", np.nan)
         amp1 = row.get("AMP1")
@@ -2025,19 +2317,28 @@ def process_single_file(xlsx_path: str, measurement="NNLS",
                 else np.nan
             )
         trial_sel = df[(df.get("method") == method_key) & (df.get("level") == "trial")]
+        # Per-pulse thresholds (1-3) usage; fallback to amp<=0 if threshold missing
         for i in range(1, min(3, n_pulses)+1):
             amp_vals = pd.to_numeric(trial_sel.get(f"amp_{i}"), errors="coerce")
-            if i == 1 and "thr_max_amp1" in trial_sel.columns:
-                thr_vals = pd.to_numeric(trial_sel.get("thr_max_amp1"), errors="coerce")
+            thr_col = f"thr_max_amp{i}"
+            if thr_col in trial_sel.columns:
+                thr_vals = pd.to_numeric(trial_sel.get(thr_col), errors="coerce")
                 valid = (~amp_vals.isna()) & (~thr_vals.isna())
                 row[f"%Fail{i}"] = (float(np.mean(amp_vals[valid] <= thr_vals[valid])) * 100.0) if valid.any() else np.nan
+                if SHOW_PROGRESS and valid.any():
+                    try:
+                        n_valid = int(valid.sum()); n_fail = int((amp_vals[valid] <= thr_vals[valid]).sum())
+                        progress_print(f"  [Single %Fail debug] pulse{i}: fails={n_fail}/{n_valid} (thr{i})")
+                    except Exception:
+                        pass
             else:
-                noise_vals = pd.to_numeric(trial_sel.get("noise_std"), errors="coerce")
-                if noise_vals.isna().all():
-                    row[f"%Fail{i}"] = (float(np.mean(amp_vals <= 0)) * 100.0) if not amp_vals.isna().all() else np.nan
-                else:
-                    valid = (~amp_vals.isna()) & (~noise_vals.isna())
-                    row[f"%Fail{i}"] = (float(np.mean(amp_vals[valid] <= 2*noise_vals[valid])) * 100.0) if valid.any() else np.nan
+                row[f"%Fail{i}"] = (float(np.mean(amp_vals <= 0)) * 100.0) if not amp_vals.isna().all() else np.nan
+                if SHOW_PROGRESS and not amp_vals.isna().all():
+                    try:
+                        n_fail = int((amp_vals <= 0).sum()); n_tot = int((~amp_vals.isna()).sum())
+                        progress_print(f"  [Single %Fail debug] pulse{i}: fails={n_fail}/{n_tot} (<=0 fallback)")
+                    except Exception:
+                        pass
         progress_print("Single-file summary (key metrics):")
         for k in sorted(row.keys()):
             if k.startswith(("AMP", "PPR", "%Fail")):
@@ -2059,8 +2360,10 @@ def process_single_file(xlsx_path: str, measurement="NNLS",
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Batch or single-file pulse analysis")
     parser.add_argument("--single", help="Process only this .xlsx file (skip batch)")
-    parser.add_argument("--measurement", default=BATCH_MEASUREMENT,
-                        help="Measurement method (NNLS, RAW, SAVGOL)")
+    parser.add_argument("--amp-method", default=AMP_MEASUREMENT_METHOD,
+                        help="Amplitude method (NNLS, RAW, SAVGOL)")
+    parser.add_argument("--fail-method", default=FAILURE_MEASUREMENT_METHOD,
+                        help="Failure method (NNLS, SAVGOL)")
     parser.add_argument("--out", help="Optional output Excel for single-file summary")
     parser.add_argument("--train-start", type=float,
                         help="Override train_start (seconds) for single file")
@@ -2091,7 +2394,8 @@ if __name__ == "__main__":
         else:
             process_single_file(
                 args.single,
-                measurement=args.measurement,
+                amp_method=args.amp_method,
+                fail_method=args.fail_method,
                 train_start_override=args.train_start,
                 out_excel=args.out
             )
@@ -2104,7 +2408,9 @@ if __name__ == "__main__":
     else:
         if RUN_BATCH_EXPORT:
             try:
-                run_batch_export(gui=USE_GUI)
+                run_batch_export(gui=USE_GUI,
+                                 amp_method=args.amp_method,
+                                 fail_method=args.fail_method)
             except KeyboardInterrupt:
                 progress_print("Batch export aborted by user")
             except Exception as e:
