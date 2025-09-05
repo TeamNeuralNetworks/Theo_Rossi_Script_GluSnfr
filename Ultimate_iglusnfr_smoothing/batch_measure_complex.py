@@ -101,7 +101,7 @@ SHUFFLE_BASELINE_BOOTSTRAP = False  # When True, null distribution uses random b
 #  - For NNLS   nulls: threshold = median(null) + N * (1.4826 * MAD(null))
 # Set N=2.0 to emulate a classic "2 SD" rule for SG and a robust
 #   "2 MAD-equiv" rule for NNLS.
-NULL_FAIL_THRESHOLD_PARAM = 5.0
+NULL_FAIL_THRESHOLD_PARAM = 1.0
 
 # Individual trace visibility toggles (cannot hide a trace if its data were computed)
 SHOW_TRACE_RAW    = False
@@ -2132,26 +2132,25 @@ def batch_measure_complex(paths,
                     & (df_metrics.get("level") == "trial")
                 ]
 
-                # Collect per-trial AMP1 classification data
+                # Collect per-trial AMP1 classification data (one row per trial)
                 try:
                     if not trial_sel.empty and 'amp_1' in trial_sel.columns:
                         folder_name = os.path.basename(os.path.normpath(path))
                         base_file = os.path.splitext(os.path.basename(fp))[0]
-                        amp1_series = pd.to_numeric(trial_sel.get('amp_1'), errors='coerce')
-                        thr_series = pd.to_numeric(trial_sel.get('thr_max_amp1'), errors='coerce') if 'thr_max_amp1' in trial_sel.columns else pd.Series([np.nan]*len(amp1_series))
-                        for a_val, thr_val in zip(amp1_series, thr_series):
+                        for _, rtrial in trial_sel.iterrows():
+                            a_val = pd.to_numeric(rtrial.get('amp_1'), errors='coerce')
+                            thr_val = pd.to_numeric(rtrial.get('thr_max_amp1'), errors='coerce') if 'thr_max_amp1' in trial_sel.columns else np.nan
                             if not np.isfinite(a_val):
                                 status = 'NA'
                             else:
-                                if np.isfinite(thr_val):
-                                    status = 'success' if a_val > thr_val else 'failure'
-                                else:
-                                    status = 'NA'
+                                status = 'success' if (np.isfinite(thr_val) and a_val > thr_val) else (
+                                         'failure' if np.isfinite(thr_val) else 'NA')
                             per_trial_rows.append({
                                 'AMP1': float(a_val) if np.isfinite(a_val) else np.nan,
                                 'status': status,
                                 'file': base_file,
                                 'folder': folder_name,
+                                'trial': int(rtrial.get('trial')) if 'trial' in rtrial else np.nan,
                             })
                 except Exception:
                     pass
@@ -2169,7 +2168,7 @@ def batch_measure_complex(paths,
                         else np.nan
                     )
                 # New failure definition: each of pulses 1-3 uses its own baseline-derived threshold thr_max_amp{i}.
-                # If a per-pulse threshold is missing, fallback to amp<=0 classification.
+                # If a per-pulse threshold is missing, leave %Fail{i} as NaN (no fallback classification).
                 for i in range(1, min(3, n_pulses)+1):
                     amp_vals = pd.to_numeric(trial_sel.get(f"amp_{i}"), errors="coerce")
                     thr_col = f"thr_max_amp{i}"
@@ -2184,14 +2183,7 @@ def batch_measure_complex(paths,
                             except Exception:
                                 pass
                     else:
-                        # Fallback: threshold absent
-                        row[f"%Fail{i}"] = (float(np.mean(amp_vals <= 0)) * 100.0) if not amp_vals.isna().all() else np.nan
-                        if SHOW_PROGRESS and not amp_vals.isna().all():
-                            try:
-                                n_fail = int((amp_vals <= 0).sum()); n_tot = int((~amp_vals.isna()).sum())
-                                progress_print(f"    [%Fail debug] {format_fiber_id(fp)} pulse{i}: fails={n_fail}/{n_tot} (<=0 fallback)")
-                            except Exception:
-                                pass
+                        row[f"%Fail{i}"] = np.nan
                 rows.append(row)
             if not rows:
                 continue
@@ -2226,7 +2218,7 @@ def batch_measure_complex(paths,
     # Write secondary per-trial AMP1 Excel if any rows collected
     if per_trial_rows:
         try:
-            per_trial_df = pd.DataFrame(per_trial_rows, columns=['AMP1','status','file','folder'])
+            per_trial_df = pd.DataFrame(per_trial_rows)
             sec_path = os.path.splitext(out_file)[0] + "_trials.xlsx"
             with pd.ExcelWriter(sec_path) as w2:
                 per_trial_df.to_excel(w2, sheet_name='Trials', index=False)
@@ -2366,7 +2358,7 @@ def process_single_file(xlsx_path: str, amp_method="NNLS", fail_method="NNLS",
                 else np.nan
             )
         trial_sel = df[(df.get("method") == method_key) & (df.get("level") == "trial")]
-        # Per-pulse thresholds (1-3) usage; fallback to amp<=0 if threshold missing
+        # Per-pulse thresholds (1-3) usage; if threshold missing, leave NaN
         for i in range(1, min(3, n_pulses)+1):
             amp_vals = pd.to_numeric(trial_sel.get(f"amp_{i}"), errors="coerce")
             thr_col = f"thr_max_amp{i}"
@@ -2381,13 +2373,7 @@ def process_single_file(xlsx_path: str, amp_method="NNLS", fail_method="NNLS",
                     except Exception:
                         pass
             else:
-                row[f"%Fail{i}"] = (float(np.mean(amp_vals <= 0)) * 100.0) if not amp_vals.isna().all() else np.nan
-                if SHOW_PROGRESS and not amp_vals.isna().all():
-                    try:
-                        n_fail = int((amp_vals <= 0).sum()); n_tot = int((~amp_vals.isna()).sum())
-                        progress_print(f"  [Single %Fail debug] pulse{i}: fails={n_fail}/{n_tot} (<=0 fallback)")
-                    except Exception:
-                        pass
+                row[f"%Fail{i}"] = np.nan
         progress_print("Single-file summary (key metrics):")
         for k in sorted(row.keys()):
             if k.startswith(("AMP", "PPR", "%Fail")):
