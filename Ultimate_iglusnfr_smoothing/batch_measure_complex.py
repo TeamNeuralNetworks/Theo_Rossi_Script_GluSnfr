@@ -71,7 +71,7 @@ USE_GUI                       = False  # Optional Tk navigation GUI
 RUN_BATCH_EXPORT              = True
 
 # Optional: overlay all trials for a file on one figure for quick visual QC
-ENABLE_TRIAL_OVERLAY_PLOT     = True
+ENABLE_TRIAL_OVERLAY_PLOT     = False
 DISPLAY_DECAY                 = True   # Overlay previous event (N-1) decay as dotted line
 
 # Kinetics search grids (ms); broadened to better capture long tails
@@ -1095,7 +1095,10 @@ def plot_trace_and_ppr(time, raw_series, y_sg, stim_times, tau_r_fit, tau_d0_fit
                         baseline_mask=None, tau_r_for_null=None, tau_d0_for_null=None,
                         show_raw=True, show_sg=True, show_nnls=True, has_nnls=True,
                         thr_label_override: str = None,
-                        amp1_value: float = None):
+                        amp1_value: float = None,
+                        overlay_Y=None,
+                        measure_method: str = None,
+                        yhat_series=None):
     # Ensure computed data cannot be hidden
     if raw_series is not None:
         show_raw = True
@@ -1136,23 +1139,52 @@ def plot_trace_and_ppr(time, raw_series, y_sg, stim_times, tau_r_fit, tau_d0_fit
         zmask, z0, z1 = time_zoom_mask(time, stim_times[0], isi_s, n_pulses, pre_zoom, post_zoom)
     t_zoom = time[zmask]
 
-    # Always allocate a histogram panel for trial plots so null distribution visibility is consistent.
+    # Layout: top=main trace (left 4/5) + hist (right 1/5)
+    #         middle=overlay (left 4/5) + empty (right 1/5)
+    #         bottom=residuals (left 4/5) + empty (right 1/5)
     if not avg_mode:
-        fig = plt.figure(figsize=(12, 8))
-        gs = fig.add_gridspec(2, 5, height_ratios=[3, 1])
-        ax1 = fig.add_subplot(gs[0, :])
-        ax2 = fig.add_subplot(gs[1, :4])
-        ax_hist = fig.add_subplot(gs[1, 4])
+        fig = plt.figure(figsize=(12, 10))
+        gs = fig.add_gridspec(3, 5, height_ratios=[3.0, 1.4, 1.4])
+        ax1 = fig.add_subplot(gs[0, :4])
+        ax_hist = fig.add_subplot(gs[0, 4])
+        ax_overlay = fig.add_subplot(gs[1, :4], sharex=ax1)
+        ax_overlay_r = fig.add_subplot(gs[1, 4])
+        ax_resid = fig.add_subplot(gs[2, :4], sharex=ax1)
+        ax_resid_r = fig.add_subplot(gs[2, 4])
     else:
-        # Average trace: keep simpler layout (no dedicated histogram needed typically)
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), gridspec_kw={"height_ratios": [3, 1]})
-        ax_hist = None
+        fig = plt.figure(figsize=(12, 10))
+        gs = fig.add_gridspec(3, 5, height_ratios=[3.0, 1.4, 1.4])
+        ax1 = fig.add_subplot(gs[0, :4])
+        ax_hist = fig.add_subplot(gs[0, 4])
+        ax_overlay = fig.add_subplot(gs[1, :4], sharex=ax1)
+        ax_overlay_r = fig.add_subplot(gs[1, 4])
+        ax_resid = fig.add_subplot(gs[2, :4], sharex=ax1)
+        ax_resid_r = fig.add_subplot(gs[2, 4])
     if show_raw and raw_series is not None:
         ax1.plot(time[zmask], raw_series[zmask], linewidth=0.5, color="0.5", label=("Average raw" if avg_mode else "Raw (baseline-subtracted)"))
     if show_sg and y_sg is not None:
         ax1.plot(time[zmask], y_sg[zmask], linewidth=0.5, color="green", label=("Average SG(9,2)" if avg_mode else "Savitzky–Golay (9,2)"))
     if show_nnls and has_nnls and (t_os is not None) and (y_os is not None):
         ax1.plot(t_os, y_os, linewidth=0.5, color="red", label=("Average robust NNLS + shifts" if avg_mode else "Robust NNLS + shifts"))
+    # Overlay subplot: show all trials if provided
+    if overlay_Y is not None:
+        try:
+            Ymat = np.asarray(overlay_Y)
+            if Ymat.ndim == 2 and Ymat.shape[0] == len(time):
+                for j in range(Ymat.shape[1]):
+                    ax_overlay.plot(time[zmask], Ymat[zmask, j], color='0.2', alpha=0.3, linewidth=1.0)
+                ax_overlay.set_ylabel('overlay')
+        except Exception:
+            pass
+    else:
+        ax_overlay.set_axis_off()
+        ax_overlay.text(0.5, 0.5, "(no overlay)", transform=ax_overlay.transAxes,
+                        ha="center", va="center", fontsize=9, color="0.4")
+    # Right placeholders to keep aligned width
+    try:
+        ax_overlay_r.set_axis_off()
+    except Exception:
+        pass
 
     # Optional: overlay previous event decays (N-1) as dotted lines to visualize estimated residuals
     try:
@@ -1242,6 +1274,8 @@ def plot_trace_and_ppr(time, raw_series, y_sg, stim_times, tau_r_fit, tau_d0_fit
     for st in stim_times:
         if z0 <= st <= z1:
             ax1.axvline(st, linestyle=":", linewidth=1.0)
+            ax_overlay.axvline(st, linestyle=":", linewidth=0.8, color='0.5')
+            ax_resid.axvline(st, linestyle=":", linewidth=0.8, color='0.5')
 
     ppr_corrected = normalize_amplitudes(amp_corrected) if len(amp_corrected) else np.zeros(n_pulses)
 
@@ -1250,65 +1284,53 @@ def plot_trace_and_ppr(time, raw_series, y_sg, stim_times, tau_r_fit, tau_d0_fit
     ax1.set_xlabel("Time (s)"); ax1.set_ylabel("ΔF/F0" if USE_DF_OVER_F0 else "ΔF (baseline-subtracted)")
     ax1.legend(loc="upper right")
 
-    x = np.arange(1, n_pulses+1)
-    if show_raw:
-        ax2.plot(x, ppr_raw,  marker="o", label="Raw (corrected local max)")
-    if show_sg:
-        ax2.plot(x, ppr_sg,   marker="o", label="SG(9,2) (corrected local max)")
-    if show_nnls and has_nnls:
-        ax2.plot(x, ppr_corrected, marker="s", color="darkred", label="NNLS corrected", linewidth=2)
+    # Residuals subplot
+    try:
+        method = (measure_method or AMP_MEASUREMENT_METHOD or 'NNLS').upper()
+    except Exception:
+        method = 'NNLS'
+    resid_series = None
+    if method == 'NNLS' and yhat_series is not None:
+        resid_series = (raw_series - yhat_series) if raw_series is not None else None
+    elif method == 'SAVGOL' and y_sg is not None:
+        resid_series = (raw_series - y_sg) if raw_series is not None else None
+    if resid_series is not None:
+        ax_resid.plot(time[zmask], resid_series[zmask], color='0.2', linewidth=0.5)
+        ax_resid.set_ylabel('residual')
+    ax_resid.set_xlabel('Time (s)')
+    # Right placeholder to keep aligned width
+    try:
+        ax_resid_r.set_axis_off()
+    except Exception:
+        pass
 
-    if ppr_band is not None:
-        lo, hi, epsf = ppr_band
-        mask = np.isfinite(lo) & np.isfinite(hi)
-        if mask.any():
-            ax2.fill_between(x[mask], lo[mask], hi[mask], alpha=0.22, label=f"ε-band (×{epsf:.2f})")
+    # (PPR band will be drawn on the separate PPR figure, if provided)
 
-    ax2.set_xticks(x); ax2.set_xlim(0.7, n_pulses+0.3)
-    def safe_series_max(arr):
-        arr = np.asarray(arr)
-        if arr.size == 0:
-            return 0.0
-        if np.all(~np.isfinite(arr)):
-            return 0.0
-        with np.errstate(all='ignore'):
-            try:
-                return float(np.nanmax(arr))
-            except Exception:
-                return 0.0
-    # If first pulse amplitude (denominator) is 0 or NaN, replace PPR curves with NaNs
-    def sanitize_ppr(p):
-        if p is None:
-            return p
-        p = np.asarray(p, float)
-        if p.size == 0:
-            return p
-        if not np.isfinite(p[0]) or p[0] == 0:
-            return np.full_like(p, np.nan)
-        return p
-    ppr_raw = sanitize_ppr(ppr_raw)
-    ppr_sg = sanitize_ppr(ppr_sg)
-    ppr_corrected = sanitize_ppr(ppr_corrected)
-    if ppr_band is not None:
-        lo, hi, epsf = ppr_band
-        lo = sanitize_ppr(lo)
-        hi = sanitize_ppr(hi)
-        ppr_band = (lo, hi, epsf)
-    series_for_ylim = []
-    if show_raw: series_for_ylim.append(ppr_raw)
-    if show_sg: series_for_ylim.append(ppr_sg)
-    if show_nnls and has_nnls: series_for_ylim.append(ppr_corrected)
-    if ppr_band is not None: series_for_ylim.append(ppr_band[1])
-    if not series_for_ylim:
-        series_for_ylim = [np.array([0,1])]
-    ylim_top = max(safe_series_max(s) for s in series_for_ylim)
-    ax2.set_ylim(0, max(1.05, 1.1*ylim_top))
-    if train_mean_norm:
-        ax2.set_ylabel("Amplitude / train mean")
-    else:
-        ax2.set_ylabel("PPR (An/A1 ratio)")
-    ax2.set_xlabel("Pulse #")
-    ax2.legend(loc="best")
+    # Build PPR in a separate figure
+    try:
+        fig_ppr, axp = plt.subplots(1, 1, figsize=(7.5, 3.2))
+        x = np.arange(1, n_pulses+1)
+        if show_raw:
+            axp.plot(x, ppr_raw,  marker="o", label="Raw (corrected local max)")
+        if show_sg:
+            axp.plot(x, ppr_sg,   marker="o", label="SG(9,2) (corrected local max)")
+        if show_nnls and has_nnls:
+            axp.plot(x, ppr_corrected, marker="s", color="darkred", label="NNLS corrected", linewidth=2)
+        if ppr_band is not None:
+            lo, hi, epsf = ppr_band
+            lo = np.asarray(lo, float); hi = np.asarray(hi, float)
+            mask = np.isfinite(lo) & np.isfinite(hi)
+            if mask.any():
+                axp.fill_between(x[mask], lo[mask], hi[mask], alpha=0.22, label=f"ε-band (×{epsf:.2f})")
+        axp.set_xticks(x); axp.set_xlim(0.7, n_pulses+0.3)
+        axp.set_ylabel("PPR (An/A1)"); axp.set_xlabel("Pulse #")
+        axp.legend(loc='best')
+        if SHOW_PLOTS_DURING_BATCH and PLOT_MODE != 'none':
+            _show_now(fig_ppr, pause=0.01)
+        else:
+            plt.close(fig_ppr)
+    except Exception:
+        pass
 
     if ax_hist is not None:
         if rand_amps is not None and np.size(rand_amps):
@@ -1615,7 +1637,8 @@ def compute_metrics_for_file(xlsx_path: str,
                 tau_d_vec=None, deltas=None, a_vec=None,
                 train_mean_norm=False,
                 rand_amps=None, fail_threshold=None, success_threshold=None,
-                show_raw=SHOW_TRACE_RAW, show_sg=SHOW_TRACE_SAVGOL, show_nnls=False, has_nnls=False
+                show_raw=SHOW_TRACE_RAW, show_sg=SHOW_TRACE_SAVGOL, show_nnls=False, has_nnls=False,
+                overlay_Y=Y_all, measure_method='SAVGOL', yhat_series=None
             )
             if SAVE_PLOTS:
                 os.makedirs(os.path.join(BATCH_EXPORT_DIR, PLOTS_SUBDIR), exist_ok=True)
@@ -1665,7 +1688,8 @@ def compute_metrics_for_file(xlsx_path: str,
                     baseline_mask=baseline_mask, tau_r_for_null=None, tau_d0_for_null=None,
                     show_raw=SHOW_TRACE_RAW, show_sg=SHOW_TRACE_SAVGOL, show_nnls=False, has_nnls=False,
                     thr_label_override=_format_fail_threshold_label(NULL_FAIL_THRESHOLD_PARAM, mode='sd'),
-                    amp1_value=amp1_mark
+                    amp1_value=amp1_mark,
+                    overlay_Y=Y_all, measure_method='SAVGOL', yhat_series=None
                 )
                 if SAVE_PLOTS:
                     os.makedirs(os.path.join(BATCH_EXPORT_DIR, PLOTS_SUBDIR), exist_ok=True)
@@ -1756,7 +1780,8 @@ def compute_metrics_for_file(xlsx_path: str,
             
             train_mean_norm=False,
             rand_amps=None, fail_threshold=None, success_threshold=None,
-            show_raw=SHOW_TRACE_RAW, show_sg=SHOW_TRACE_SAVGOL, show_nnls=SHOW_TRACE_NNLS, has_nnls=True
+            show_raw=SHOW_TRACE_RAW, show_sg=SHOW_TRACE_SAVGOL, show_nnls=SHOW_TRACE_NNLS, has_nnls=True,
+            overlay_Y=Y_all, measure_method=amp_method_u, yhat_series=yhat_avg if 'yhat_avg' in locals() else None
         )
         if SAVE_PLOTS:
             os.makedirs(os.path.join(BATCH_EXPORT_DIR, PLOTS_SUBDIR), exist_ok=True)
@@ -2020,7 +2045,8 @@ def compute_metrics_for_file(xlsx_path: str,
                 tau_r_for_null=tau_r_fit,
                 tau_d0_for_null=tau_d0_fit,
                 show_raw=SHOW_TRACE_RAW, show_sg=SHOW_TRACE_SAVGOL, show_nnls=SHOW_TRACE_NNLS, has_nnls=True,
-                thr_label_override=_format_fail_threshold_label(NULL_FAIL_THRESHOLD_PARAM, mode=label_mode)
+                thr_label_override=_format_fail_threshold_label(NULL_FAIL_THRESHOLD_PARAM, mode=label_mode),
+                overlay_Y=Y_all, measure_method=amp_method_u, yhat_series=yhat_t
             )
 
             if SAVE_PLOTS:
