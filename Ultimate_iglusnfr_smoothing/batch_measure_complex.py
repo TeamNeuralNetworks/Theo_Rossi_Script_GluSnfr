@@ -12,10 +12,25 @@ Configuration is consolidated below in themed blocks; adjust as needed.
 
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
+import matplotlib as mpl
 from scipy.optimize import nnls
 import os, glob, re, time, warnings, argparse
 from typing import Optional, Dict
+
+# Prefer an interactive GUI backend when available (mirrors old interactive behavior)
+try:
+    import tkinter as tk  # standard library
+except Exception:
+    tk = None
+try:
+    if tk is not None:
+        # Ensure an interactive backend so plt.pause/_show_now actually renders
+        mpl.use("TkAgg")
+except Exception:
+    # Fall back silently if backend cannot be switched
+    pass
+
+import matplotlib.pyplot as plt
 from matplotlib import animation
 from utils.smoothing import (
     progress_print,
@@ -29,10 +44,7 @@ from utils.smoothing import (
 )
 
 # Optional GUI support (tkinter is standard library)
-try:
-    import tkinter as tk
-except Exception:
-    tk = None
+# (tk already imported above for backend selection)
 
 
 def normalize_amplitudes(amp: np.ndarray, tiny: float = 1e-12):
@@ -105,7 +117,7 @@ SHUFFLE_BASELINE_BOOTSTRAP = False  # When True, null distribution uses random b
 #  - For NNLS   nulls: threshold = median(null) + N * (1.4826 * MAD(null))
 # Set N=2.0 to emulate a classic "2 SD" rule for SG and a robust
 #   "2 MAD-equiv" rule for NNLS.
-NULL_FAIL_THRESHOLD_PARAM = 1.0
+NULL_FAIL_THRESHOLD_PARAM = 3.0
 
 # Individual trace visibility toggles (cannot hide a trace if its data were computed)
 SHOW_TRACE_RAW    = False
@@ -166,19 +178,19 @@ BLEACH_INTERRUPT            = False
 #  I. BATCH / EXPORT          #
 ###############################
 BATCH_EXPORT_DIR          = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL"
-DEFAULT_BATCH_OUTPUT_FILE = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\ppr_NNLS.xlsx"
+DEFAULT_BATCH_OUTPUT_FILE = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\ppr_new.xlsx"
 DEFAULT_BATCH_INPUT_DIRS  = [ r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Stability_After",
-                              #r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Stability_After_05",
-                              #r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Stability_Before",
-                              #r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Stability_Before_05",
-                              #r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\SynII",
-                              #r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Theo_1_5Ca",
-                              #r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Theo_4Ca",
-                              #r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\WT_Anthime",
-                              #r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\WT_Theo",
-                              #r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\WT_Theo_1scd"
+                              r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Stability_After_05",
+                              r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Stability_Before",
+                              r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Stability_Before_05",
+                              r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\SynII",
+                              r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Theo_1_5Ca",
+                              r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Theo_4Ca",
+                              r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\WT_Anthime",
+                              r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\WT_Theo",
+                              r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\WT_Theo_1scd"
 ]
-BATCH_FILE_LIMIT        = 4     # Set small int for quick tests during development (e.g., 3)
+BATCH_FILE_LIMIT        = None     # Set small int for quick tests during development (e.g., 3)
 
 ###############################
 #  J. TRAIN START OVERRIDES   #
@@ -279,6 +291,8 @@ if SHOW_PLOTS_DURING_BATCH and not SAVE_PLOTS:
 
 # Keep track of the last shown figure so we can close it when a new one is displayed.
 _last_shown_fig = None
+# Keep strong refs in 'keep' mode so early figures persist reliably
+_kept_figs = []
 
 def _show_now(fig, pause=0.05):
     """Draw and pause on `fig`, closing the previously shown diagnostic figure first.
@@ -300,11 +314,30 @@ def _show_now(fig, pause=0.05):
                         pass
             except Exception:
                 pass
+        # Ensure a window is created/shown (non-blocking) before drawing
+        try:
+            fig.show()
+        except Exception:
+            pass
+        # Also ask pyplot to realize windows without blocking
+        try:
+            plt.show(block=False)
+        except TypeError:
+            # Older Matplotlib may not support block kwarg
+            try:
+                plt.show()
+            except Exception:
+                pass
         # if 'keep' do not close previous
         fig.canvas.draw()
         fig.canvas.flush_events()
         plt.pause(pause)
         _last_shown_fig = fig
+        if PLOT_MODE == 'keep':
+            try:
+                _kept_figs.append(fig)
+            except Exception:
+                pass
     except Exception:
         pass
 
@@ -2711,6 +2744,25 @@ if __name__ == "__main__":
         PLOT_MODE = args.plot_mode
         if PLOT_MODE == 'none':
             SHOW_PLOTS_DURING_BATCH = False
+
+    # Ensure matplotlib interactive state matches runtime flags
+    try:
+        if SHOW_PLOTS_DURING_BATCH and PLOT_MODE != 'none' and not SAVE_PLOTS:
+            plt.ion()
+            try:
+                import matplotlib as _mpl
+                _mpl.rcParams["interactive"] = True
+            except Exception:
+                pass
+        else:
+            plt.ioff()
+            try:
+                import matplotlib as _mpl
+                _mpl.rcParams["interactive"] = False
+            except Exception:
+                pass
+    except Exception:
+        pass
 
     if args.single:
         progress_print(f"Running single-file mode on {args.single}")
