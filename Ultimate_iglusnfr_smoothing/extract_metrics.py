@@ -483,6 +483,9 @@ def extract_metrics(
           - traces: list of {'raw','savgol','nnls'} (default ['nnls'])
           - show_decay: bool (default True)
           - trials: bool (default False) — also plot each trial with its fit
+          - baseline: bool (default False) — for each trial, plot a two-panel
+            figure with baseline fits + noise histogram and the train; forces
+            trials=True when enabled
     """
     # Parse options (merge into a single config dict)
     opts = options.copy() if isinstance(options, dict) else {}
@@ -491,6 +494,9 @@ def extract_metrics(
     traces = list(plot_opts.get('traces', ['nnls']))
     show_decay = bool(plot_opts.get('show_decay', True))
     plot_trials = bool(plot_opts.get('trials', False))
+    baseline_figs = bool(plot_opts.get('baseline', False))
+    if baseline_figs:
+        plot_trials = True  # baseline panel requires per-trial figures
     cfg = {**DEFAULTS, **{k: v for k, v in opts.items() if k != 'plot'}}
     do_bleach = bool(cfg.get('bleach', True))
     use_dff = bool(cfg.get('normalize_dff', True))
@@ -619,30 +625,126 @@ def extract_metrics(
 
         # Optional: per-trial plot
         if want_plot and plot_trials:
-            zmask_t, z0, z1 = time_zoom_mask(t, float(train_start), float(isi), int(n_pulses), cfg['pre_zoom_s'], cfg['post_zoom_s'])
+            zmask_t, z0, z1 = time_zoom_mask(
+                t, float(train_start), float(isi), int(n_pulses), cfg['pre_zoom_s'], cfg['post_zoom_s']
+            )
             tz = t[zmask_t]
-            fig_t, ax_t = plt.subplots(figsize=(10, 4))
-            for st in stim_times:
-                ax_t.axvline(st, color='k', linestyle=':', linewidth=0.8, alpha=0.6)
-            if 'raw' in traces:
-                ax_t.plot(tz, yj[zmask_t], label='raw', color='0.6')
-            if 'savgol' in traces and yj_sg is not None:
-                ax_t.plot(tz, yj_sg[zmask_t], label='savgol', color='tab:green')
-            if 'nnls' in traces:
-                ax_t.plot(tz, yhat_t[zmask_t], label='nnls model', color='tab:blue')
-            if show_decay and 'nnls' in traces and np.size(a_t):
-                for p in range(1, int(n_pulses)):
-                    st_prev = float(stim_times[p - 1])
-                    td_prev = float(tau_d_vec[p - 1])
-                    sh_prev = float(d_t[p - 1]) if len(d_t) > (p - 1) else 0.0
-                    amp_prev = float(a_t[p - 1]) if len(a_t) > (p - 1) else 0.0
-                    k_prev = iglusnfr_kernel(tz - (st_prev + sh_prev), tau_r, td_prev)
-                    ax_t.plot(tz, amp_prev * k_prev, color='tab:orange', linestyle='--', linewidth=1.0, alpha=0.85)
-            ax_t.set_xlim(z0, z1)
-            ax_t.set_xlabel('Time (s)')
-            ax_t.set_ylabel('ΔF/F0' if use_dff else 'ΔF')
-            ax_t.legend(loc='upper right', frameon=False)
-            ax_t.set_title(f'Trial {j+1} (selected overlays)')
+
+            if baseline_figs:
+                # Two-panel figure: (1) train window; (2) baseline window + null fits + histogram
+                fig_t, (ax_train, ax_base) = plt.subplots(2, 1, figsize=(11, 7), gridspec_kw={'height_ratios': [2.2, 1.6]})
+                # Train panel
+                for st in stim_times:
+                    ax_train.axvline(st, color='k', linestyle=':', linewidth=0.8, alpha=0.6)
+                if 'raw' in traces:
+                    ax_train.plot(tz, yj[zmask_t], label='raw', color='0.6')
+                if 'savgol' in traces and yj_sg is not None:
+                    ax_train.plot(tz, yj_sg[zmask_t], label='savgol', color='tab:green')
+                if 'nnls' in traces:
+                    ax_train.plot(tz, yhat_t[zmask_t], label='nnls model', color='tab:blue')
+                if show_decay and 'nnls' in traces and np.size(a_t):
+                    for p in range(1, int(n_pulses)):
+                        st_prev = float(stim_times[p - 1])
+                        td_prev = float(tau_d_vec[p - 1])
+                        sh_prev = float(d_t[p - 1]) if len(d_t) > (p - 1) else 0.0
+                        amp_prev = float(a_t[p - 1]) if len(a_t) > (p - 1) else 0.0
+                        k_prev = iglusnfr_kernel(tz - (st_prev + sh_prev), tau_r, td_prev)
+                        ax_train.plot(tz, amp_prev * k_prev, color='tab:orange', linestyle='--', linewidth=1.0, alpha=0.85)
+                # Failure threshold line (thin red dotted)
+                if np.isfinite(thr1):
+                    ax_train.axhline(thr1, color='red', linestyle=':', linewidth=0.8)
+                ax_train.set_xlim(z0, z1)
+                ax_train.set_xlabel('Time (s)')
+                ax_train.set_ylabel('ΔF/F0' if use_dff else 'ΔF')
+                ax_train.legend(loc='upper right', frameon=False)
+                ax_train.set_title(f'Trial {j+1}: train window')
+
+                # Baseline panel (pre-train)
+                base_mask = (t < float(train_start))
+                tb = t[base_mask]
+                if tb.size:
+                    if 'raw' in traces:
+                        ax_base.plot(tb, yj[base_mask], color='0.4', linewidth=1.0, label='baseline')
+                    # Overlay a subset of null-fit events in red
+                    baseline_start = tb[0]; baseline_end = tb[-1]
+                    null_start = max(baseline_start, float(train_start) - cfg['f0_window_s'])
+                    null_end = min(baseline_end, float(train_start))
+                    st_min = null_start + cfg['pre_zoom_s']
+                    st_max = null_end - cfg['null_min_post_zoom_s']
+                    cand_mask = (t >= st_min) & (t <= st_max)
+                    starts_full = t[cand_mask]
+                    if starts_full.size:
+                        # Evaluate amplitudes for all candidates, then draw the strongest few for visibility
+                        events = []  # (amp, start, shift)
+                        for stcand in starts_full:
+                            avail_post = min(cfg['post_zoom_s'], float(train_start) - stcand - 1e-6, null_end - stcand)
+                            if avail_post < cfg['null_min_post_zoom_s']:
+                                continue
+                            a_hat_b, d_hat_b = _fit_single_pulse_amp(
+                                yj, t, float(stcand), tau_r, tau_d0,
+                                pre_zoom_s=cfg['pre_zoom_s'], post_zoom_s=avail_post,
+                                robust=True, huber_delta=cfg['huber_delta'], irls_iters=cfg['irls_iters'],
+                                allow_shift=True, delta_max_s=cfg['delta_max_s'], delta_step_s=cfg['delta_step_s'],
+                                shift_min_s=cfg['shift_min_s'],
+                            )
+                            events.append((float(a_hat_b), float(stcand), float(d_hat_b)))
+                        events = [e for e in events if np.isfinite(e[0]) and e[0] > 0]
+                        events.sort(key=lambda e: e[0], reverse=True)
+                        draw_n = min(20, len(events))
+                        for a_hat_b, stcand, d_hat_b in events[:draw_n]:
+                            y_evt_b = a_hat_b * iglusnfr_kernel(tb - (stcand + d_hat_b), tau_r, tau_d0)
+                            ax_base.plot(tb, y_evt_b, color='red', alpha=0.5, linewidth=1.0)
+                    # Inset histogram of null amplitudes with threshold
+                    try:
+                        ax_in = ax_base.inset_axes([0.65, 0.55, 0.33, 0.4])
+                        data = np.asarray(null_amps, float)
+                        if data.size:
+                            ax_in.hist(data[~np.isnan(data)], bins='fd', color='#c9d4e8', edgecolor='#4f6aa3')
+                            if np.isfinite(thr1):
+                                ax_in.axvline(thr1, color='red', linestyle='--', linewidth=0.9)
+                        ax_in.set_title('noise', fontsize=8)
+                        ax_in.tick_params(labelsize=7)
+                    except Exception:
+                        pass
+                ax_base.set_xlabel('Time (s)')
+                ax_base.set_ylabel('ΔF/F0' if use_dff else 'ΔF')
+                ax_base.set_title('Baseline window + null-fit events')
+
+                # Match Y limits across panels for direct visual comparison
+                try:
+                    ymin = min(ax_train.get_ylim()[0], ax_base.get_ylim()[0])
+                    ymax = max(ax_train.get_ylim()[1], ax_base.get_ylim()[1])
+                    ax_train.set_ylim(ymin, ymax)
+                    ax_base.set_ylim(ymin, ymax)
+                except Exception:
+                    pass
+            else:
+                # Single-panel per-trial figure (train window only)
+                fig_t, ax_t = plt.subplots(figsize=(10, 4))
+                for st in stim_times:
+                    ax_t.axvline(st, color='k', linestyle=':', linewidth=0.8, alpha=0.6)
+                if 'raw' in traces:
+                    ax_t.plot(tz, yj[zmask_t], label='raw', color='0.6')
+                if 'savgol' in traces and yj_sg is not None:
+                    ax_t.plot(tz, yj_sg[zmask_t], label='savgol', color='tab:green')
+                if 'nnls' in traces:
+                    ax_t.plot(tz, yhat_t[zmask_t], label='nnls model', color='tab:blue')
+                if show_decay and 'nnls' in traces and np.size(a_t):
+                    for p in range(1, int(n_pulses)):
+                        st_prev = float(stim_times[p - 1])
+                        td_prev = float(tau_d_vec[p - 1])
+                        sh_prev = float(d_t[p - 1]) if len(d_t) > (p - 1) else 0.0
+                        amp_prev = float(a_t[p - 1]) if len(a_t) > (p - 1) else 0.0
+                        k_prev = iglusnfr_kernel(tz - (st_prev + sh_prev), tau_r, td_prev)
+                        ax_t.plot(tz, amp_prev * k_prev, color='tab:orange', linestyle='--', linewidth=1.0, alpha=0.85)
+                if np.isfinite(thr1):
+                    ax_t.axhline(thr1, color='red', linestyle=':', linewidth=0.8)
+                ax_t.set_xlim(z0, z1)
+                ax_t.set_xlabel('Time (s)')
+                ax_t.set_ylabel('ΔF/F0' if use_dff else 'ΔF')
+                ax_t.legend(loc='upper right', frameon=False)
+                ax_t.set_title(f'Trial {j+1} (selected overlays)')
+
             try:
                 plt.show(block=False); plt.pause(0.01)
             except Exception:
