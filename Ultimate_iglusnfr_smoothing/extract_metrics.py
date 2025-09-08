@@ -482,6 +482,7 @@ def extract_metrics(
           - enabled: bool (default False)
           - traces: list of {'raw','savgol','nnls'} (default ['nnls'])
           - show_decay: bool (default True)
+          - trials: bool (default False) — also plot each trial with its fit
     """
     # Parse options (merge into a single config dict)
     opts = options.copy() if isinstance(options, dict) else {}
@@ -489,6 +490,7 @@ def extract_metrics(
     want_plot = bool(plot_opts.get('enabled', False))
     traces = list(plot_opts.get('traces', ['nnls']))
     show_decay = bool(plot_opts.get('show_decay', True))
+    plot_trials = bool(plot_opts.get('trials', False))
     cfg = {**DEFAULTS, **{k: v for k, v in opts.items() if k != 'plot'}}
     do_bleach = bool(cfg.get('bleach', True))
     use_dff = bool(cfg.get('normalize_dff', True))
@@ -572,6 +574,7 @@ def extract_metrics(
     per_trial: List[Dict] = []
     thr_list: List[float] = []
     pval_list: List[float] = []
+    figures_trials = []  # optional per-trial figures
     for j in range(Yd.shape[1]):
         yj = Yd[:, j]
         yj_sg = sg_smooth(yj, sgW, sgP) if 'savgol' in traces else None
@@ -610,7 +613,41 @@ def extract_metrics(
             'ppr_nnls': _norm(amp_nn),
             'a_coeff': a_t,
             'delta_s': d_t,
+            'y_proc': yj,
+            'yhat': yhat_t,
         })
+
+        # Optional: per-trial plot
+        if want_plot and plot_trials:
+            zmask_t, z0, z1 = time_zoom_mask(t, float(train_start), float(isi), int(n_pulses), cfg['pre_zoom_s'], cfg['post_zoom_s'])
+            tz = t[zmask_t]
+            fig_t, ax_t = plt.subplots(figsize=(10, 4))
+            for st in stim_times:
+                ax_t.axvline(st, color='k', linestyle=':', linewidth=0.8, alpha=0.6)
+            if 'raw' in traces:
+                ax_t.plot(tz, yj[zmask_t], label='raw', color='0.6')
+            if 'savgol' in traces and yj_sg is not None:
+                ax_t.plot(tz, yj_sg[zmask_t], label='savgol', color='tab:green')
+            if 'nnls' in traces:
+                ax_t.plot(tz, yhat_t[zmask_t], label='nnls model', color='tab:blue')
+            if show_decay and 'nnls' in traces and np.size(a_t):
+                for p in range(1, int(n_pulses)):
+                    st_prev = float(stim_times[p - 1])
+                    td_prev = float(tau_d_vec[p - 1])
+                    sh_prev = float(d_t[p - 1]) if len(d_t) > (p - 1) else 0.0
+                    amp_prev = float(a_t[p - 1]) if len(a_t) > (p - 1) else 0.0
+                    k_prev = iglusnfr_kernel(tz - (st_prev + sh_prev), tau_r, td_prev)
+                    ax_t.plot(tz, amp_prev * k_prev, color='tab:orange', linestyle='--', linewidth=1.0, alpha=0.85)
+            ax_t.set_xlim(z0, z1)
+            ax_t.set_xlabel('Time (s)')
+            ax_t.set_ylabel('ΔF/F0' if use_dff else 'ΔF')
+            ax_t.legend(loc='upper right', frameon=False)
+            ax_t.set_title(f'Trial {j+1} (selected overlays)')
+            try:
+                plt.show(block=False); plt.pause(0.01)
+            except Exception:
+                pass
+            figures_trials.append(fig_t)
 
     # Optional: single concise plot of the average trace
     figure = None
@@ -653,9 +690,13 @@ def extract_metrics(
             'amp_savgol': np.asarray(amp_sg_avg, float),
             'amp_nnls': np.asarray(amp_nnls_avg, float),
             'ppr_nnls': np.asarray(ppr_nnls_avg, float),
+            'y_avg': np.asarray(y_avg, float),
+            'yhat_avg': np.asarray(yhat_avg, float),
         },
         'per_trial': per_trial,
+        'time_s': np.asarray(t, float),
         'threshold_amp1': np.asarray(thr_list, float),
         'pval_amp1': np.asarray(pval_list, float),
         'figure': figure,
+        'figures_trials': figures_trials,
     }

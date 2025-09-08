@@ -21,7 +21,8 @@ res = extract_metrics(
         'plot': {
             'enabled': True,
             'traces': ['raw','savgol','nnls'],  # show all average overlays
-            'show_decay': True
+            'show_decay': True,
+            'trials': False
         }
     }
 )

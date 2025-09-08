@@ -32,7 +32,7 @@ for xlsx_path in glob.glob(os.path.join(in_dir, "*.xlsx")):
         time, trials,
         train_start=0.5, isi=0.05, n_pulses=10,
         options={'normalize_dff': True, 'bleach': True,
-                 'plot': {'enabled': True, 'traces': ['raw','savgol','nnls'], 'show_decay': True}}
+                 'plot': {'enabled': True, 'traces': ['raw','savgol','nnls'], 'show_decay': True, 'trials': False}}
     )
 
     base = os.path.splitext(os.path.basename(xlsx_path))[0]
