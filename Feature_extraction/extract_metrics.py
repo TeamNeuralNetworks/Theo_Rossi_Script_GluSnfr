@@ -17,13 +17,13 @@ Only the pieces necessary for this workflow are implemented here, using the
 same formulas and defaults as the original pipeline for equivalence.
 """
 
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Tuple
 
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.optimize import nnls
 
-from utils.smoothing import (
+from Ultimate_iglusnfr_smoothing.smoothing import (
     fill_nans_timewise,
     sg_smooth,
     iglusnfr_kernel,
@@ -109,7 +109,7 @@ def _fit_single_pulse_amp(
     delta_max_s: float,
     delta_step_s: float,
     shift_min_s: float,
-) -> (float, float):
+) -> Tuple[float, float]:
     """Estimate a single‑pulse amplitude at `stim_time` with optional micro‑shift.
 
     Returns (amplitude, best_shift_s). Amplitude is read by robust NNLS against
@@ -423,7 +423,7 @@ def estimate_kinetics_from_average(
     slope_grid_ms,
     pre_zoom_s: float,
     post_zoom_s: float,
-) -> (float, float, float, np.ndarray):
+) -> Tuple[float, float, float, np.ndarray]:
     """Grid search τr, τd0, slope on the average trace (zoomed window)."""
     tau_r_grid = np.array(taur_grid_ms, float) / 1000.0
     tau_d0_grid = np.array(taud0_grid_ms, float) / 1000.0

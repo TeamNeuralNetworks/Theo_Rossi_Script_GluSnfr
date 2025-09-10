@@ -43,8 +43,13 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
+# Ensure the repository root is on sys.path when running from this subfolder
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+
 from Feature_extraction.extract_metrics import extract_metrics
-from utils.smoothing import (
+from Ultimate_iglusnfr_smoothing.smoothing import (
     build_median_recut_waveform,
     build_median_recut_figure,
     fit_template_decay,
