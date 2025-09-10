@@ -1,5 +1,5 @@
 import os, glob, zipfile, numpy as np, pandas as pd
-from extract_metrics import extract_metrics
+from Feature_extraction.extract_metrics import extract_metrics
 
 # Input folders (last two use a different train_start)
 folders = [

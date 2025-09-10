@@ -43,7 +43,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
-from extract_metrics import extract_metrics
+from Feature_extraction.extract_metrics import extract_metrics
 from utils.smoothing import (
     build_median_recut_waveform,
     build_median_recut_figure,

@@ -1,5 +1,5 @@
 import numpy as np, pandas as pd
-from extract_metrics import extract_metrics
+from Feature_extraction.extract_metrics import extract_metrics
 
 xlsx_path = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Theo_4Ca\20211125_linescan1_20Hz_10pulses_4mMCa_bouton1_traces_converted.xlsx"
 df = pd.read_excel(xlsx_path, sheet_name=0, engine="openpyxl")

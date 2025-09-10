@@ -1,5 +1,5 @@
 import os, glob, zipfile, numpy as np, pandas as pd
-from extract_metrics import extract_metrics
+from Feature_extraction.extract_metrics import extract_metrics
 
 in_dir  = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Theo_4Ca\\"
 out_dir = r"C:\Users\Antoine.Valera\Desktop\Testout"
