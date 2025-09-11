@@ -5,8 +5,19 @@ Provides model callables and their default parameter specs to avoid redundancy
 across demos and notebooks.
 
 Available models:
-- 'double_exp': classic difference of exponentials with peak normalization
-- 'cooperative': cooperative (Hill-like) rise with exponential decay
+- 'double_exp' (default): classic double exponential (constrained)
+- 'cooperative': cooperative binding (Hill-like rise, exp decay)
+- 'single_exp': single exponential decay (constrained)
+- 'alpha': alpha function (constrained)
+- 'gamma': gamma function (constrained)
+- 'bilinear': bilinear rise + exp decay (constrained)
+- 'binding_kinetics': binding kinetics model with on/off rates + clearance (constrained)
+- 'two_component': two-component model with shared rise time (constrained)
+- 'desensitization': model with desensitization term (constrained)
+- 'coop_plus_linear': cooperative binding + linear component (constrained)
+- 'diffusion_clearance': diffusion rise + bi-exponential clearance (constrained)
+- 'double_cooperative': sum of two cooperative binding components (constrained)
+- 'hetero_coop': heterogeneous cooperative binding (constrained)
 """
 
 from __future__ import annotations

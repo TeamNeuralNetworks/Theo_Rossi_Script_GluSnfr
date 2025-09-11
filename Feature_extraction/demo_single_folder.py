@@ -37,9 +37,27 @@ for xlsx_path in glob.glob(os.path.join(in_dir, "*.xlsx")):
     res = extract_metrics(
         time, trials,
         train_start=0.5, isi=0.05, n_pulses=10,
-        options={'normalize_dff': True, 'bleach': True,
-                 'plot': {'enabled': True, 'traces': ['raw','savgol','nnls'], 'show_decay': True, 'trials': False, 'event_model': 'binding_kinetics'}}
+        options={
+            'normalize_dff': True,
+            'bleach': True,
+            'auto_event_model': True,             # don’t auto-override user choice
+            'event_model': 'library:cooperative',# pick exact library model
+            # optional: lock shape per pulse so only amplitude + auto offset are adjusted
+            # 'per_pulse_mode': 'amplitude_only',
+            # optional: override shape params (keys must match the model spec)
+            # 'event_model_settings': {
+            #     'tau_rise_fast': 0.003, 'tau_decay_fast': 0.015, 'n_fast': 2.0,
+            #     'tau_rise_slow': 0.010, 'tau_decay_slow': 0.080, 'n_slow': 1.5
+            # },
+            'plot': {
+                'enabled': True,
+                'traces': ['raw','savgol','nnls'],
+                'show_decay': True,
+                'trials': False
+            }
+        }
     )
+
 
     base = os.path.splitext(os.path.basename(xlsx_path))[0]
     if res.get('figure') is not None:
