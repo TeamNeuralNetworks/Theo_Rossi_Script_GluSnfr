@@ -105,6 +105,9 @@ DEFAULTS = {
     'allow_shift': True,
     # Auto-select event model from multi-trial average
     'auto_event_model': True,
+    # Per-pulse behavior: 'vary_shape' allows τ (or shape) to vary across pulses;
+    # 'amplitude_only' locks shape across pulses and fits only amplitudes with auto offset.
+    'per_pulse_mode': 'vary_shape',  # 'vary_shape' | 'amplitude_only'
 }
 
 # Selected kernel (set inside extract_metrics based on options; default is iglusnfr_kernel)
@@ -604,31 +607,137 @@ def extract_metrics(
         if not np.all(np.isfinite(Yd[:, j])):
             Yd[:, j] = fill_nans_timewise(Yd[:, j], t)
 
-    # Configure kernel function for the chosen event model
+    # Configure kernel function for the chosen event model (τ‑varying or fixed template)
     event_model = str(cfg.get('event_model', 'cooperative')).strip().lower()
-    coop_n = float(cfg.get('coop_n', 2.0))
-    supported_models = {'double_exp', 'cooperative'}
-    if event_model not in supported_models:
-        raise ValueError(f"Unsupported event_model '{event_model}'. Supported: {sorted(supported_models)}")
-    def _kernel_double_exp(dt_s: np.ndarray, tau_r: float, tau_d: float) -> np.ndarray:
-        tp = np.maximum(dt_s, 0.0)
-        k = (1.0 - np.exp(-tp / max(tau_r, 1e-9))) * np.exp(-tp / max(tau_d, 1e-9))
-        support = tp <= 0.2
-        area = np.trapz(k[support], dt_s[support]) if np.any(support) else 1.0
-        return k / max(area, 1e-12)
-    def _kernel_cooperative(dt_s: np.ndarray, tau_r: float, tau_d: float) -> np.ndarray:
-        tp = np.maximum(dt_s, 0.0)
-        tr = max(tau_r, 1e-9); td = max(tau_d, 1e-9)
-        n = max(coop_n, 0.5)
-        x = tp / tr
-        rise = (x ** n) / (1.0 + x ** n)
-        decay = np.exp(-tp / td)
-        k = rise * decay
-        support = tp <= 0.2
-        area = np.trapz(k[support], dt_s[support]) if np.any(support) else 1.0
-        return k / max(area, 1e-12)
+    coop_n_default = float(cfg.get('coop_n', 2.0))
+    em_settings = cfg.get('event_model_settings', {})
+    if em_settings is None:
+        em_settings = {}
+    if not isinstance(em_settings, dict):
+        raise ValueError("event_model_settings must be a dict of parameter overrides")
+
+    def _build_kernel_from_library(name: str):
+        """Return (kernel_fun, spec) using Model_Calibration.event_models."""
+        try:
+            try:
+                from Model_Calibration.event_models import get_event_model
+            except Exception:
+                from event_models import get_event_model  # type: ignore
+            spec = get_event_model(name)
+        except Exception as e:
+            raise ValueError(f"Unknown library model '{name}': {e}")
+        def _kernel_from_params(params_fixed: Dict[str, float]):
+            # returns kernel(dt_s, tau_r, tau_d) ignoring tau_r/tau_d (fixed template)
+            def kfun(dt_s: np.ndarray, tau_r: float, tau_d: float) -> np.ndarray:
+                dt_s = np.asarray(dt_s, float)
+                dt_ms = dt_s * 1000.0
+                pars = []
+                for p in spec['params']:
+                    if p == 'amp':
+                        pars.append(1.0)
+                    elif p == 't_peak':
+                        pars.append(0.0)
+                    else:
+                        pars.append(params_fixed[p])
+                y = spec['func'](dt_ms, *pars)
+                tp = np.maximum(dt_s, 0.0)
+                support = tp <= 0.2
+                area = np.trapz(y[support], dt_s[support]) if np.any(support) else 1.0
+                return y / max(area, 1e-12)
+            return kfun
+        def _kernel_tau_varying(mapper):
+            # mapper builds full param vector from tau_r,tau_d
+            def kfun(dt_s: np.ndarray, tau_r: float, tau_d: float) -> np.ndarray:
+                dt_s = np.asarray(dt_s, float)
+                dt_ms = dt_s * 1000.0
+                pars = mapper(float(tau_r), float(tau_d))
+                y = spec['func'](dt_ms, *pars)
+                tp = np.maximum(dt_s, 0.0)
+                support = tp <= 0.2
+                area = np.trapz(y[support], dt_s[support]) if np.any(support) else 1.0
+                return y / max(area, 1e-12)
+            return kfun
+        return spec, _kernel_from_params, _kernel_tau_varying
+
     global _KERNEL_FUN
-    _KERNEL_FUN = _kernel_cooperative if event_model == 'cooperative' else _kernel_double_exp
+    # τ‑varying supported directly
+    varying_supported = {'double_exp', 'cooperative', 'bilinear'}
+    if event_model in varying_supported:
+        spec, _, make_var = _build_kernel_from_library(event_model if event_model != 'double_exp' else 'double_exp')
+        # Validate settings
+        if em_settings:
+            allowed = set(spec['params']) - {'amp', 't_peak'}
+            # For τ‑varying cooperative allow only n_coop override; for others no overrides
+            if event_model == 'cooperative':
+                extra_keys = set(em_settings.keys()) - {'n_coop'}
+                if extra_keys:
+                    raise ValueError(f"Unsupported event_model_settings for cooperative: {sorted(extra_keys)}")
+                n_coop = float(em_settings.get('n_coop', coop_n_default))
+                def _map(tau_r, tau_d):
+                    return [1.0, float(tau_r), float(tau_d), float(n_coop), 0.0]
+                _KERNEL_FUN = make_var(_map)
+            elif event_model == 'double_exp':
+                if em_settings:
+                    raise ValueError("double_exp in τ‑varying mode does not accept event_model_settings")
+                def _map(tau_r, tau_d):
+                    return [1.0, float(tau_r), float(tau_d), 0.0]
+                _KERNEL_FUN = make_var(_map)
+            elif event_model == 'bilinear':
+                if em_settings:
+                    raise ValueError("bilinear in τ‑varying mode does not accept event_model_settings")
+                # bilinear expects t_rise(ms), t_decay(ms)
+                def _map(tau_r, tau_d):
+                    return [1.0, float(tau_r) * 1000.0, float(tau_d) * 1000.0, 0.0]
+                _KERNEL_FUN = make_var(_map)
+        else:
+            if event_model == 'cooperative':
+                def _map(tau_r, tau_d):
+                    return [1.0, float(tau_r), float(tau_d), float(coop_n_default), 0.0]
+                _KERNEL_FUN = make_var(_map)
+            elif event_model == 'double_exp':
+                def _map(tau_r, tau_d):
+                    return [1.0, float(tau_r), float(tau_d), 0.0]
+                _KERNEL_FUN = make_var(_map)
+            else:  # bilinear
+                def _map(tau_r, tau_d):
+                    return [1.0, float(tau_r) * 1000.0, float(tau_d) * 1000.0, 0.0]
+                _KERNEL_FUN = make_var(_map)
+    else:
+        # Fixed-template path via 'library:<name>' or direct library name
+        lib_name = event_model
+        if lib_name.startswith('library:'):
+            lib_name = lib_name.split(':', 1)[1].strip().lower()
+        # Build kernel from fitted or user-provided shape params
+        spec, make_fixed, _ = _build_kernel_from_library(lib_name)
+        # Validate overrides against spec
+        allowed = set(spec['params']) - {'amp', 't_peak'}
+        unknown = set(em_settings.keys()) - allowed
+        if unknown:
+            raise ValueError(f"Unknown event_model_settings for '{lib_name}': {sorted(unknown)}. Allowed keys: {sorted(allowed)}")
+        # Fit missing params on the average event
+        try:
+            # Fit in 0..30 ms relative to train start
+            t_ms = (t - float(train_start)) * 1000.0
+            m0 = (t_ms >= 0.0) & (t_ms <= 30.0)
+            tf = t_ms[m0]
+            yf = np.nanmean(Yd, axis=1)[m0]
+            p0 = spec['p0_func'](yf, tf)
+            from scipy.optimize import curve_fit as _cf
+            popt, _ = _cf(spec['func'], tf, yf, p0=p0, bounds=spec['bounds'], maxfev=3000)
+        except Exception:
+            popt = p0  # fallback to initializer
+        # Build fixed param dict
+        params_fixed: Dict[str, float] = {}
+        for key, val in zip(spec['params'], popt):
+            params_fixed[key] = float(val)
+        # Apply user overrides
+        for k, v in em_settings.items():
+            params_fixed[k] = float(v)
+        # Remove amplitude and t_peak (we enforce amp=1, t_peak=0 in kernel)
+        params_fixed.pop('amp', None)
+        params_fixed.pop('t_peak', None)
+        _KERNEL_FUN = make_fixed(params_fixed)
+        progress_print(f"[info] Using fixed-template matching for model '{lib_name}' (no per-pulse decay progression).", show=True)
 
     # Optional: run auto-selection now that Yd is preprocessed and finite
     if bool(cfg.get('auto_event_model', True)):
@@ -665,6 +774,11 @@ def extract_metrics(
         shift_min_s=cfg['shift_min_s'],
     )
     y_sg_avg = sg_smooth(y_avg, sgW, sgP) if 'savgol' in traces else None
+
+    # If user requests amplitude-only per-pulse behavior, lock shape across pulses
+    if str(cfg.get('per_pulse_mode', 'vary_shape')).lower() == 'amplitude_only':
+        tau_d_vec = np.full_like(tau_d_vec, float(tau_d0))
+        progress_print("[info] Using amplitude-only per-pulse fitting (shape locked; auto offset enabled).", show=True)
 
     amp_nnls_avg = compute_localmax_corrected_amps(
         t, yhat_avg, stim_times, win_ms, n_avg, pre_ms, a_avg, d_avg, tau_r, tau_d_vec

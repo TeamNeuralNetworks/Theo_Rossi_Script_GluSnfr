@@ -343,7 +343,19 @@ def time_zoom_mask(time, train_start_s, isi_s, n_pulses, pre_zoom, post_zoom):
 
 
 def pick_peak_on_series(t_series, y_series, st, win_ms, pre_ms=0.0):
-    """Locate the peak around a stimulus within a search window."""
+    """Locate the peak around a stimulus within a search window.
+
+    Notes
+    -----
+    Previously the center index was chosen with ``np.searchsorted`` which picks the
+    first sample *greater than or equal to* ``st``.  When the nominal stimulus time
+    falls *between* two sampled time points this biases the center one sample
+    later, so when we subsequently re‑express the snippet relative to the chosen
+    center, the waveform appears shifted *left* (earlier) by ~1 sample.  Using the
+    nearest sample instead of the first >= sample removes this systematic
+    half‑sample / one‑sample bias observed as a 1–2 point left shift in recut
+    medians.
+    """
     t_series = np.asarray(t_series, float)
     y_series = np.asarray(y_series, float)
     if t_series.size < 2:
@@ -351,13 +363,15 @@ def pick_peak_on_series(t_series, y_series, st, win_ms, pre_ms=0.0):
     dt = float(np.median(np.diff(t_series)))
     post = int(round((win_ms / 1000.0) / max(dt, 1e-12)))
     pre = int(round((pre_ms / 1000.0) / max(dt, 1e-12)))
-    i_center = int(np.searchsorted(t_series, st))
+    # Use nearest sample to stimulus time to avoid systematic +1 index bias
+    i_center = int(np.argmin(np.abs(t_series - st)))
     i0 = max(0, i_center - pre)
     i1 = min(len(t_series) - 1, i_center + post)
     seg = y_series[i0 : i1 + 1]
     if seg.size == 0:
         return st, 0.0
-    imax = i0 + int(np.argmax(seg))
+    imax_local = int(np.argmax(seg))
+    imax = i0 + imax_local
     return t_series[imax], y_series[imax]
 
 
