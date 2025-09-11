@@ -545,62 +545,7 @@ def extract_metrics(
     if baseline_figs:
         plot_trials = True  # baseline panel requires per-trial figures
     cfg = {**DEFAULTS, **{k: v for k, v in opts.items() if k != 'plot'}}
-    # Optional auto-calibration of event model from multi-trial data
-    if bool(cfg.get('auto_event_model', True)):
-        try:
-            try:
-                from Model_Calibration.auto_model_settings import auto_select_event_model_settings
-            except Exception:
-                from auto_model_settings import auto_select_event_model_settings  # type: ignore
-            auto = auto_select_event_model_settings(
-                time, Y if 'Y' in locals() else trials,
-                train_start=float(train_start), isi=float(isi), n_pulses=int(n_pulses),
-                candidates=("double_exp","cooperative"), window_ms=(0.0, 30.0)
-            )
-            # Merge recommended options (only event_model/coop_n affect kernels here)
-            rec = auto.get('options', {})
-            for k in ('event_model','coop_n'):
-                if k in rec:
-                    cfg[k] = rec[k]
-            # Optional: quick plot of average event and best-fit model with params
-            if want_plot:
-                try:
-                    try:
-                        from Model_Calibration.event_models import get_event_model
-                    except Exception:
-                        from event_models import get_event_model  # type: ignore
-                    best = auto.get('event_model','cooperative')
-                    spec = get_event_model(best)
-                    params = auto.get('fit_params', {}).get(best, None)
-                    t_ms = (t - float(train_start)) * 1000.0
-                    mfit = (t_ms >= 0.0) & (t_ms <= 30.0)
-                    tf = t_ms[mfit]
-                    yf = np.nanmean(Yd, axis=1)[mfit]
-                    yhat = spec['func'](tf, *params) if params is not None else None
-                    fig_ev, ax_ev = plt.subplots(1,1, figsize=(8,4))
-                    ax_ev.plot(tf, yf, 'k-', lw=1.5, label='Average')
-                    if yhat is not None:
-                        ax_ev.plot(tf, yhat, 'r--', lw=1.8, label=f"{best}")
-                    ax_ev.axvline(0.0, color='k', ls=':', alpha=0.5)
-                    ax_ev.set_xlabel('Time (ms)'); ax_ev.set_ylabel('ΔF/F0' if use_dff else 'ΔF')
-                    ax_ev.set_title('Auto-selected event model fit')
-                    ax_ev.legend(loc='best')
-                    try:
-                        txt = ", ".join(f"{n}={v:.4g}" for n,v in zip(spec['params'], params)) if params is not None else ""
-                        ax_ev.text(0.02, 0.02, txt, transform=ax_ev.transAxes, fontsize=8,
-                                   va='bottom', ha='left', bbox=dict(boxstyle='round', facecolor='white', alpha=0.7))
-                    except Exception:
-                        pass
-                    try:
-                        plt.show(block=False); plt.pause(0.01)
-                    except Exception:
-                        pass
-                    # Expose the figure in results (set later)
-                    auto_event_figure = fig_ev
-                except Exception:
-                    auto_event_figure = None
-        except Exception:
-            pass
+    # Optional auto-calibration of event model from multi-trial data (run after preprocessing)
     do_bleach = bool(cfg.get('bleach', True))
     use_dff = bool(cfg.get('normalize_dff', True))
     sgW = int(cfg['sg_window']); sgP = int(cfg['sg_poly'])
@@ -679,6 +624,24 @@ def extract_metrics(
         return k / max(area, 1e-12)
     global _KERNEL_FUN
     _KERNEL_FUN = _kernel_cooperative if event_model == 'cooperative' else _kernel_double_exp
+
+    # Optional: run auto-selection now that Yd is preprocessed and finite
+    if bool(cfg.get('auto_event_model', True)):
+        try:
+            try:
+                from Model_Calibration.auto_model_settings import auto_select_event_model_settings
+            except Exception:
+                from auto_model_settings import auto_select_event_model_settings  # type: ignore
+            auto = auto_select_event_model_settings(
+                t, Yd, train_start=float(train_start), isi=float(isi), n_pulses=int(n_pulses),
+                candidates=("double_exp","cooperative"), window_ms=(0.0, 30.0)
+            )
+            rec = auto.get('options', {})
+            for k in ('event_model','coop_n'):
+                if k in rec:
+                    cfg[k] = rec[k]
+        except Exception:
+            pass
 
     # Average trace and kinetics
     y_avg = np.nanmean(Yd, axis=1)
