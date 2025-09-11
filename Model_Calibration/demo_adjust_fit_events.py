@@ -129,6 +129,18 @@ def _file_to_resampled_trace(xlsx_path: str, t_grid: np.ndarray):
 
         if t_rel is None or med is None:
             return None
+        # Fill NaNs in the median waveform to avoid interp errors when resampling
+        try:
+            t_rel = np.asarray(t_rel, float)
+            med = np.asarray(med, float)
+            if np.any(~np.isfinite(med)):
+                finite = np.isfinite(med)
+                if finite.any():
+                    med = np.interp(t_rel, t_rel[finite], med[finite])
+                else:
+                    return None
+        except Exception:
+            return None
             
         # Resample to grid
         r = np.full_like(t_grid, np.nan, dtype=float)

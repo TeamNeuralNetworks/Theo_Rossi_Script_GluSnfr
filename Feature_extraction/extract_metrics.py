@@ -599,6 +599,11 @@ def extract_metrics(
     else:
         Yd = Yc - F0
 
+    # Sanitize: fill any remaining NaNs per trial to avoid failures in NNLS/curve_fit
+    for j in range(Yd.shape[1]):
+        if not np.all(np.isfinite(Yd[:, j])):
+            Yd[:, j] = fill_nans_timewise(Yd[:, j], t)
+
     # Configure kernel function for the chosen event model
     event_model = str(cfg.get('event_model', 'cooperative')).strip().lower()
     coop_n = float(cfg.get('coop_n', 2.0))
