@@ -1,6 +1,11 @@
-import os, glob, zipfile
+import os, sys, glob, zipfile
 import numpy as np, pandas as pd
 import matplotlib.pyplot as plt
+
+# Ensure repo root is on sys.path when running from a different CWD
+REPO_ROOT = os.path.abspath(os.path.dirname(__file__))
+if REPO_ROOT not in sys.path:
+	sys.path.insert(0, REPO_ROOT)
 
 from Feature_extraction.extract_metrics import extract_metrics
 

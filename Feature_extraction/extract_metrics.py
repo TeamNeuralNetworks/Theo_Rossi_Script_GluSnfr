@@ -23,15 +23,31 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy.optimize import nnls
 
-from Ultimate_iglusnfr_smoothing.smoothing import (
-    fill_nans_timewise,
-    sg_smooth,
-    iglusnfr_kernel,
-    time_zoom_mask,
-    windowed_max,
-    pick_peak_on_series,
-    compute_no_signal_mask,
-)
+try:
+    from smoothing import (
+        fill_nans_timewise,
+        sg_smooth,
+        iglusnfr_kernel,
+        time_zoom_mask,
+        windowed_max,
+        pick_peak_on_series,
+        compute_no_signal_mask,
+    )
+except Exception:
+    # Fallback: allow importing when current working dir is this subfolder
+    import os, sys
+    REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+    if REPO_ROOT not in sys.path:
+        sys.path.insert(0, REPO_ROOT)
+    from smoothing import (
+        fill_nans_timewise,
+        sg_smooth,
+        iglusnfr_kernel,
+        time_zoom_mask,
+        windowed_max,
+        pick_peak_on_series,
+        compute_no_signal_mask,
+    )
 
 
 """

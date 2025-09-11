@@ -24,17 +24,22 @@ def load_calcium_data():
     """Load data using the same approach as the original notebook"""
     
     # Add likely source folders so the demo module is importable
+    repo_root = Path(__file__).resolve().parents[1]
     cand_paths = [
         str(Path.cwd()),
-        str(Path.cwd() / 'Ultimate_iglusnfr_smoothing'),
+        str(repo_root),
+        str(repo_root / 'Model_Calibration'),
     ]
     for p in cand_paths:
         if p not in sys.path:
             sys.path.insert(0, p)
     
     try:
-        # Import the demo module
-        demo = importlib.import_module('demo_adjust_fit_events')
+        # Import the demo module (prefer package path)
+        try:
+            demo = importlib.import_module('Model_Calibration.demo_adjust_fit_events')
+        except Exception:
+            demo = importlib.import_module('demo_adjust_fit_events')
         
         # Process the folder with configured settings
         RESULTS = demo.process_folder(

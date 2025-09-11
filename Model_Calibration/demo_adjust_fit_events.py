@@ -13,7 +13,7 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from Feature_extraction.extract_metrics import extract_metrics
-from Ultimate_iglusnfr_smoothing.smoothing import build_median_recut_waveform
+from smoothing import build_median_recut_waveform
 
 # Configuration parameters
 TRAIN_START_S = 0.5

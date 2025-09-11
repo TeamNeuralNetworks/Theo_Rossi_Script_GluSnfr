@@ -32,7 +32,7 @@ except Exception:
 
 import matplotlib.pyplot as plt
 from matplotlib import animation
-from Ultimate_iglusnfr_smoothing.smoothing import (
+from smoothing import (
     progress_print,
     fill_nans_timewise,
     sg_smooth,

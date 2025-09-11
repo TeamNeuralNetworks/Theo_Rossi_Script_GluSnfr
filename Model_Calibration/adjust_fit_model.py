@@ -49,7 +49,7 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from Feature_extraction.extract_metrics import extract_metrics
-from Ultimate_iglusnfr_smoothing.smoothing import (
+from smoothing import (
     build_median_recut_waveform,
     build_median_recut_figure,
     fit_template_decay,
