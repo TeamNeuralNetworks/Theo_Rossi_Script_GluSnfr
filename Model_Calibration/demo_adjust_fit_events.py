@@ -27,8 +27,44 @@ SAMPLE_HZ = 1000.0
 MAX_WORKERS = 24
 EVENT_INDEX = None  # Set to 0 for event 1, 2 for event 3, etc. Use None for all events
 
-# Paths - change these to your data locations  
-IN_DIR = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Theo_1_5Ca\\"
+# Input directory handling
+# You can override the default input directory in three ways (precedence high→low):
+#  1. Pass a path as the first CLI argument when running this script
+#        python demo_adjust_fit_events.py "C:\\path\\to\\folder"
+#  2. Set environment variable GLUSNFR_IN_DIR
+#        (Windows) set GLUSNFR_IN_DIR=C:\\path\\to\\folder
+#  3. Rely on the hard‑coded DEFAULT_IN_DIR below
+DEFAULT_IN_DIR = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Theo_1_5Ca\\"
+
+def _resolve_input_dir_from_argv(argv) -> str | None:
+    """Return the first positional CLI argument that is an existing directory.
+
+    Skips any arguments starting with '-' (e.g., Jupyter's '--f=kernel.json').
+    """
+    for a in argv[1:]:  # skip script name
+        if not a or a.startswith('-'):
+            continue
+        ap = os.path.abspath(a)
+        if os.path.isdir(ap):
+            return ap
+    return None
+
+def _resolve_input_dir(cli_arg: str | None) -> str:
+    # Prefer an explicitly passed valid directory
+    if cli_arg and not cli_arg.startswith('-'):
+        c = os.path.abspath(cli_arg)
+        if os.path.isdir(c):
+            return c
+    # Scan remaining argv for a usable directory (handles Jupyter invocation)
+    scan = _resolve_input_dir_from_argv(sys.argv)
+    if scan:
+        return scan
+    # Environment variable override
+    env_dir = os.environ.get("GLUSNFR_IN_DIR")
+    if env_dir and os.path.isdir(env_dir):
+        return env_dir
+    # Fallback default
+    return DEFAULT_IN_DIR
 
 
 def _is_valid_xlsx(path: str) -> bool:
@@ -196,7 +232,10 @@ def process_folder(input_dir: str, max_workers: int = None):
 
 
 if __name__ == "__main__":
-    # Process the folder
+    # Resolve input directory (CLI arg > env var > default)
+    cli_dir = sys.argv[1] if len(sys.argv) > 1 else None
+    IN_DIR = _resolve_input_dir(cli_dir)
+    print(f"Using input directory: {IN_DIR}")
     results = process_folder(IN_DIR, max_workers=MAX_WORKERS)
     
     if results:

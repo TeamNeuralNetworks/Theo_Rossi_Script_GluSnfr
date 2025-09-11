@@ -7,6 +7,7 @@ Focuses only on these two models of interest with essential statistics.
 """
 
 import sys
+import os
 import importlib
 import numpy as np
 import matplotlib.pyplot as plt
@@ -20,8 +21,44 @@ warnings.filterwarnings('ignore', category=RuntimeWarning)
 # DATA LOADING (from original notebook)
 # =============================================================================
 
-def load_calcium_data():
-    """Load data using the same approach as the original notebook"""
+DEFAULT_DATA_DIR = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Theo_1_5Ca\\"
+
+def _scan_argv_for_dir(argv) -> str | None:
+    for a in argv[1:]:
+        if not a or a.startswith('-'):
+            continue
+        ap = os.path.abspath(a)
+        if os.path.isdir(ap):
+            return ap
+    return None
+
+def _resolve_input_dir(cli_arg: str | None) -> str:
+    """Resolve input directory with precedence: positional existing dir > CLI arg (if valid) > GLUSNFR_IN_DIR env > default."""
+    # If a specific CLI arg provided and valid
+    if cli_arg and not cli_arg.startswith('-'):
+        ap = os.path.abspath(cli_arg)
+        if os.path.isdir(ap):
+            return ap
+    # Otherwise scan remaining argv for a directory (handles Jupyter injected flags)
+    scan = _scan_argv_for_dir(sys.argv)
+    if scan:
+        return scan
+    env_dir = os.environ.get("GLUSNFR_IN_DIR")
+    if env_dir and os.path.isdir(env_dir):
+        return env_dir
+    return DEFAULT_DATA_DIR
+
+def load_calcium_data(input_dir: str | None = None, *, verbose: bool = True):
+    """Load data using the same approach as the original notebook.
+
+    Parameters
+    ----------
+    input_dir : str | None
+        Optional explicit directory of .xlsx files. If None, resolve using
+        CLI/env/default precedence handled by caller (or resolved here if still None).
+    verbose : bool
+        If True, print diagnostic information about discovered files.
+    """
     
     # Add likely source folders so the demo module is importable
     repo_root = Path(__file__).resolve().parents[1]
@@ -41,10 +78,35 @@ def load_calcium_data():
         except Exception:
             demo = importlib.import_module('demo_adjust_fit_events')
         
+        # Determine which input directory to use
+        if input_dir is None:
+            # Try to reuse logic from demo module if available
+            if hasattr(demo, "_resolve_input_dir"):
+                try:
+                    input_dir = demo._resolve_input_dir(None)  # type: ignore[attr-defined]
+                except Exception:
+                    input_dir = _resolve_input_dir(None)
+            elif hasattr(demo, "DEFAULT_IN_DIR"):
+                input_dir = getattr(demo, "DEFAULT_IN_DIR")
+            else:
+                input_dir = _resolve_input_dir(None)
+
+        print(f"Using data directory: {input_dir}")
+
+        # Basic diagnostics before processing
+        import glob as _glob
+        xlsx_pattern = os.path.join(input_dir, "*.xlsx")
+        xlsx_files = _glob.glob(xlsx_pattern)
+        if verbose:
+            print(f"Scanning directory: {input_dir}")
+            print(f"Found {len(xlsx_files)} .xlsx files (pattern: {xlsx_pattern})")
+            if len(xlsx_files) == 0:
+                print("No .xlsx files detected. Check that the path is correct or override with CLI arg or GLUSNFR_IN_DIR.")
+
         # Process the folder with configured settings
         RESULTS = demo.process_folder(
-            demo.IN_DIR, 
-            max_workers=demo.MAX_WORKERS
+            input_dir,
+            max_workers=getattr(demo, "MAX_WORKERS", 24)
         )
         
         if RESULTS:
@@ -61,7 +123,11 @@ def load_calcium_data():
             
             return RESULTS
         else:
-            raise ValueError("No results returned from demo module")
+            raise ValueError(
+                "No results returned from demo module. Possible causes: (1) directory has no valid Excel files, "
+                "(2) files failed validation (corrupt or not OOXML .xlsx), (3) all files skipped during processing. "
+                "Override the input directory via CLI or GLUSNFR_IN_DIR."
+            )
             
     except ImportError as e:
         raise ImportError(f"Could not import demo_adjust_fit_events: {e}")
@@ -561,28 +627,31 @@ def main():
     print("Double Exponential vs Cooperative Binding")
     
     try:
-        # Load data using original approach
-        RESULTS = load_calcium_data()
-        
+        # Resolve optional CLI directory argument
+        cli_dir = sys.argv[1] if len(sys.argv) > 1 else None
+        input_dir = _resolve_input_dir(cli_dir)
+
+        # Load data
+        RESULTS = load_calcium_data(input_dir)
+
         # Preprocess data
         time_analysis, traces_array, y_avg, avg_noise = preprocess_data(RESULTS)
-        
+
         # Fit models to average trace
         fit_results, models_to_test, fit_mask = fit_models_to_average(time_analysis, y_avg, avg_noise)
-        
+
         # Fit models to individual traces
         individual_results = fit_individual_traces(time_analysis, traces_array, models_to_test, fit_mask)
-        
+
         # Create comparison plots
         all_residuals = create_comparison_plots(
             time_analysis, y_avg, traces_array, fit_results, individual_results, models_to_test
         )
-        
+
         # Statistical comparison
         statistical_comparison(all_residuals, list(models_to_test.keys()))
-        
+
         print("\n=== ANALYSIS COMPLETE ===")
-        
     except Exception as e:
         print(f"Error during analysis: {e}")
         raise
