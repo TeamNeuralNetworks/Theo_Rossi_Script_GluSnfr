@@ -572,7 +572,7 @@ def main():
         import argparse as _argparse
         ap = _argparse.ArgumentParser(description="Event model fitting demo")
         ap.add_argument('input', nargs='?', default=None, help='Optional input directory')
-        ap.add_argument('--event-model', default='both', choices=['cooperative','double_exp','both'], help='Underlying event model')
+        ap.add_argument('--event-model', default='both', choices=['cooperative','double_exp','both','auto'], help='Underlying event model')
         # Be tolerant of Jupyter/IPython extra args like --f=...
         args, _unknown = ap.parse_known_args(sys.argv[1:])
         cli_dir = args.input
@@ -589,8 +589,34 @@ def main():
             which = ('double_exp','cooperative')
         elif args.event_model == 'double_exp':
             which = ('double_exp',)
-        else:
+        elif args.event_model == 'cooperative':
             which = ('cooperative',)
+        else:
+            # auto: pick best model from multi-trial average
+            try:
+                from Model_Calibration.auto_model_settings import auto_select_event_model_settings
+            except Exception:
+                from auto_model_settings import auto_select_event_model_settings  # fallback when running locally
+            # Recover multi-trial matrix from RESULTS: traces is a list of vectors on the common grid
+            try:
+                trials = np.vstack(RESULTS['traces']).T  # (N,T)
+                time_s = RESULTS['time_grid']
+                # Use defaults from demo_adjust_fit_events
+                train_start = getattr(importlib.import_module('Model_Calibration.demo_adjust_fit_events'), 'TRAIN_START_S', 0.5)
+                isi_s = getattr(importlib.import_module('Model_Calibration.demo_adjust_fit_events'), 'ISI_S', 0.05)
+                n_pulses = getattr(importlib.import_module('Model_Calibration.demo_adjust_fit_events'), 'N_PULSES', 10)
+            except Exception:
+                # Fallback: reconstruct from preprocessed data
+                trials = traces_array.T
+                time_s = time_analysis / 1000.0 + 0.0
+                train_start = 0.0; isi_s = 0.05; n_pulses = 10
+            auto = auto_select_event_model_settings(
+                time_s, trials, train_start=train_start, isi=isi_s, n_pulses=n_pulses,
+                candidates=("double_exp","cooperative"), window_ms=(0.0, 30.0)
+            )
+            sel = auto.get('event_model','cooperative')
+            which = (sel,)
+            print(f"[auto] Selected event model: {sel}")
 
         # Fit selected model(s) to average trace
         fit_results, models_to_test, fit_mask = fit_models_to_average(time_analysis, y_avg, avg_noise, which_models=which)

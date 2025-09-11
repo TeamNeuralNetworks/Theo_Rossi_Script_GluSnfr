@@ -38,12 +38,15 @@ for xlsx_path in glob.glob(os.path.join(in_dir, "*.xlsx")):
         time, trials,
         train_start=0.5, isi=0.05, n_pulses=10,
         options={'normalize_dff': True, 'bleach': True,
-                 'plot': {'enabled': True, 'traces': ['raw','savgol','nnls'], 'show_decay': True, 'trials': False}}
+                 'plot': {'enabled': True, 'traces': ['raw','savgol','nnls'], 'show_decay': True, 'trials': False, 'event_model': 'cooperative'}}
     )
 
     base = os.path.splitext(os.path.basename(xlsx_path))[0]
     if res.get('figure') is not None:
         res['figure'].savefig(os.path.join(out_dir, f"{base}.png"), dpi=150)
+    # Save auto-selected event model aggregated fit (if available)
+    if res.get('figure_event_model') is not None:
+        res['figure_event_model'].savefig(os.path.join(out_dir, f"{base}_event_model.png"), dpi=150)
 
     row = {'file': base}
     amp = res['average']['amp_nnls']; ppr = res['average']['ppr_nnls']

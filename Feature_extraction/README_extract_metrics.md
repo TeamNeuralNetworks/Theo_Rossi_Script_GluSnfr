@@ -12,7 +12,10 @@ The function keeps the math equivalent to the main pipeline while exposing a sma
   - `fail_method`: `'NNLS'|'SAVGOL'|'RAW'` (default: same as `measurement`) — controls null/threshold rule
   - `threshold_mode`: `'auto'|'mad'|'sd'` (default `'auto'`) — auto picks MAD for `NNLS`, SD for `SAVGOL`/`RAW`
   - `allow_shift`: bool (default True) — enable per‑pulse micro‑shifts
-  - `share_thr_1to3`: bool (default True) — reuse the A1 threshold for pulses 2–3
+- Threshold for A1 is reused for pulses 2–3 (shared by design)
+  - `event_model`: `'double_exp'|'cooperative'` (default `'cooperative'`) — per‑pulse template for NNLS
+  - `coop_n`: float (default 2.0) — cooperative exponent when `event_model='cooperative'`
+- `auto_event_model`: bool (default True) — auto‑select event model (and `coop_n`) from the multi‑trial average via the library and plot the average+fit when plotting is enabled
 
 Related demo scripts in this folder (with concrete paths): `demo_single_file.py`, `demo_single_folder.py`, `demo_batch_process.py`.
 

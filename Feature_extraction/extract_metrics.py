@@ -86,6 +86,11 @@ DEFAULTS = {
     'bleach_huber_delta': 3.0,
     'bleach_tau_range_factor': (0.25, 4.0),
     'bleach_n_tau': 25,
+    # Event model (kernel) used for per-pulse fitting
+    # Supported: 'double_exp' (difference-of-exponentials), 'cooperative'
+    'event_model': 'cooperative',
+    # Cooperative exponent n
+    'coop_n': 2.0,
     # Measurement and thresholds
     # measurement: which amplitude series to use for p-values/classification
     #   'NNLS' | 'SAVGOL' | 'RAW'
@@ -96,11 +101,14 @@ DEFAULTS = {
     # failure classification method: 'NNLS' | 'SAVGOL' | 'RAW'
     # default None means "use measurement"
     'fail_method': None,
-    # Share the same baseline-derived threshold across pulses 1..3 for classification
-    'share_thr_1to3': True,
     # Toggle per-pulse micro-shifts during fitting and null sampling
     'allow_shift': True,
+    # Auto-select event model from multi-trial average
+    'auto_event_model': True,
 }
+
+# Selected kernel (set inside extract_metrics based on options; default is iglusnfr_kernel)
+_KERNEL_FUN = iglusnfr_kernel
 
 
 # -------------------------
@@ -153,7 +161,7 @@ def _fit_single_pulse_amp(
     shifts = (np.arange(shift_min_s, delta_max_s + 1e-12, delta_step_s)
               if allow_shift else np.array([shift_min_s]))
     for d in shifts:
-        k_full = iglusnfr_kernel(t - (stim_time + d), tau_r_s, tau_d_s)
+        k_full = _KERNEL_FUN(t - (stim_time + d), tau_r_s, tau_d_s)
         k_loc = k_full[local_mask]
         if k_loc.size < 3 or np.all(k_loc == 0):
             continue
@@ -207,14 +215,14 @@ def fit_amplitudes_no_overlap_backward(
             shift_min_s=shift_min_s,
         )
         a[p] = a_p; d[p] = d_p
-        k = iglusnfr_kernel(t - (st + d_p), tau_r_s, float(tau_d_vec_s[p]))
+        k = _KERNEL_FUN(t - (st + d_p), tau_r_s, float(tau_d_vec_s[p]))
         comp = a_p * k
         residual = residual - comp
         components.append((p, comp))
     components.sort(key=lambda x: x[0])
     yhat = np.sum([c for _, c in components], axis=0) if components else np.zeros_like(y)
     X = np.column_stack([
-        iglusnfr_kernel(t - (float(stim_times[p]) + d[p]), tau_r_s, float(tau_d_vec_s[p]))
+        _KERNEL_FUN(t - (float(stim_times[p]) + d[p]), tau_r_s, float(tau_d_vec_s[p]))
         for p in range(n)
     ]) if n else np.zeros((t.size, 0))
     return a, d, X, yhat
@@ -248,7 +256,7 @@ def compute_localmax_corrected_amps(
             td_prev = float(tau_d_vec_s[p - 1])
             sh_prev = float(d_vec[p - 1])
             a_prev = float(a_vec[p - 1])
-            prev = a_prev * iglusnfr_kernel(t - (st_prev + sh_prev), tau_r_s, td_prev)
+            prev = a_prev * _KERNEL_FUN(t - (st_prev + sh_prev), tau_r_s, td_prev)
             prev_at_tp = float(np.interp(tp, t, prev)) if np.isfinite(tp) else 0.0
             amp_p -= prev_at_tp
         amps.append(amp_p)
@@ -322,7 +330,7 @@ def sample_null_amplitudes_consistent(
         )
         t_fit = t[(t >= st - pre_zoom_s) & (t <= st + avail_post)]
         if t_fit.size:
-            k_fit = iglusnfr_kernel(t_fit - (st + d_hat), tau_r_s, tau_d_s)
+            k_fit = _KERNEL_FUN(t_fit - (st + d_hat), tau_r_s, tau_d_s)
             y_evt = a_hat * k_fit
             val = windowed_max(t_fit, y_evt, [st], peak_window_ms, peak_avg_points, pre_peak_ms)
             amps.append(float(val[0]) if np.size(val) else 0.0)
@@ -462,7 +470,7 @@ def estimate_kinetics_from_average(
     zmask, _, _ = time_zoom_mask(t, float(stim_times[0]), isi_guess, len(stim_times), pre_zoom_s, post_zoom_s)
 
     def obj_for(tau_r, tau_d_vec):
-        X = np.column_stack([iglusnfr_kernel(t - st, tau_r, td) for st, td in zip(stim_times, tau_d_vec)])
+        X = np.column_stack([_KERNEL_FUN(t - st, tau_r, td) for st, td in zip(stim_times, tau_d_vec)])
         a = np.maximum(0.0, nnls(X[zmask, :], y_avg[zmask])[0]) if X.size else np.zeros(len(stim_times))
         r = y_avg - X @ a
         return float(np.dot(r[zmask], r[zmask]) / max(1, zmask.sum()))
@@ -514,6 +522,9 @@ def extract_metrics(
         SD for SAVGOL
       - share_thr_1to3: bool (default True) — reuse A1 threshold for pulses 2 and 3
       - allow_shift: bool (default True) — enable per‑pulse micro‑shifts
+      - event_model: {'double_exp'|'cooperative'} (default 'cooperative') — template used
+        for NNLS fitting and residual subtraction; 'cooperative' uses a Hill‑like rise*exp decay
+      - coop_n: float (default 2.0) — cooperative exponent for the cooperative model
       - plot: dict with keys
           - enabled: bool (default False)
           - traces: list of {'raw','savgol','nnls'} (default ['nnls'])
@@ -534,6 +545,62 @@ def extract_metrics(
     if baseline_figs:
         plot_trials = True  # baseline panel requires per-trial figures
     cfg = {**DEFAULTS, **{k: v for k, v in opts.items() if k != 'plot'}}
+    # Optional auto-calibration of event model from multi-trial data
+    if bool(cfg.get('auto_event_model', True)):
+        try:
+            try:
+                from Model_Calibration.auto_model_settings import auto_select_event_model_settings
+            except Exception:
+                from auto_model_settings import auto_select_event_model_settings  # type: ignore
+            auto = auto_select_event_model_settings(
+                time, Y if 'Y' in locals() else trials,
+                train_start=float(train_start), isi=float(isi), n_pulses=int(n_pulses),
+                candidates=("double_exp","cooperative"), window_ms=(0.0, 30.0)
+            )
+            # Merge recommended options (only event_model/coop_n affect kernels here)
+            rec = auto.get('options', {})
+            for k in ('event_model','coop_n'):
+                if k in rec:
+                    cfg[k] = rec[k]
+            # Optional: quick plot of average event and best-fit model with params
+            if want_plot:
+                try:
+                    try:
+                        from Model_Calibration.event_models import get_event_model
+                    except Exception:
+                        from event_models import get_event_model  # type: ignore
+                    best = auto.get('event_model','cooperative')
+                    spec = get_event_model(best)
+                    params = auto.get('fit_params', {}).get(best, None)
+                    t_ms = (t - float(train_start)) * 1000.0
+                    mfit = (t_ms >= 0.0) & (t_ms <= 30.0)
+                    tf = t_ms[mfit]
+                    yf = np.nanmean(Yd, axis=1)[mfit]
+                    yhat = spec['func'](tf, *params) if params is not None else None
+                    fig_ev, ax_ev = plt.subplots(1,1, figsize=(8,4))
+                    ax_ev.plot(tf, yf, 'k-', lw=1.5, label='Average')
+                    if yhat is not None:
+                        ax_ev.plot(tf, yhat, 'r--', lw=1.8, label=f"{best}")
+                    ax_ev.axvline(0.0, color='k', ls=':', alpha=0.5)
+                    ax_ev.set_xlabel('Time (ms)'); ax_ev.set_ylabel('ΔF/F0' if use_dff else 'ΔF')
+                    ax_ev.set_title('Auto-selected event model fit')
+                    ax_ev.legend(loc='best')
+                    try:
+                        txt = ", ".join(f"{n}={v:.4g}" for n,v in zip(spec['params'], params)) if params is not None else ""
+                        ax_ev.text(0.02, 0.02, txt, transform=ax_ev.transAxes, fontsize=8,
+                                   va='bottom', ha='left', bbox=dict(boxstyle='round', facecolor='white', alpha=0.7))
+                    except Exception:
+                        pass
+                    try:
+                        plt.show(block=False); plt.pause(0.01)
+                    except Exception:
+                        pass
+                    # Expose the figure in results (set later)
+                    auto_event_figure = fig_ev
+                except Exception:
+                    auto_event_figure = None
+        except Exception:
+            pass
     do_bleach = bool(cfg.get('bleach', True))
     use_dff = bool(cfg.get('normalize_dff', True))
     sgW = int(cfg['sg_window']); sgP = int(cfg['sg_poly'])
@@ -542,7 +609,6 @@ def extract_metrics(
     meas = str(cfg.get('measurement', 'NNLS')).strip().upper()
     failm = str((cfg.get('fail_method') or meas)).strip().upper()
     thr_mode = str(cfg.get('threshold_mode', 'auto')).strip().lower()
-    share_thr = bool(cfg.get('share_thr_1to3', True))
     allow_shift = bool(cfg.get('allow_shift', True))
 
     # Shapes & schedule
@@ -587,6 +653,32 @@ def extract_metrics(
             Yd[:, bad_cols] = (Yc[:, bad_cols] - F0[bad_cols])
     else:
         Yd = Yc - F0
+
+    # Configure kernel function for the chosen event model
+    event_model = str(cfg.get('event_model', 'cooperative')).strip().lower()
+    coop_n = float(cfg.get('coop_n', 2.0))
+    supported_models = {'double_exp', 'cooperative'}
+    if event_model not in supported_models:
+        raise ValueError(f"Unsupported event_model '{event_model}'. Supported: {sorted(supported_models)}")
+    def _kernel_double_exp(dt_s: np.ndarray, tau_r: float, tau_d: float) -> np.ndarray:
+        tp = np.maximum(dt_s, 0.0)
+        k = (1.0 - np.exp(-tp / max(tau_r, 1e-9))) * np.exp(-tp / max(tau_d, 1e-9))
+        support = tp <= 0.2
+        area = np.trapz(k[support], dt_s[support]) if np.any(support) else 1.0
+        return k / max(area, 1e-12)
+    def _kernel_cooperative(dt_s: np.ndarray, tau_r: float, tau_d: float) -> np.ndarray:
+        tp = np.maximum(dt_s, 0.0)
+        tr = max(tau_r, 1e-9); td = max(tau_d, 1e-9)
+        n = max(coop_n, 0.5)
+        x = tp / tr
+        rise = (x ** n) / (1.0 + x ** n)
+        decay = np.exp(-tp / td)
+        k = rise * decay
+        support = tp <= 0.2
+        area = np.trapz(k[support], dt_s[support]) if np.any(support) else 1.0
+        return k / max(area, 1e-12)
+    global _KERNEL_FUN
+    _KERNEL_FUN = _kernel_cooperative if event_model == 'cooperative' else _kernel_double_exp
 
     # Average trace and kinetics
     y_avg = np.nanmean(Yd, axis=1)
@@ -702,9 +794,9 @@ def extract_metrics(
         a1 = float(a_for_p[0]) if a_for_p.size else np.nan
         p1 = float(pfun(a1)) if np.isfinite(a1) else np.nan
         thr_list.append(thr1); pval_list.append(p1)
-        # Optionally compute p-values for pulses 2 and 3 using the shared threshold
-        p2 = float(pfun(a_for_p[1])) if (share_thr and a_for_p.size >= 2 and np.isfinite(a_for_p[1])) else np.nan
-        p3 = float(pfun(a_for_p[2])) if (share_thr and a_for_p.size >= 3 and np.isfinite(a_for_p[2])) else np.nan
+        # Compute p-values for pulses 2 and 3 using the same threshold as A1
+        p2 = float(pfun(a_for_p[1])) if (a_for_p.size >= 2 and np.isfinite(a_for_p[1])) else np.nan
+        p3 = float(pfun(a_for_p[2])) if (a_for_p.size >= 3 and np.isfinite(a_for_p[2])) else np.nan
 
         per_trial.append({
             'amp_raw': amp_raw,
@@ -748,7 +840,7 @@ def extract_metrics(
                         td_prev = float(tau_d_vec[p - 1])
                         sh_prev = float(d_t[p - 1]) if len(d_t) > (p - 1) else 0.0
                         amp_prev = float(a_t[p - 1]) if len(a_t) > (p - 1) else 0.0
-                        k_prev = iglusnfr_kernel(tz - (st_prev + sh_prev), tau_r, td_prev)
+                        k_prev = _KERNEL_FUN(tz - (st_prev + sh_prev), tau_r, td_prev)
                         ax_train.plot(tz, amp_prev * k_prev, color='tab:orange', linestyle='--', linewidth=1.0, alpha=0.85)
                 # Failure threshold line (thin red dotted)
                 if np.isfinite(thr1):
@@ -792,7 +884,7 @@ def extract_metrics(
                         events.sort(key=lambda e: e[0], reverse=True)
                         draw_n = min(20, len(events))
                         for a_hat_b, stcand, d_hat_b in events[:draw_n]:
-                            y_evt_b = a_hat_b * iglusnfr_kernel(tb - (stcand + d_hat_b), tau_r, tau_d0)
+                            y_evt_b = a_hat_b * _KERNEL_FUN(tb - (stcand + d_hat_b), tau_r, tau_d0)
                             ax_base.plot(tb, y_evt_b, color='red', alpha=0.5, linewidth=1.0)
                     # Inset histogram of null amplitudes with threshold
                     try:
@@ -851,12 +943,60 @@ def extract_metrics(
                 pass
             figures_trials.append(fig_t)
 
-    # Optional: single concise plot of the average trace
+    # Optional: average plot with a left event-fit panel (0–30 ms) + right main plot
     figure = None
     if want_plot:
+        figure = plt.figure(figsize=(12, 5))
+        gs = figure.add_gridspec(1, 2, width_ratios=[1, 4], wspace=0.15)
+        # Left: aggregated event + model fit (0..30 ms)
+        axL = figure.add_subplot(gs[0, 0])
+        try:
+            t_ms = (t - float(train_start)) * 1000.0
+            isi_ms = float(isi) * 1000.0
+            min_x = -3.0
+            max_x = isi_ms
+            m0 = (t_ms >= min_x) & (t_ms < max_x)
+            axL.plot(t_ms[m0], y_avg[m0], color='k', lw=1.5, label='Average')
+            # Overlay best-fit library model matching current kernel choice
+            try:
+                try:
+                    from Model_Calibration.event_models import get_event_model
+                except Exception:
+                    from event_models import get_event_model  # type: ignore
+                spec = get_event_model(event_model)
+                tf = t_ms[m0]; yf = y_avg[m0]
+                p0 = spec['p0_func'](yf, tf)
+                try:
+                    from scipy.optimize import curve_fit as _cf
+                    popt, _ = _cf(spec['func'], tf, yf, p0=p0, bounds=spec['bounds'], maxfev=3000)
+                except Exception:
+                    popt = p0
+                yhat_ev = spec['func'](tf, *popt)
+                axL.plot(tf, yhat_ev, color='crimson', ls='--', lw=1.8, label=event_model)
+                try:
+                    txt = ", ".join(f"{n}={v:.3g}" for n, v in zip(spec['params'], popt))
+                    axL.text(0.02, 0.02, txt, transform=axL.transAxes, fontsize=7,
+                             va='bottom', ha='left', bbox=dict(boxstyle='round', facecolor='white', alpha=0.7))
+                except Exception:
+                    pass
+            except Exception:
+                pass
+            axL.axvline(0.0, color='k', ls=':', alpha=0.5, lw=0.8)
+            axL.set_xlim(min_x, max_x)
+            axL.set_xlabel('Time (ms)')
+            axL.set_ylabel('ΔF/F0' if USE_DF_OVER_F0 else 'ΔF')
+            axL.set_title('Event fit (0–30 ms)', fontsize=10)
+            try:
+                axL.set_aspect('equal', adjustable='box')
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+        # Right: main average plot
+        ax = figure.add_subplot(gs[0, 1])
         zmask, z0, z1 = time_zoom_mask(t, float(train_start), float(isi), int(n_pulses), cfg['pre_zoom_s'], cfg['post_zoom_s'])
         tz = t[zmask]
-        figure, ax = plt.subplots(figsize=(10, 4))
         for st in stim_times:
             ax.axvline(st, color='k', linestyle=':', linewidth=0.8, alpha=0.6)
         if 'raw' in traces:
@@ -871,7 +1011,7 @@ def extract_metrics(
                 td_prev = float(tau_d_vec[p - 1])
                 sh_prev = float(d_avg[p - 1])
                 amp_prev = float(a_avg[p - 1])
-                k_prev = iglusnfr_kernel(tz - (st_prev + sh_prev), tau_r, td_prev)
+                k_prev = _KERNEL_FUN(tz - (st_prev + sh_prev), tau_r, td_prev)
                 ax.plot(tz, amp_prev * k_prev, color='tab:orange', linestyle='--', linewidth=1.0, alpha=0.85)
         ax.set_xlim(z0, z1)
         ax.set_xlabel('Time (s)')
@@ -900,6 +1040,7 @@ def extract_metrics(
         'threshold_amp1': np.asarray(thr_list, float),
         'pval_amp1': np.asarray(pval_list, float),
         'figure': figure,
+        'figure_event_model': None,
         'figures_trials': figures_trials,
     }
 
