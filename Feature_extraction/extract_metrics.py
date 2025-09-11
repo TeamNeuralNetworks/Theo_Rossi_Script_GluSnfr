@@ -25,13 +25,13 @@ from scipy.optimize import nnls
 
 try:
     from smoothing import (
-        fill_nans_timewise,
-        sg_smooth,
-        iglusnfr_kernel,
-        time_zoom_mask,
-        windowed_max,
-        pick_peak_on_series,
-        compute_no_signal_mask,
+            fill_nans_timewise,
+            sg_smooth,
+            iglusnfr_kernel,
+            time_zoom_mask,
+            windowed_max,
+            pick_peak_on_series,
+            compute_no_signal_mask,
     )
 except Exception:
     # Fallback: allow importing when current working dir is this subfolder
@@ -86,6 +86,20 @@ DEFAULTS = {
     'bleach_huber_delta': 3.0,
     'bleach_tau_range_factor': (0.25, 4.0),
     'bleach_n_tau': 25,
+    # Measurement and thresholds
+    # measurement: which amplitude series to use for p-values/classification
+    #   'NNLS' | 'SAVGOL' | 'RAW'
+    'measurement': 'NNLS',
+    # threshold_mode: 'auto' selects 'MAD' for NNLS and 'SD' for SAVGOL;
+    # can be forced to 'mad' or 'sd'
+    'threshold_mode': 'auto',
+    # failure classification method: 'NNLS' | 'SAVGOL' | 'RAW'
+    # default None means "use measurement"
+    'fail_method': None,
+    # Share the same baseline-derived threshold across pulses 1..3 for classification
+    'share_thr_1to3': True,
+    # Toggle per-pulse micro-shifts during fitting and null sampling
+    'allow_shift': True,
 }
 
 
@@ -493,15 +507,21 @@ def extract_metrics(
       - peak_window_ms: float (default 25.0)
       - peak_avg_points: int (default 5)
       - pre_peak_ms: float (default 0.0)
-      - null_N: float (default 3.0) — MAD rule multiplier
+      - null_N: float (default 3.0) — threshold multiplier
+      - measurement: {'NNLS'|'SAVGOL'|'RAW'} (default 'NNLS') — which amplitudes are
+        used for p‑values/classification
+      - threshold_mode: {'auto'|'mad'|'sd'} (default 'auto') — auto = MAD for NNLS,
+        SD for SAVGOL
+      - share_thr_1to3: bool (default True) — reuse A1 threshold for pulses 2 and 3
+      - allow_shift: bool (default True) — enable per‑pulse micro‑shifts
       - plot: dict with keys
           - enabled: bool (default False)
           - traces: list of {'raw','savgol','nnls'} (default ['nnls'])
           - show_decay: bool (default True)
           - trials: bool (default False) — also plot each trial with its fit
           - baseline: bool (default False) — for each trial, plot a two-panel
-            figure with baseline fits + noise histogram and the train; forces
-            trials=True when enabled
+          figure with baseline fits + noise histogram and the train; forces
+          trials=True when enabled
     """
     # Parse options (merge into a single config dict)
     opts = options.copy() if isinstance(options, dict) else {}
@@ -519,6 +539,11 @@ def extract_metrics(
     sgW = int(cfg['sg_window']); sgP = int(cfg['sg_poly'])
     win_ms = float(cfg['peak_window_ms']); n_avg = int(cfg['peak_avg_points']); pre_ms = float(cfg['pre_peak_ms'])
     null_N = float(cfg['null_N'])
+    meas = str(cfg.get('measurement', 'NNLS')).strip().upper()
+    failm = str((cfg.get('fail_method') or meas)).strip().upper()
+    thr_mode = str(cfg.get('threshold_mode', 'auto')).strip().lower()
+    share_thr = bool(cfg.get('share_thr_1to3', True))
+    allow_shift = bool(cfg.get('allow_shift', True))
 
     # Shapes & schedule
     t = np.asarray(time, float).reshape(-1)
@@ -576,7 +601,7 @@ def extract_metrics(
         y_avg, t, stim_times, tau_r, tau_d_vec,
         pre_zoom_s=cfg['pre_zoom_s'], post_zoom_s=cfg['post_zoom_s'],
         robust=True, huber_delta=cfg['huber_delta'], irls_iters=cfg['irls_iters'],
-        allow_shift=True, delta_max_s=cfg['delta_max_s'], delta_step_s=cfg['delta_step_s'],
+        allow_shift=allow_shift, delta_max_s=cfg['delta_max_s'], delta_step_s=cfg['delta_step_s'],
         shift_min_s=cfg['shift_min_s'],
     )
     y_sg_avg = sg_smooth(y_avg, sgW, sgP) if 'savgol' in traces else None
@@ -599,32 +624,87 @@ def extract_metrics(
     figures_trials = []  # optional per-trial figures
     for j in range(Yd.shape[1]):
         yj = Yd[:, j]
-        yj_sg = sg_smooth(yj, sgW, sgP) if 'savgol' in traces else None
+        # Always compute SG-smoothed series; may be used for SAVGOL-based thresholds
+        yj_sg = sg_smooth(yj, sgW, sgP)
         a_t, d_t, X_t, yhat_t = fit_amplitudes_no_overlap_backward(
             yj, t, stim_times, tau_r, tau_d_vec,
             pre_zoom_s=cfg['pre_zoom_s'], post_zoom_s=cfg['post_zoom_s'],
             robust=True, huber_delta=cfg['huber_delta'], irls_iters=cfg['irls_iters'],
-            allow_shift=True, delta_max_s=cfg['delta_max_s'], delta_step_s=cfg['delta_step_s'],
+            allow_shift=allow_shift, delta_max_s=cfg['delta_max_s'], delta_step_s=cfg['delta_step_s'],
             shift_min_s=cfg['shift_min_s'],
         )
         amp_raw = compute_localmax_corrected_amps(t, yj, stim_times, win_ms, n_avg, pre_ms, a_t, d_t, tau_r, tau_d_vec)
-        amp_sg = compute_localmax_corrected_amps(t, yj_sg if yj_sg is not None else yj, stim_times, win_ms, n_avg, pre_ms, a_t, d_t, tau_r, tau_d_vec)
+        amp_sg = compute_localmax_corrected_amps(t, yj_sg, stim_times, win_ms, n_avg, pre_ms, a_t, d_t, tau_r, tau_d_vec)
         amp_nn = compute_localmax_corrected_amps(t, yhat_t, stim_times, win_ms, n_avg, pre_ms, a_t, d_t, tau_r, tau_d_vec)
 
-        null_amps = sample_null_amplitudes_consistent(
-            yj, t, baseline_mask, tau_r, tau_d0,
-            train_start=float(train_start), f0_window_s=cfg['f0_window_s'],
-            pre_zoom_s=cfg['pre_zoom_s'], post_zoom_s=cfg['post_zoom_s'],
-            robust=True, huber_delta=cfg['huber_delta'], irls_iters=cfg['irls_iters'],
-            allow_shift=True, delta_max_s=cfg['delta_max_s'], delta_step_s=cfg['delta_step_s'],
-            null_min_post_zoom_s=cfg['null_min_post_zoom_s'], null_sim_max_points=cfg['null_sim_max_points'],
-            peak_window_ms=cfg['peak_window_ms'], peak_avg_points=cfg['peak_avg_points'], pre_peak_ms=cfg['pre_peak_ms'],
-            shift_min_s=cfg['shift_min_s'], n_samples=1000, seed=10_000 + j,
-        )
-        thr1, pfun = baseline_threshold_and_pval(null_amps, null_N, mode='mad')
-        a1 = float(amp_nn[0]) if amp_nn.size else np.nan
+        # Choose threshold rule and null amplitude strategy (auto follows fail_method)
+        eff_mode = ('sd' if failm == 'SAVGOL' or failm == 'RAW' else 'mad') if thr_mode == 'auto' else thr_mode
+        if eff_mode not in ('mad', 'sd'):
+            eff_mode = 'mad'
+
+        if failm == 'SAVGOL' and eff_mode == 'sd':
+            # Compute null amplitudes directly on SG baseline via windowed maxima
+            idx = np.flatnonzero(baseline_mask)
+            if idx.size >= 10:
+                baseline_start = t[idx[0]]; baseline_end = t[idx[-1]]
+                null_start = max(baseline_start, float(train_start) - cfg['f0_window_s'])
+                null_end = min(baseline_end, float(train_start))
+                st_min = null_start + cfg['pre_zoom_s']
+                st_max = null_end - cfg['null_min_post_zoom_s']
+                cand = (t >= st_min) & (t <= st_max)
+                starts = t[cand]
+                if starts.size > int(cfg['null_sim_max_points']):
+                    ii = np.linspace(0, starts.size - 1, int(cfg['null_sim_max_points'])).round().astype(int)
+                    starts = starts[ii]
+                null_amps = windowed_max(t, yj_sg, list(starts), win_ms, n_avg, pre_ms) if starts.size else np.array([])
+            else:
+                null_amps = np.array([])
+        elif failm == 'RAW' and eff_mode == 'sd':
+            # SD rule on RAW baseline windowed maxima
+            idx = np.flatnonzero(baseline_mask)
+            if idx.size >= 10:
+                baseline_start = t[idx[0]]; baseline_end = t[idx[-1]]
+                null_start = max(baseline_start, float(train_start) - cfg['f0_window_s'])
+                null_end = min(baseline_end, float(train_start))
+                st_min = null_start + cfg['pre_zoom_s']
+                st_max = null_end - cfg['null_min_post_zoom_s']
+                cand = (t >= st_min) & (t <= st_max)
+                starts = t[cand]
+                if starts.size > int(cfg['null_sim_max_points']):
+                    ii = np.linspace(0, starts.size - 1, int(cfg['null_sim_max_points'])).round().astype(int)
+                    starts = starts[ii]
+                null_amps = windowed_max(t, yj, list(starts), win_ms, n_avg, pre_ms) if starts.size else np.array([])
+            else:
+                null_amps = np.array([])
+        else:
+            # NNLS-consistent null on pre-train window using the single-pulse estimator
+            null_amps = sample_null_amplitudes_consistent(
+                yj, t, baseline_mask, tau_r, tau_d0,
+                train_start=float(train_start), f0_window_s=cfg['f0_window_s'],
+                pre_zoom_s=cfg['pre_zoom_s'], post_zoom_s=cfg['post_zoom_s'],
+                robust=True, huber_delta=cfg['huber_delta'], irls_iters=cfg['irls_iters'],
+                allow_shift=allow_shift, delta_max_s=cfg['delta_max_s'], delta_step_s=cfg['delta_step_s'],
+                null_min_post_zoom_s=cfg['null_min_post_zoom_s'], null_sim_max_points=cfg['null_sim_max_points'],
+                peak_window_ms=cfg['peak_window_ms'], peak_avg_points=cfg['peak_avg_points'], pre_peak_ms=cfg['pre_peak_ms'],
+                shift_min_s=cfg['shift_min_s'], n_samples=1000, seed=10_000 + j,
+            )
+
+        thr1, pfun = baseline_threshold_and_pval(null_amps, null_N, mode=eff_mode)
+
+        # Pick amplitude series for p-values/classification
+        if meas == 'SAVGOL':
+            a_for_p = amp_sg
+        elif meas == 'RAW':
+            a_for_p = amp_raw
+        else:
+            a_for_p = amp_nn
+
+        a1 = float(a_for_p[0]) if a_for_p.size else np.nan
         p1 = float(pfun(a1)) if np.isfinite(a1) else np.nan
         thr_list.append(thr1); pval_list.append(p1)
+        # Optionally compute p-values for pulses 2 and 3 using the shared threshold
+        p2 = float(pfun(a_for_p[1])) if (share_thr and a_for_p.size >= 2 and np.isfinite(a_for_p[1])) else np.nan
+        p3 = float(pfun(a_for_p[2])) if (share_thr and a_for_p.size >= 3 and np.isfinite(a_for_p[2])) else np.nan
 
         per_trial.append({
             'amp_raw': amp_raw,
@@ -637,6 +717,10 @@ def extract_metrics(
             'delta_s': d_t,
             'y_proc': yj,
             'yhat': yhat_t,
+            'thr_shared': thr1,
+            'pval_amp1': p1,
+            'pval_amp2': p2,
+            'pval_amp3': p3,
         })
 
         # Optional: per-trial plot
@@ -818,3 +902,129 @@ def extract_metrics(
         'figure': figure,
         'figures_trials': figures_trials,
     }
+
+
+# ----------------------------------------------
+# Convenience: export multiple folders to Excel
+# ----------------------------------------------
+def export_folders_to_excel(paths,
+                            out_file,
+                            *,
+                            train_start: float,
+                            isi: float,
+                            n_pulses: int,
+                            options: Optional[Dict] = None):
+    """Process all .xlsx files in each folder and write a multi-sheet Excel.
+
+    - One sheet per input folder (sheet named after the folder's basename)
+    - Each sheet: one row per file with AMP1..AMPn, PPR2/1.., optional %Fail1..3
+
+    Options follow extract_metrics; 'measurement' selects the amplitude series
+    used for export; 'fail_method' controls failure classification.
+    """
+    import os, glob, zipfile
+    import pandas as pd
+
+    if isinstance(paths, str):
+        paths = [paths]
+
+    def _is_valid_xlsx(path: str) -> bool:
+        try:
+            with zipfile.ZipFile(path) as z:
+                return '[Content_Types].xml' in z.namelist()
+        except Exception:
+            return False
+
+    cfg = {} if options is None else dict(options)
+    meas = str(cfg.get('measurement', 'NNLS')).strip().upper()
+    failm = str((cfg.get('fail_method') or meas)).strip().upper()
+
+    with pd.ExcelWriter(out_file) as writer:
+        wrote_any = False
+        for folder in paths:
+            files = [p for p in glob.glob(os.path.join(folder, "*.xlsx")) if _is_valid_xlsx(p)]
+            if not files:
+                continue
+            rows = []
+            for fp in files:
+                try:
+                    df = pd.read_excel(fp, sheet_name=0)
+                    t_raw = pd.to_numeric(df.iloc[:, -1], errors='coerce').to_numpy(float)
+                    X = df.iloc[:, :-1].apply(pd.to_numeric, errors='coerce').to_numpy(float)
+                    ok = np.isfinite(t_raw)
+                    t = t_raw[ok]; trials = X[ok, :]
+                    res = extract_metrics(t, trials, train_start=train_start, isi=isi, n_pulses=n_pulses, options=cfg)
+
+                    # Choose amplitude series per measurement
+                    if meas == 'SAVGOL':
+                        amp_avg = res['average']['amp_savgol']
+                    elif meas == 'RAW':
+                        amp_avg = res['average']['amp_raw']
+                    else:
+                        amp_avg = res['average']['amp_nnls']
+
+                    # Build row
+                    base = os.path.splitext(os.path.basename(fp))[0]
+                    row = {'ID': base}
+                    amp_avg = [float(x) if x is not None else float('nan') for x in amp_avg]
+                    for i, v in enumerate(amp_avg, start=1):
+                        row[f"AMP{i}"] = v
+                    a1 = row.get('AMP1')
+                    for i in range(2, int(n_pulses) + 1):
+                        row[f"PPR{i}/1"] = (row.get(f"AMP{i}") / a1) if (a1 not in (None, 0) and pd.notna(a1)) else float('nan')
+
+                    # Failure % for pulses 1..3 using fail_method amplitudes and shared thresholds if present
+                    # Collect per-trial from res['per_trial']
+                    def _amp_vec_per_trial(key):
+                        vals = []
+                        for r in res['per_trial']:
+                            arr = r.get(key)
+                            vals.append(arr if arr is not None else [])
+                        return vals
+
+                    if failm == 'SAVGOL':
+                        per_amp = _amp_vec_per_trial('amp_savgol')
+                    elif failm == 'RAW':
+                        per_amp = _amp_vec_per_trial('amp_raw')
+                    else:
+                        per_amp = _amp_vec_per_trial('amp_nnls')
+
+                    # Use per-trial shared threshold and compare first 3 pulses
+                    n_fail = [0, 0, 0]
+                    n_valid = [0, 0, 0]
+                    for idx_trial, r in enumerate(res['per_trial']):
+                        thr = r.get('thr_shared')
+                        amps = per_amp[idx_trial]
+                        if thr is None or not (isinstance(amps, (list, tuple, np.ndarray))):
+                            continue
+                        for k in range(3):
+                            if len(amps) > k:
+                                ak = float(amps[k])
+                                if np.isfinite(ak) and np.isfinite(thr):
+                                    n_valid[k] += 1
+                                    if ak <= thr:
+                                        n_fail[k] += 1
+                    for k in range(3):
+                        row[f"%Fail{k+1}"] = round((n_fail[k] / n_valid[k]) * 100.0, 2) if n_valid[k] else float('nan')
+
+                    rows.append(row)
+                except Exception:
+                    continue
+
+            if rows:
+                import pandas as _pd
+                df_out = _pd.DataFrame(rows)
+                # Ensure ordered columns
+                cols = ['ID'] + [f"AMP{i}" for i in range(1, int(n_pulses) + 1)] + [f"PPR{i}/1" for i in range(2, int(n_pulses) + 1)] + [f"%Fail{i}" for i in range(1, 4)]
+                for c in cols:
+                    if c not in df_out.columns:
+                        df_out[c] = float('nan')
+                df_out = df_out[cols]
+                sheet = os.path.basename(os.path.normpath(folder))[:31]
+                df_out.to_excel(writer, sheet_name=sheet, index=False)
+                wrote_any = True
+
+        if not wrote_any:
+            # Placeholder sheet
+            import pandas as _pd
+            _pd.DataFrame({"info": ["No valid data found"]}).to_excel(writer, sheet_name="Summary", index=False)

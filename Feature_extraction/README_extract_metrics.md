@@ -7,6 +7,12 @@ The function keeps the math equivalent to the main pipeline while exposing a sma
 - Import path: `from extract_metrics import extract_metrics`
 - Plot controls: `options['plot'] = {'enabled': True, 'traces': ['raw','savgol','nnls'], 'show_decay': True, 'trials': False, 'baseline': False}`
 - Always enforces non‑decreasing τd across pulses for stability.
+- New controls:
+  - `measurement`: `'NNLS'|'SAVGOL'|'RAW'` (default `'NNLS'`) — p‑values use this amplitude series
+  - `fail_method`: `'NNLS'|'SAVGOL'|'RAW'` (default: same as `measurement`) — controls null/threshold rule
+  - `threshold_mode`: `'auto'|'mad'|'sd'` (default `'auto'`) — auto picks MAD for `NNLS`, SD for `SAVGOL`/`RAW`
+  - `allow_shift`: bool (default True) — enable per‑pulse micro‑shifts
+  - `share_thr_1to3`: bool (default True) — reuse the A1 threshold for pulses 2–3
 
 Related demo scripts in this folder (with concrete paths): `demo_single_file.py`, `demo_single_folder.py`, `demo_batch_process.py`.
 
@@ -37,6 +43,11 @@ res = extract_metrics(
     options={
         'normalize_dff': True,
         'bleach': True,
+        'measurement': 'NNLS',        # or 'SAVGOL', 'RAW'
+        'fail_method': 'NNLS',        # default: same as measurement
+        'threshold_mode': 'auto',     # or 'mad', 'sd'
+        'allow_shift': True,
+        'share_thr_1to3': True,
         'plot': {
             'enabled': True,
             'traces': ['raw','savgol','nnls'],  # show all average overlays
@@ -51,7 +62,7 @@ res = extract_metrics(
 print("Averages (NNLS):", res['average']['amp_nnls'])
 print("PPR (NNLS):", res['average']['ppr_nnls'])
 print("A1 thresholds per trial:", res['threshold_amp1'])
-print("A1 p-values per trial:", res['pval_amp1'])
+print("A1 p-values per trial (using", 'NNLS', "):", res['pval_amp1'])
 
 # Save plot if enabled
 fig = res.get('figure')
@@ -120,6 +131,26 @@ pd.DataFrame(rows).to_csv(os.path.join(out_dir, "summary.csv"), index=False)
 Tips:
 - Vary `train_start` per directory: compute it from the folder name with a small map.
 - Control which traces are drawn via `options['plot']['traces']`.
+
+---
+
+## 4) Multi‑folder → multi‑sheet Excel
+
+Use the built‑in helper to export one sheet per folder with AMP and PPR columns (and `%Fail1..3` if available):
+
+```python
+from Feature_extraction.extract_metrics import export_folders_to_excel
+
+folders = [r"C:\\data\\groupA", r"C:\\data\\groupB"]
+export_folders_to_excel(
+    folders,
+    out_file=r"C:\\out\\ppr_results.xlsx",
+    train_start=0.5,
+    isi=0.05,
+    n_pulses=10,
+    options={'measurement': 'NNLS', 'fail_method': 'NNLS', 'threshold_mode': 'auto'}
+)
+```
 
 ---
 
@@ -288,4 +319,3 @@ Notes:
 - Provide `train_start`, `isi`, and `n_pulses` appropriate to each dataset.
 - ΔF/F0 is used by default; disable by `options['normalize_dff'] = False` if you need raw ΔF.
 - τd is always enforced non‑decreasing across pulses to avoid non‑physical regressions and improve stability.
-
