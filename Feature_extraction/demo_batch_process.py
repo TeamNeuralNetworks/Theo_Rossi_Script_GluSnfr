@@ -59,6 +59,7 @@ for in_dir in folders:
             time, trials,
             train_start=train_start, isi=isi, n_pulses=n_pulses,
             options={'normalize_dff': True, 'bleach': True,
+                     'fit_source': 'global', 'decay_progression_mode': 'linear',
                      'plot': {'enabled': True, 'traces': ['raw','savgol','nnls'], 'show_decay': True, 'trials': False}}
         )
 

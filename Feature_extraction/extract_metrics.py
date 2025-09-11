@@ -25,6 +25,7 @@ from scipy.optimize import nnls
 
 try:
     from smoothing import (
+            progress_print,
             fill_nans_timewise,
             sg_smooth,
             iglusnfr_kernel,
@@ -32,6 +33,7 @@ try:
             windowed_max,
             pick_peak_on_series,
             compute_no_signal_mask,
+            build_median_recut_waveform,
     )
 except Exception:
     # Fallback: allow importing when current working dir is this subfolder
@@ -40,6 +42,7 @@ except Exception:
     if REPO_ROOT not in sys.path:
         sys.path.insert(0, REPO_ROOT)
     from smoothing import (
+        progress_print,
         fill_nans_timewise,
         sg_smooth,
         iglusnfr_kernel,
@@ -47,6 +50,7 @@ except Exception:
         windowed_max,
         pick_peak_on_series,
         compute_no_signal_mask,
+        build_median_recut_waveform,
     )
 
 
@@ -72,8 +76,9 @@ DEFAULTS = {
     'null_N': 3.0,  # MAD rule multiplier
     # Kinetics grids (ms)
     'kin_taur_grid_ms': [0.6, 0.8, 1.0, 1.2, 1.5, 2.0],
-    'kin_taud0_grid_ms': [1.6, 2.0, 2.5, 3.0, 4.0, 6.0, 8.0, 10.0],
-    'kin_slope_grid_ms': [0.0, 0.25, 0.5, 1.0, 2.0],
+    # Extend decay grids so τd can grow well beyond 10 ms when trains slow down
+    'kin_taud0_grid_ms': [1.6, 2.0, 2.5, 3.0, 4.0, 6.0, 8.0, 10.0, 12.5, 15.0, 18.0, 22.0, 28.0, 35.0, 45.0, 60.0],
+    'kin_slope_grid_ms': [0.0, 0.25, 0.5, 1.0, 2.0, 3.0, 5.0],
     # Robust NNLS + micro‑shift
     'huber_delta': 5.5,
     'irls_iters': 6,
@@ -87,8 +92,9 @@ DEFAULTS = {
     'bleach_tau_range_factor': (0.25, 4.0),
     'bleach_n_tau': 25,
     # Event model (kernel) used for per-pulse fitting
-    # Supported: 'double_exp' (difference-of-exponentials), 'cooperative'
-    'event_model': 'cooperative',
+    # Supported (varying): 'double_exp' (rise+decay), 'cooperative', 'bilinear'
+    # Default is a rise+decay kernel (difference of exponentials)
+    'event_model': 'double_exp',
     # Cooperative exponent n
     'coop_n': 2.0,
     # Measurement and thresholds
@@ -103,11 +109,17 @@ DEFAULTS = {
     'fail_method': None,
     # Toggle per-pulse micro-shifts during fitting and null sampling
     'allow_shift': True,
-    # Auto-select event model from multi-trial average
-    'auto_event_model': True,
-    # Per-pulse behavior: 'vary_shape' allows τ (or shape) to vary across pulses;
-    # 'amplitude_only' locks shape across pulses and fits only amplitudes with auto offset.
-    'per_pulse_mode': 'vary_shape',  # 'vary_shape' | 'amplitude_only'
+    # Kinetics source and progression controls
+    #  - fit_source: 'global' | 'average' | 'individual'
+    #    * global: fit a single event template from all trials (recut median)
+    #    * average: fit kinetics on the multi-trial average trace
+    #    * individual: fit kinetics per trial then aggregate (median)
+    'fit_source': 'global',
+    # Decay progression across train (applies to all fit_source modes)
+    #  - 'fixed': apply one τd to the whole train (median of estimates)
+    #  - 'free_monotonic': interpolate between first and last τd, non-decreasing
+    #  - 'linear': non-negative slope linear regression across pulses
+    'decay_progression_mode': 'linear',
 }
 
 # Selected kernel (set inside extract_metrics based on options; default is iglusnfr_kernel)
@@ -539,6 +551,7 @@ def extract_metrics(
     """
     # Parse options (merge into a single config dict)
     opts = options.copy() if isinstance(options, dict) else {}
+    user_specified_event_model = isinstance(opts, dict) and ('event_model' in opts)
     plot_opts = opts.get('plot', {}) if isinstance(opts.get('plot', {}), dict) else {}
     want_plot = bool(plot_opts.get('enabled', False))
     traces = list(plot_opts.get('traces', ['nnls']))
@@ -660,110 +673,239 @@ def extract_metrics(
         return spec, _kernel_from_params, _kernel_tau_varying
 
     global _KERNEL_FUN
-    # τ‑varying supported directly
-    varying_supported = {'double_exp', 'cooperative', 'bilinear'}
-    if event_model in varying_supported:
-        spec, _, make_var = _build_kernel_from_library(event_model if event_model != 'double_exp' else 'double_exp')
-        # Validate settings
-        if em_settings:
-            allowed = set(spec['params']) - {'amp', 't_peak'}
-            # For τ‑varying cooperative allow only n_coop override; for others no overrides
-            if event_model == 'cooperative':
-                extra_keys = set(em_settings.keys()) - {'n_coop'}
-                if extra_keys:
-                    raise ValueError(f"Unsupported event_model_settings for cooperative: {sorted(extra_keys)}")
-                n_coop = float(em_settings.get('n_coop', coop_n_default))
-                def _map(tau_r, tau_d):
-                    return [1.0, float(tau_r), float(tau_d), float(n_coop), 0.0]
-                _KERNEL_FUN = make_var(_map)
-            elif event_model == 'double_exp':
-                if em_settings:
-                    raise ValueError("double_exp in τ‑varying mode does not accept event_model_settings")
-                def _map(tau_r, tau_d):
-                    return [1.0, float(tau_r), float(tau_d), 0.0]
-                _KERNEL_FUN = make_var(_map)
-            elif event_model == 'bilinear':
-                if em_settings:
-                    raise ValueError("bilinear in τ‑varying mode does not accept event_model_settings")
-                # bilinear expects t_rise(ms), t_decay(ms)
-                def _map(tau_r, tau_d):
-                    return [1.0, float(tau_r) * 1000.0, float(tau_d) * 1000.0, 0.0]
-                _KERNEL_FUN = make_var(_map)
+    # Helper to set kernel from current cfg and return effective (event_model, n_coop|None)
+    def _apply_event_model_from_cfg() -> Tuple[str, Optional[float]]:
+        nonlocal event_model, coop_n_default, em_settings
+        # τ‑varying supported directly
+        varying_supported = {'double_exp', 'cooperative', 'bilinear'}
+        evm = str(cfg.get('event_model', event_model)).strip().lower()
+        em_settings = cfg.get('event_model_settings', {}) or {}
+        if not isinstance(em_settings, dict):
+            raise ValueError("event_model_settings must be a dict of parameter overrides")
+        if evm.startswith('library:'):
+            _lib = evm.split(':', 1)[1].strip().lower()
+            if _lib in varying_supported:
+                evm = _lib
+        if evm in varying_supported:
+            spec, _, make_var = _build_kernel_from_library(evm if evm != 'double_exp' else 'double_exp')
+            if em_settings:
+                if evm == 'cooperative':
+                    extra_keys = set(em_settings.keys()) - {'n_coop'}
+                    if extra_keys:
+                        raise ValueError(f"Unsupported event_model_settings for cooperative: {sorted(extra_keys)}")
+                    n_coop = float(em_settings.get('n_coop', coop_n_default))
+                    def _map(tau_r, tau_d):
+                        return [1.0, float(tau_r), float(tau_d), float(n_coop), 0.0]
+                    _KERNEL_FUN = make_var(_map)
+                    progress_print(f"[model] Using event model 'cooperative' (τ‑varying), n_coop={n_coop}")
+                    event_model = evm
+                    return evm, n_coop
+                elif evm == 'double_exp':
+                    if em_settings:
+                        raise ValueError("double_exp in τ‑varying mode does not accept event_model_settings")
+                    def _map(tau_r, tau_d):
+                        return [1.0, float(tau_r), float(tau_d), 0.0]
+                    _KERNEL_FUN = make_var(_map)
+                    progress_print("[model] Using event model 'double_exp' (τ‑varying)")
+                    event_model = evm
+                    return evm, None
+                else:  # bilinear
+                    if em_settings:
+                        raise ValueError("bilinear in τ‑varying mode does not accept event_model_settings")
+                    def _map(tau_r, tau_d):
+                        return [1.0, float(tau_r) * 1000.0, float(tau_d) * 1000.0, 0.0]
+                    _KERNEL_FUN = make_var(_map)
+                    progress_print("[model] Using event model 'bilinear' (τ‑varying)")
+                    event_model = evm
+                    return evm, None
+            else:
+                if evm == 'cooperative':
+                    # Use coop_n from cfg if provided
+                    coop_n_default = float(cfg.get('coop_n', coop_n_default))
+                    def _map(tau_r, tau_d):
+                        return [1.0, float(tau_r), float(tau_d), float(coop_n_default), 0.0]
+                    _KERNEL_FUN = make_var(_map)
+                    progress_print(f"[model] Using event model 'cooperative' (τ‑varying), n_coop={coop_n_default}")
+                    event_model = evm
+                    return evm, coop_n_default
+                elif evm == 'double_exp':
+                    def _map(tau_r, tau_d):
+                        return [1.0, float(tau_r), float(tau_d), 0.0]
+                    _KERNEL_FUN = make_var(_map)
+                    progress_print("[model] Using event model 'double_exp' (τ‑varying)")
+                    event_model = evm
+                    return evm, None
+                else:  # bilinear
+                    def _map(tau_r, tau_d):
+                        return [1.0, float(tau_r) * 1000.0, float(tau_d) * 1000.0, 0.0]
+                    _KERNEL_FUN = make_var(_map)
+                    progress_print("[model] Using event model 'bilinear' (τ‑varying)")
+                    event_model = evm
+                    return evm, None
         else:
-            if event_model == 'cooperative':
-                def _map(tau_r, tau_d):
-                    return [1.0, float(tau_r), float(tau_d), float(coop_n_default), 0.0]
-                _KERNEL_FUN = make_var(_map)
-            elif event_model == 'double_exp':
-                def _map(tau_r, tau_d):
-                    return [1.0, float(tau_r), float(tau_d), 0.0]
-                _KERNEL_FUN = make_var(_map)
-            else:  # bilinear
-                def _map(tau_r, tau_d):
-                    return [1.0, float(tau_r) * 1000.0, float(tau_d) * 1000.0, 0.0]
-                _KERNEL_FUN = make_var(_map)
-    else:
-        # Fixed-template path via 'library:<name>' or direct library name
-        lib_name = event_model
-        if lib_name.startswith('library:'):
-            lib_name = lib_name.split(':', 1)[1].strip().lower()
-        # Build kernel from fitted or user-provided shape params
-        spec, make_fixed, _ = _build_kernel_from_library(lib_name)
-        # Validate overrides against spec
-        allowed = set(spec['params']) - {'amp', 't_peak'}
-        unknown = set(em_settings.keys()) - allowed
-        if unknown:
-            raise ValueError(f"Unknown event_model_settings for '{lib_name}': {sorted(unknown)}. Allowed keys: {sorted(allowed)}")
-        # Fit missing params on the average event
-        try:
-            # Fit in 0..30 ms relative to train start
-            t_ms = (t - float(train_start)) * 1000.0
-            m0 = (t_ms >= 0.0) & (t_ms <= 30.0)
-            tf = t_ms[m0]
-            yf = np.nanmean(Yd, axis=1)[m0]
-            p0 = spec['p0_func'](yf, tf)
-            from scipy.optimize import curve_fit as _cf
-            popt, _ = _cf(spec['func'], tf, yf, p0=p0, bounds=spec['bounds'], maxfev=3000)
-        except Exception:
-            popt = p0  # fallback to initializer
-        # Build fixed param dict
-        params_fixed: Dict[str, float] = {}
-        for key, val in zip(spec['params'], popt):
-            params_fixed[key] = float(val)
-        # Apply user overrides
-        for k, v in em_settings.items():
-            params_fixed[k] = float(v)
-        # Remove amplitude and t_peak (we enforce amp=1, t_peak=0 in kernel)
-        params_fixed.pop('amp', None)
-        params_fixed.pop('t_peak', None)
-        _KERNEL_FUN = make_fixed(params_fixed)
-        progress_print(f"[info] Using fixed-template matching for model '{lib_name}' (no per-pulse decay progression).", show=True)
+            # Fixed template
+            lib_name = evm
+            if lib_name.startswith('library:'):
+                lib_name = lib_name.split(':', 1)[1].strip().lower()
+            spec, make_fixed, _ = _build_kernel_from_library(lib_name)
+            allowed = set(spec['params']) - {'amp', 't_peak'}
+            unknown = set(em_settings.keys()) - allowed
+            if unknown:
+                raise ValueError(f"Unknown event_model_settings for '{lib_name}': {sorted(unknown)}. Allowed keys: {sorted(allowed)}")
+            # Fit missing params on the average event (placeholder; uses y_avg later if needed)
+            # For fixed-template, kernel ignores tau_r/tau_d and uses fitted params
+            _KERNEL_FUN = make_fixed({k: float(v) for k, v in em_settings.items() if k in allowed})
+            progress_print(f"[model] Using fixed-template '{lib_name}' (amplitude-only per pulse).")
+            event_model = lib_name
+            return lib_name, None
 
-    # Optional: run auto-selection now that Yd is preprocessed and finite
-    if bool(cfg.get('auto_event_model', True)):
-        try:
-            try:
-                from Model_Calibration.auto_model_settings import auto_select_event_model_settings
-            except Exception:
-                from auto_model_settings import auto_select_event_model_settings  # type: ignore
-            auto = auto_select_event_model_settings(
-                t, Yd, train_start=float(train_start), isi=float(isi), n_pulses=int(n_pulses),
-                candidates=("double_exp","cooperative"), window_ms=(0.0, 30.0)
-            )
-            rec = auto.get('options', {})
-            for k in ('event_model','coop_n'):
-                if k in rec:
-                    cfg[k] = rec[k]
-        except Exception:
-            pass
+    # First application with initial cfg
+    ev_model_name, n_coop_effective = _apply_event_model_from_cfg()
+    varying_supported_names = {"double_exp", "cooperative", "bilinear"}
+    is_varying_model = ev_model_name in varying_supported_names
+
+    # No auto model selection: honor explicit event_model; otherwise use default.
 
     # Average trace and kinetics
     y_avg = np.nanmean(Yd, axis=1)
-    tau_r, tau_d0, slope, tau_d_vec = estimate_kinetics_from_average(
-        t, y_avg, stim_times,
-        taur_grid_ms=cfg['kin_taur_grid_ms'], taud0_grid_ms=cfg['kin_taud0_grid_ms'],
-        slope_grid_ms=cfg['kin_slope_grid_ms'], pre_zoom_s=cfg['pre_zoom_s'], post_zoom_s=cfg['post_zoom_s']
-    )
+
+    # Helper: estimate base kinetics from recut median of all trials/events
+    def _estimate_from_recut_median():
+        try:
+            t_rel, med = build_median_recut_waveform(
+                t, Yd, stim_times, pre_ms=5.0, post_ms=50.0, align_by_peak=True,
+                peak_win_ms=25.0, peak_search_pre_ms=0.0
+            )
+            if t_rel is None or med is None:
+                raise ValueError('recut_median unavailable')
+            # Grid search on (tau_r, tau_d0) using current kernel
+            tau_r_grid = np.array(cfg['kin_taur_grid_ms'], float) / 1000.0
+            tau_d0_grid = np.array(cfg['kin_taud0_grid_ms'], float) / 1000.0
+            best = (np.inf, 0.002, 0.015)
+            dt = float(np.median(np.diff(t_rel)))
+            dt_s = dt
+            # Use _KERNEL_FUN for current model (cooperative uses coop_n)
+            for tr in tau_r_grid:
+                for td in tau_d0_grid:
+                    k = _KERNEL_FUN(t_rel, tr, td)
+                    denom = float(np.sum(k**2))
+                    amp = float(np.sum(med * k)) / denom if denom > 0 else 1.0
+                    fit = amp * k
+                    err = float(np.nanmean((med - fit) ** 2))
+                    if err < best[0]:
+                        best = (err, tr, td)
+            _, tau_r_b, tau_d0_b = best
+            # default slope 0, tau_d_vec constant; progression handled below
+            return float(tau_r_b), float(tau_d0_b)
+        except Exception:
+            return None, None
+
+    # Choose kinetics according to fit_source
+    fit_source = str(cfg.get('fit_source', 'global')).lower()
+    dec_mode = str(cfg.get('decay_progression_mode', 'linear')).lower()
+
+    def _estimate_last_tau(tau_r_local, tau_d0_local):
+        try:
+            last_st = stim_times[-1]
+            zmask_last = (t >= last_st) & (t <= (last_st + cfg['post_zoom_s']))
+            tf = t[zmask_last]; yf = y_avg[zmask_last]
+            tau_d_grid_ms = np.array(cfg['kin_taud0_grid_ms'], float)
+            tau_d_grid = tau_d_grid_ms / 1000.0
+            best = (np.inf, tau_d0_local)
+            for td in tau_d_grid:
+                k = _KERNEL_FUN(tf - last_st, tau_r_local, td)
+                denom = float(np.sum(k**2))
+                amp = float(np.sum(yf * k)) / denom if denom > 0 else 1.0
+                fit = amp * k
+                err = float(np.nanmean((yf - fit) ** 2))
+                if err < best[0]:
+                    best = (err, td)
+            tau_last = float(best[1])
+            try:
+                if tau_last >= (float(np.max(tau_d_grid)) - 1e-9):
+                    progress_print(f"[decay] τd_last hit upper grid bound ({np.max(tau_d_grid_ms):.1f} ms). Consider extending 'kin_taud0_grid_ms'.")
+            except Exception:
+                pass
+            return tau_last
+        except Exception:
+            return float(tau_d0_local)
+
+    def _apply_progression(tau_r_in, tau_d_vec_in, tau_d0_in):
+        # Apply dec_mode smoothing/progression rules to tau_d_vec
+        if dec_mode == 'fixed':
+            td_med = float(np.nanmedian(tau_d_vec_in)) if np.size(tau_d_vec_in) else float(tau_d0_in)
+            return tau_r_in, np.full(n_pulses, td_med)
+        elif dec_mode == 'linear':
+            # Non-negative slope linear fit across pulses
+            x = np.arange(n_pulses, dtype=float)
+            y = np.asarray(tau_d_vec_in, float)
+            if y.size != n_pulses or not np.isfinite(y).any():
+                y = np.full(n_pulses, float(tau_d0_in))
+            A = np.column_stack([np.ones_like(x), x])
+            try:
+                coef, _, _, _ = np.linalg.lstsq(A, y, rcond=None)
+                a, b = float(coef[0]), max(0.0, float(coef[1]))
+            except Exception:
+                a, b = float(y[0]), 0.0
+            yfit = a + b * x
+            return tau_r_in, np.maximum.accumulate(yfit)
+        else:  # 'free_monotonic': interpolate between first and last
+            y = np.asarray(tau_d_vec_in, float)
+            if y.size != n_pulses:
+                y = np.full(n_pulses, float(tau_d0_in))
+            yfit = np.linspace(float(y[0]), float(y[-1]), n_pulses)
+            return tau_r_in, np.maximum.accumulate(yfit)
+
+    if fit_source == 'global':
+        tr_b, td0_b = _estimate_from_recut_median()
+        if tr_b is None:
+            # fallback to average-trace fit
+            tr_b, td0_b, slope, tau_d_vec0 = estimate_kinetics_from_average(
+                t, y_avg, stim_times,
+                taur_grid_ms=cfg['kin_taur_grid_ms'], taud0_grid_ms=cfg['kin_taud0_grid_ms'],
+                slope_grid_ms=cfg['kin_slope_grid_ms'], pre_zoom_s=cfg['pre_zoom_s'], post_zoom_s=cfg['post_zoom_s']
+            )
+        tau_r = float(tr_b); tau_d0 = float(td0_b)
+        if dec_mode in ('linear','free_monotonic'):
+            tau_last = _estimate_last_tau(tau_r, tau_d0)
+            tau_d_vec0 = np.linspace(float(tau_d0), float(tau_last), n_pulses)
+        else:
+            tau_d_vec0 = np.full(n_pulses, float(tau_d0))
+        tau_r, tau_d_vec = _apply_progression(tau_r, tau_d_vec0, tau_d0)
+        if is_varying_model:
+            progress_print(f"[fit] source=global | τd0={tau_d_vec[0]*1000:.2f}ms → τdN={tau_d_vec[-1]*1000:.2f}ms | mode={dec_mode}")
+    elif fit_source == 'individual':
+        tau_rs = []
+        tau_d_mat = []
+        for j in range(Yd.shape[1]):
+            try:
+                trj, td0j, slopej, tdvecj = estimate_kinetics_from_average(
+                    t, Yd[:, j], stim_times,
+                    taur_grid_ms=cfg['kin_taur_grid_ms'], taud0_grid_ms=cfg['kin_taud0_grid_ms'],
+                    slope_grid_ms=cfg['kin_slope_grid_ms'], pre_zoom_s=cfg['pre_zoom_s'], post_zoom_s=cfg['post_zoom_s']
+                )
+                tau_rs.append(trj)
+                tau_d_mat.append(tdvecj)
+            except Exception:
+                continue
+        tau_r = float(np.nanmedian(tau_rs)) if tau_rs else 0.002
+        if tau_d_mat:
+            tau_d_vec0 = np.nanmedian(np.vstack(tau_d_mat), axis=0)
+        else:
+            tau_d_vec0 = np.full(n_pulses, 0.010)
+        tau_d0 = float(tau_d_vec0[0])
+        tau_r, tau_d_vec = _apply_progression(tau_r, tau_d_vec0, tau_d0)
+        if is_varying_model:
+            progress_print(f"[fit] source=individual | τd0={tau_d_vec[0]*1000:.2f}ms → τdN={tau_d_vec[-1]*1000:.2f}ms | mode={dec_mode}")
+    else:  # 'average'
+        tau_r, tau_d0, slope, tau_d_vec0 = estimate_kinetics_from_average(
+            t, y_avg, stim_times,
+            taur_grid_ms=cfg['kin_taur_grid_ms'], taud0_grid_ms=cfg['kin_taud0_grid_ms'],
+            slope_grid_ms=cfg['kin_slope_grid_ms'], pre_zoom_s=cfg['pre_zoom_s'], post_zoom_s=cfg['post_zoom_s']
+        )
+        tau_r, tau_d_vec = _apply_progression(tau_r, tau_d_vec0, tau_d_vec0[0])
+        if is_varying_model:
+            progress_print(f"[fit] source=average | τd0={tau_d_vec[0]*1000:.2f}ms → τdN={tau_d_vec[-1]*1000:.2f}ms | mode={dec_mode}")
 
     # Fit average trace (backward, no overlap) and measure amplitudes
     a_avg, d_avg, X_avg, yhat_avg = fit_amplitudes_no_overlap_backward(
@@ -774,11 +916,6 @@ def extract_metrics(
         shift_min_s=cfg['shift_min_s'],
     )
     y_sg_avg = sg_smooth(y_avg, sgW, sgP) if 'savgol' in traces else None
-
-    # If user requests amplitude-only per-pulse behavior, lock shape across pulses
-    if str(cfg.get('per_pulse_mode', 'vary_shape')).lower() == 'amplitude_only':
-        tau_d_vec = np.full_like(tau_d_vec, float(tau_d0))
-        progress_print("[info] Using amplitude-only per-pulse fitting (shape locked; auto offset enabled).", show=True)
 
     amp_nnls_avg = compute_localmax_corrected_amps(
         t, yhat_avg, stim_times, win_ms, n_avg, pre_ms, a_avg, d_avg, tau_r, tau_d_vec
@@ -1009,7 +1146,8 @@ def extract_metrics(
                         td_prev = float(tau_d_vec[p - 1])
                         sh_prev = float(d_t[p - 1]) if len(d_t) > (p - 1) else 0.0
                         amp_prev = float(a_t[p - 1]) if len(a_t) > (p - 1) else 0.0
-                        k_prev = iglusnfr_kernel(tz - (st_prev + sh_prev), tau_r, td_prev)
+                        # Use the active kernel, not hardcoded iglusnfr
+                        k_prev = _KERNEL_FUN(tz - (st_prev + sh_prev), tau_r, td_prev)
                         ax_t.plot(tz, amp_prev * k_prev, color='tab:orange', linestyle='--', linewidth=1.0, alpha=0.85)
                 if np.isfinite(thr1):
                     ax_t.axhline(thr1, color='red', linestyle=':', linewidth=0.8)
@@ -1029,14 +1167,14 @@ def extract_metrics(
     figure = None
     if want_plot:
         figure = plt.figure(figsize=(12, 5))
-        gs = figure.add_gridspec(1, 2, width_ratios=[1, 4], wspace=0.15)
-        # Left: aggregated event + model fit (0..30 ms)
+        gs = figure.add_gridspec(1, 2, width_ratios=[1.5, 4], wspace=0.15)
+        # Left: aggregated event + model fit (−3..next stim)
         axL = figure.add_subplot(gs[0, 0])
         try:
             t_ms = (t - float(train_start)) * 1000.0
             isi_ms = float(isi) * 1000.0
             min_x = -3.0
-            max_x = isi_ms
+            max_x = min(isi_ms, 30.0)
             m0 = (t_ms >= min_x) & (t_ms < max_x)
             axL.plot(t_ms[m0], y_avg[m0], color='k', lw=1.5, label='Average')
             # Overlay best-fit library model matching current kernel choice
@@ -1045,33 +1183,70 @@ def extract_metrics(
                     from Model_Calibration.event_models import get_event_model
                 except Exception:
                     from event_models import get_event_model  # type: ignore
-                spec = get_event_model(event_model)
+                # Resolve the effective model name
+                _name = event_model
+                if _name.startswith('library:'):
+                    _name = _name.split(':', 1)[1].strip().lower()
+                spec = get_event_model(_name)
                 tf = t_ms[m0]; yf = y_avg[m0]
-                p0 = spec['p0_func'](yf, tf)
+                # Build overlay params to reflect the model actually used:
+                popt = None
+                if _name in {'double_exp','cooperative','bilinear'}:
+                    # Use the kinetics selected for this run (tau_r, tau_d0)
+                    if _name == 'double_exp':
+                        # [amp, tau_rise(s), tau_decay(s), t_peak(ms)]
+                        pars = [1.0, float(tau_r), float(tau_d0), 0.0]
+                    elif _name == 'cooperative':
+                        n_used = float(cfg.get('event_model_settings', {}).get('n_coop', cfg.get('coop_n', 2.0)))
+                        # [amp, tau_rise(s), tau_decay(s), n_coop, t_peak(ms)]
+                        pars = [1.0, float(tau_r), float(tau_d0), n_used, 0.0]
+                    else:  # bilinear expects ms values for rise/decay durations
+                        pars = [1.0, float(tau_r)*1000.0, float(tau_d0)*1000.0, 0.0]
+                    yshape = spec['func'](tf, *pars)
+                    denom = float(np.sum(yshape**2)) if np.isfinite(yshape).any() else 0.0
+                    amp_ls = float(np.sum(yf*yshape))/denom if denom > 0 else 1.0
+                    pars[0] = amp_ls
+                    popt = pars
+                    yhat_ev = spec['func'](tf, *popt)
+                else:
+                    # For fixed-template models, do a local fit for display
+                    p0 = spec['p0_func'](yf, tf)
+                    try:
+                        from scipy.optimize import curve_fit as _cf
+                        popt, _ = _cf(spec['func'], tf, yf, p0=p0, bounds=spec['bounds'], maxfev=3000)
+                    except Exception:
+                        popt = p0
+                    yhat_ev = spec['func'](tf, *popt)
+                axL.plot(tf, yhat_ev, color='crimson', ls='--', lw=1.8, label=_name)
                 try:
-                    from scipy.optimize import curve_fit as _cf
-                    popt, _ = _cf(spec['func'], tf, yf, p0=p0, bounds=spec['bounds'], maxfev=3000)
-                except Exception:
-                    popt = p0
-                yhat_ev = spec['func'](tf, *popt)
-                axL.plot(tf, yhat_ev, color='crimson', ls='--', lw=1.8, label=event_model)
-                try:
-                    txt = ", ".join(f"{n}={v:.3g}" for n, v in zip(spec['params'], popt))
-                    axL.text(0.02, 0.02, txt, transform=axL.transAxes, fontsize=7,
-                             va='bottom', ha='left', bbox=dict(boxstyle='round', facecolor='white', alpha=0.7))
+                    # Omit 't_peak' and stack vertically; include amp at top for context
+                    pairs = [(n, v) for n, v in zip(spec['params'], popt)]
+                    pairs = [(n, v) for n, v in pairs if n != 't_peak']
+                    txt = "\n".join(f"{n}={v:.3g}" for n, v in pairs)
+                    axL.text(0.98, 0.98, txt, transform=axL.transAxes, fontsize=8,
+                             va='top', ha='right', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
                 except Exception:
                     pass
             except Exception:
                 pass
             axL.axvline(0.0, color='k', ls=':', alpha=0.5, lw=0.8)
             axL.set_xlim(min_x, max_x)
-            axL.set_xlabel('Time (ms)')
-            axL.set_ylabel('ΔF/F0' if USE_DF_OVER_F0 else 'ΔF')
-            axL.set_title('Event fit (0–30 ms)', fontsize=10)
+            # Autoscale y with a small margin to avoid a squashed panel
             try:
-                axL.set_aspect('equal', adjustable='box')
+                y_slice = y_avg[m0]
+                ymins = np.nanmin(y_slice) if np.size(y_slice) else 0.0
+                ymaxs = np.nanmax(y_slice) if np.size(y_slice) else 1.0
+                if 'yhat_ev' in locals():
+                    ymins = min(ymins, float(np.nanmin(yhat_ev)))
+                    ymaxs = max(ymaxs, float(np.nanmax(yhat_ev)))
+                span = max(1e-6, ymaxs - ymins)
+                pad = 0.1 * span
+                axL.set_ylim(ymins - pad, ymaxs + pad)
             except Exception:
                 pass
+            axL.set_xlabel('Time (ms)')
+            axL.set_ylabel('ΔF/F0' if use_dff else 'ΔF')
+            axL.set_title('Event fit (−3..30 ms)', fontsize=10)
         except Exception:
             pass
 
@@ -1109,6 +1284,7 @@ def extract_metrics(
         'tau_r_s': float(tau_r),
         'tau_d_s': np.asarray(tau_d_vec, float),
         'stim_times_s': np.asarray(stim_times, float),
+        'model': {'event_model': ev_model_name, 'n_coop': (float(n_coop_effective) if n_coop_effective is not None else None)},
         'average': {
             'amp_raw': np.asarray(amp_raw_avg, float),
             'amp_savgol': np.asarray(amp_sg_avg, float),
@@ -1175,7 +1351,11 @@ def export_folders_to_excel(paths,
                     t_raw = pd.to_numeric(df.iloc[:, -1], errors='coerce').to_numpy(float)
                     X = df.iloc[:, :-1].apply(pd.to_numeric, errors='coerce').to_numpy(float)
                     ok = np.isfinite(t_raw)
-                    t = t_raw[ok]; trials = X[ok, :]
+                    t = t_raw[ok] ; trials = X[ok, :]
+                    
+                    # add time offset of 2ms
+                    t += 0.002
+
                     res = extract_metrics(t, trials, train_start=train_start, isi=isi, n_pulses=n_pulses, options=cfg)
 
                     # Choose amplitude series per measurement

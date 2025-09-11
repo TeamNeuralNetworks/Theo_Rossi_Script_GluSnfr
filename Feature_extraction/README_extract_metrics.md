@@ -7,15 +7,21 @@ The function keeps the math equivalent to the main pipeline while exposing a sma
 - Import path: `from extract_metrics import extract_metrics`
 - Plot controls: `options['plot'] = {'enabled': True, 'traces': ['raw','savgol','nnls'], 'show_decay': True, 'trials': False, 'baseline': False}`
 - Always enforces non‑decreasing τd across pulses for stability.
-- New controls:
+- Core controls:
   - `measurement`: `'NNLS'|'SAVGOL'|'RAW'` (default `'NNLS'`) — p‑values use this amplitude series
   - `fail_method`: `'NNLS'|'SAVGOL'|'RAW'` (default: same as `measurement`) — controls null/threshold rule
-  - `threshold_mode`: `'auto'|'mad'|'sd'` (default `'auto'`) — auto picks MAD for `NNLS`, SD for `SAVGOL`/`RAW`
+  - `threshold_mode`: `'auto'|'mad'|'sd'` (default `'auto'`)
   - `allow_shift`: bool (default True) — enable per‑pulse micro‑shifts
-- Threshold for A1 is reused for pulses 2–3 (shared by design)
-  - `event_model`: `'double_exp'|'cooperative'` (default `'cooperative'`) — per‑pulse template for NNLS
-  - `coop_n`: float (default 2.0) — cooperative exponent when `event_model='cooperative'`
-- `auto_event_model`: bool (default True) — auto‑select event model (and `coop_n`) from the multi‑trial average via the library and plot the average+fit when plotting is enabled
+  - `event_model`: kernel used for fitting. Default `'double_exp'` (one rise τ and one decay τ). If you pass a value here it is respected; there is no auto‑replacement.
+    - Extras for `'cooperative'`: `event_model_settings={'n_coop': 2.0}`
+  - `fit_source`: `'global'|'average'|'individual'` (default `'global'`)
+    - `global`: fit a single template from all trials (recut median) then apply progression
+    - `average`: fit kinetics on the average trace per event then smooth via progression
+    - `individual`: fit per trial then aggregate (median) and smooth
+  - `decay_progression_mode`: `'fixed'|'free_monotonic'|'linear'` (default `'linear'`)
+    - `fixed`: one τd for the whole train (median)
+    - `free_monotonic`: interpolate τd between first and last event (non‑decreasing)
+    - `linear`: non‑negative‑slope linear trend across pulses
 
 Related demo scripts in this folder (with concrete paths): `demo_single_file.py`, `demo_single_folder.py`, `demo_batch_process.py`.
 
@@ -51,6 +57,8 @@ res = extract_metrics(
         'threshold_mode': 'auto',     # or 'mad', 'sd'
         'allow_shift': True,
         'share_thr_1to3': True,
+        'fit_source': 'global',
+        'decay_progression_mode': 'linear',
         'plot': {
             'enabled': True,
             'traces': ['raw','savgol','nnls'],  # show all average overlays
@@ -115,6 +123,7 @@ for xlsx_path in glob.glob(os.path.join(in_dir, "*.xlsx")):
         time, trials,
         train_start=0.5, isi=0.05, n_pulses=10,
         options={'normalize_dff': True, 'bleach': True,
+                 'fit_source': 'global', 'decay_progression_mode': 'linear',
                  'plot': {'enabled': True, 'traces': ['raw','savgol','nnls'], 'show_decay': True, 'trials': False}}
     )
 

@@ -257,9 +257,9 @@ def preprocess_data(RESULTS):
 
 def fit_models_to_average(time_analysis, y_avg, avg_noise, which_models=("cooperative",)):
     """Fit both models to the average trace"""
-    
-    # Set up fitting region (0 to 30 ms)
-    fit_mask = (time_analysis >= 0) & (time_analysis <= 30)
+
+    # Set up fitting region (0 to 50 ms)
+    fit_mask = (time_analysis >= 0) & (time_analysis <= 50)
     t_fit = time_analysis[fit_mask]
     y_fit_data = y_avg[fit_mask]
     

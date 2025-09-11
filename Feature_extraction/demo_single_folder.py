@@ -36,22 +36,18 @@ for xlsx_path in glob.glob(os.path.join(in_dir, "*.xlsx")):
 
     res = extract_metrics(
         time, trials,
-        train_start=0.5, isi=0.05, n_pulses=10,
+        train_start=0.499, isi=0.05, n_pulses=10,
         options={
             'normalize_dff': True,
             'bleach': True,
-            'auto_event_model': True,             # don’t auto-override user choice
-            'event_model': 'library:cooperative',# pick exact library model
-            # optional: lock shape per pulse so only amplitude + auto offset are adjusted
-            # 'per_pulse_mode': 'amplitude_only',
-            # optional: override shape params (keys must match the model spec)
-            # 'event_model_settings': {
-            #     'tau_rise_fast': 0.003, 'tau_decay_fast': 0.015, 'n_fast': 2.0,
-            #     'tau_rise_slow': 0.010, 'tau_decay_slow': 0.080, 'n_slow': 1.5
-            # },
+            # Kinetics source and progression
+            'fit_source': 'global',
+            'decay_progression_mode': 'linear',
+            'model': 'double_exp',
+
             'plot': {
                 'enabled': True,
-                'traces': ['raw','savgol','nnls'],
+                'traces': ['raw','nnls'],
                 'show_decay': True,
                 'trials': False
             }
@@ -73,3 +69,26 @@ for xlsx_path in glob.glob(os.path.join(in_dir, "*.xlsx")):
     rows.append(row)
 
 pd.DataFrame(rows).to_csv(os.path.join(out_dir, "summary.csv"), index=False)
+
+
+# Decay progression across train (doc snippet retained for reference)
+#  - 'fixed': single τd across pulses
+#  - 'free_monotonic': interpolate between first and last τd (non-decreasing)
+#  - 'linear': non-negative-slope linear regression across pulses
+
+"""
+Available models:
+- 'double_exp' (default): classic double exponential (constrained)
+- 'cooperative': cooperative binding (Hill-like rise, exp decay)
+- 'single_exp': single exponential decay (constrained)
+- 'alpha': alpha function (constrained)
+- 'gamma': gamma function (constrained)
+- 'bilinear': bilinear rise + exp decay (constrained)
+- 'binding_kinetics': binding kinetics model with on/off rates + clearance (constrained)
+- 'two_component': two-component model with shared rise time (constrained)
+- 'desensitization': model with desensitization term (constrained)
+- 'coop_plus_linear': cooperative binding + linear component (constrained)
+- 'diffusion_clearance': diffusion rise + bi-exponential clearance (constrained)
+- 'double_cooperative': sum of two cooperative binding components (constrained)
+- 'hetero_coop': heterogeneous cooperative binding (constrained)
+"""

@@ -24,6 +24,8 @@ res = extract_metrics(
     options={
         'normalize_dff': True,
         'bleach': True,
+        'fit_source': 'global',
+        'decay_progression_mode': 'linear',
         'plot': {
             'enabled': True,
             'traces': ['raw','savgol','nnls'],  # show all average overlays
