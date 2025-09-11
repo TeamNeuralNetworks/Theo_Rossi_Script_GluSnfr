@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Simplified comparison of Double Exponential vs Cooperative Binding models
-using the same data loading and preprocessing as the original notebook.
+Comparison of event models (Double‑Exponential vs Cooperative Binding)
+with reusable model specs and a CLI flag to choose the underlying model.
 
-Focuses only on these two models of interest with essential statistics.
+Default event model: both (cooperative and double_exp).
 """
 
 import sys
@@ -247,65 +247,15 @@ def preprocess_data(RESULTS):
 
 
 # =============================================================================
-# MODEL DEFINITIONS (only the two models of interest)
+# MODEL SELECTION (externalized in event_models.py)
 # =============================================================================
-
-def model_double_exp_constrained(t, amp, tau_rise, tau_decay, t_peak):
-    """Classic double exponential: (exp(-t/tau_decay) - exp(-t/tau_rise))"""
-    t = np.asarray(t)
-    result = np.zeros_like(t, dtype=float)
-    
-    mask = t >= t_peak
-    if np.any(mask):
-        t_shifted = (t[mask] - t_peak) / 1000
-        
-        tau_rise = max(tau_rise, 1e-6)
-        tau_decay = max(tau_decay, 1e-6)
-        
-        if tau_decay > tau_rise:
-            t_opt = tau_rise * tau_decay / (tau_decay - tau_rise) * np.log(tau_decay / tau_rise)
-            norm_factor = np.exp(-t_opt / tau_decay) - np.exp(-t_opt / tau_rise)
-            
-            rise_term = np.exp(-t_shifted / tau_rise)
-            decay_term = np.exp(-t_shifted / tau_decay)
-            
-            if norm_factor > 1e-10:
-                result[mask] = amp * (decay_term - rise_term) / norm_factor
-            else:
-                result[mask] = amp * (decay_term - rise_term)
-    return result
-
-
-def model_cooperative_binding(t, amp, tau_rise, tau_decay, n_coop, t_peak):
-    """Cooperative binding: Hill-like rise + exponential decay"""
-    t = np.asarray(t)
-    result = np.zeros_like(t, dtype=float)
-    
-    mask = t >= t_peak
-    if np.any(mask):
-        t_shifted = (t[mask] - t_peak) / 1000
-        
-        # Cooperative rise phase
-        tau_rise_safe = max(tau_rise, 1e-6)
-        n_safe = max(n_coop, 0.5)
-        
-        # Hill-like binding kinetics
-        normalized_t = t_shifted / tau_rise_safe
-        rise_factor = (normalized_t ** n_safe) / (1 + normalized_t ** n_safe)
-        
-        # Exponential decay from bound state
-        decay_factor = np.exp(-t_shifted / max(tau_decay, 1e-6))
-        
-        result[mask] = amp * rise_factor * decay_factor
-    
-    return result
 
 
 # =============================================================================
 # FITTING AND ANALYSIS
 # =============================================================================
 
-def fit_models_to_average(time_analysis, y_avg, avg_noise):
+def fit_models_to_average(time_analysis, y_avg, avg_noise, which_models=("cooperative",)):
     """Fit both models to the average trace"""
     
     # Set up fitting region (0 to 30 ms)
@@ -314,20 +264,11 @@ def fit_models_to_average(time_analysis, y_avg, avg_noise):
     y_fit_data = y_avg[fit_mask]
     
     # Model specifications
-    models_to_test = {
-        'double_exp': {
-            'func': model_double_exp_constrained,
-            'params': ['amp', 'tau_rise', 'tau_decay', 't_peak'],
-            'bounds': ([0, 0.0005, 0.001, 0], [np.inf, 0.010, 0.200, 10]),
-            'p0_func': lambda y, t: [np.max(y), 0.002, 0.020, t[np.argmax(y)]]
-        },
-        'cooperative': {
-            'func': model_cooperative_binding,
-            'params': ['amp', 'tau_rise', 'tau_decay', 'n_coop', 't_peak'],
-            'bounds': ([0, 0.001, 0.005, 0.5, 0], [np.inf, 0.020, 0.200, 5.0, 10]),
-            'p0_func': lambda y, t: [np.max(y), 0.005, 0.030, 2.0, t[np.argmax(y)]]
-        }
-    }
+    try:
+        from Model_Calibration.event_models import get_models
+    except Exception:
+        from event_models import get_models  # fallback when running from this folder
+    models_to_test = get_models(list(which_models))
     
     print("\n=== AVERAGE TRACE FITTING ===")
     print(f"Fitting on {len(t_fit)} points from {t_fit[0]:.1f} to {t_fit[-1]:.1f} ms")
@@ -627,8 +568,14 @@ def main():
     print("Double Exponential vs Cooperative Binding")
     
     try:
-        # Resolve optional CLI directory argument
-        cli_dir = sys.argv[1] if len(sys.argv) > 1 else None
+        # CLI: optional directory arg + event model choice
+        import argparse as _argparse
+        ap = _argparse.ArgumentParser(description="Event model fitting demo")
+        ap.add_argument('input', nargs='?', default=None, help='Optional input directory')
+        ap.add_argument('--event-model', default='both', choices=['cooperative','double_exp','both'], help='Underlying event model')
+        # Be tolerant of Jupyter/IPython extra args like --f=...
+        args, _unknown = ap.parse_known_args(sys.argv[1:])
+        cli_dir = args.input
         input_dir = _resolve_input_dir(cli_dir)
 
         # Load data
@@ -637,8 +584,16 @@ def main():
         # Preprocess data
         time_analysis, traces_array, y_avg, avg_noise = preprocess_data(RESULTS)
 
-        # Fit models to average trace
-        fit_results, models_to_test, fit_mask = fit_models_to_average(time_analysis, y_avg, avg_noise)
+        # Select model(s)
+        if args.event_model == 'both':
+            which = ('double_exp','cooperative')
+        elif args.event_model == 'double_exp':
+            which = ('double_exp',)
+        else:
+            which = ('cooperative',)
+
+        # Fit selected model(s) to average trace
+        fit_results, models_to_test, fit_mask = fit_models_to_average(time_analysis, y_avg, avg_noise, which_models=which)
 
         # Fit models to individual traces
         individual_results = fit_individual_traces(time_analysis, traces_array, models_to_test, fit_mask)
