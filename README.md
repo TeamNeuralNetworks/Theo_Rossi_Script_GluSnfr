@@ -1,44 +1,67 @@
-Ce dossier contient tout les scripts que Théo Rossi a utilisé pour ses travaux et la rédaction de son papier (Rossi et al 2025).
+# iGluSnFR Analysis: Extraction, Batch Processing, and Model Calibration
 
-Organisation :
-	-'Other_scripts' contient tout les autres scritps de Théo que je (Anthime Perrot) n'ai pas eu à utiliser pour poursuivre son travail*.
-	-'Dummy_Data' est un jeu de donné complet de Théo, des données brutes à celles analysées. A titre d'exemple pour l'organisation de ses données et l'utilisation de ses scripts. Toutes les données sont disponibles sur notre NAS.
-	-'PCA_Notebooks_Data' est un dossier avec les différentes étapes (en jupiter notebook) pour la construction des différents clusters.
-	- Les scripts présents dans le dossier initial sont ceux que j'ai utilisé pour poursuivre son travail (hors extraction des données*).
+This repository provides a practical toolkit to analyze iGluSnFR stimulation trains from Excel workbooks, extract robust per‑pulse metrics, batch export results, and compare simple kinetic models on averaged responses.
 
-Ordre d'utilisation :
-	- Extraction des traces et du F_background avec le script 'Extractor.py'. [File_traces.xlsx].
-	- Normalisation DF/F et création d'un excel avec le script 'Converter.py'. [File_traces_converted.xlsx].
-	- Extraction des amplitudes moyennes des 10 évènements avec le script 'SynaptiPy.py'. [File_traces_converted_Amp.xlsx].
-	- Bootstrap pour détection du Failure rate avec le script 'Bootstrap_failures.py'. [File_traces_converted_data_boostrap.xlsx] et [File_traces_converted_histograms_bootstrap.xlsx].
-	- PCA avec le script 'PCA_Clustering_Ca_Target_Gender.py'. Le détail est dans le dossier PCA_Notebooks_Data.
+It combines three complementary pieces:
 
+- Feature extraction API with demos: `Feature_extraction/extract_metrics.py` and `Feature_extraction/demo_*.py`
+- Batch processing pipeline and CLI: `batch_measure_complex.py` with `USAGE_GUIDE.md`
+- Model calibration demos: `Model_Calibration/demo_adjust_fit_events.py` and `Model_Calibration/Demo_two_good_model_fitting.py`
 
-Le script 'Bootstrap_failures' a été légèrement corrigé par moi pour faciliter l'ouverture des excels, et un correction permettant au bouton 'Subtraction' d'être fonctionnel. Le script original est disponible en V1, le premier push est ma version corrigée.
+See `PROCESSING_README.md` for end‑to‑end recipes using existing demo scripts and copied code snippets.
 
-* L'extraction de mes données a été effectué via le script Matlab 'ScanImage_Linscan_Analysis.m' d'Antoine Valera, et présent dans mon repository 'GUI_GluSnFR_Anthime'. Le script est différent car adaptés aux spécificités du logiciel scanimage que j'ai pu utiliser (sciscan pour Théo).
+## Repository Layout
 
+- Feature extraction:
+  - `Feature_extraction/extract_metrics.py`: small, explicit interface to compute amplitudes (NNLS and alternatives), PPR, and plots.
+  - Demos: `Feature_extraction/demo_single_file.py`, `Feature_extraction/demo_single_folder.py`, `Feature_extraction/demo_batch_process.py`.
+  - Extra doc: `Feature_extraction/README_extract_metrics.md`.
+- Batch analysis:
+  - `batch_measure_complex.py`: consolidated settings and CLI for folder and multi‑folder export; supports plotting and Excel output.
+  - Docs: `USAGE_GUIDE.md` (commands), `README_batch.md` (overview).
+- Model calibration:
+  - `Model_Calibration/demo_adjust_fit_events.py`: build median event waveforms across files.
+  - `Model_Calibration/Demo_two_good_model_fitting.py`: compare Double‑Exponential vs Cooperative Binding on average and individual traces.
+  - Notebook: `Model_Calibration/Demo_Different_model_fitting.ipynb` (edit code/markdown only — ignore outputs).
+- Utilities: `smoothing.py` and helpers for detrending, kernels, NNLS, and plotting.
 
-=========Readme initial de Théo Rossi===========
+## Quick Start
 
-######## iGluSnFR.S72A/Data extraction and conversion #############
+Start with the simplified extractor API (copy paths accordingly):
 
-- "Boutons_raw_data": contains raw data. "GroupLinescan" folders are set for each parallel fiber and contain corresponding raw files.
-	REQUIREMENT: 
-		1. THESE FOLDERS ARE USED IN THE SCRIPT "Extractor.py" TO EXTRACT FLUORESCENCE TRACES AND FBACK.
-		2. THE "traces.xlsx" FILE CREATED IS USED IN THE SCRIPT "Converter.py" FOR DF/F CONVERSION.
+```
+python Feature_extraction/demo_single_file.py
+```
 
-- "Boutons_analysis": contains extracted and converted data:
-	- Date: animal
-	- linescan#: parallel fiber ID
-	- 20Hz: frequency
-	- 10pulses: electrical stimulation train.
-	- 2.5mMCa: [Ca2+]
-	- bouton#: bouton ID
-	- bootstrap: failures and success determined by bootstrap
+Batch across folders and export Excel/plots:
 
+```
+python batch_measure_complex.py --no-show --save-plots
+```
 
-Python scripts:
-	- "Extractor.py"
-	- "Converter.py"
-	- "Bootstrap_failure_percentage.py"
+Compare models on averaged responses (directory can be passed positionally):
+
+```
+python Model_Calibration/Demo_two_good_model_fitting.py "C:\path\to\folder"
+```
+
+More end‑to‑end examples are in `PROCESSING_README.md`.
+
+## Input Format (Excel)
+
+- First worksheet (index 0)
+- Last column: time (seconds)
+- All preceding columns: trials (non‑numeric → NaN)
+
+## Documentation
+
+- Processing guide with full recipes: `PROCESSING_README.md`
+- Batch pipeline overview: `README_batch.md`
+- Command variants and flags: `USAGE_GUIDE.md`
+- Extractor API guide and snippets: `Feature_extraction/README_extract_metrics.md`
+- Agent guidelines: `AGENTS.md`
+
+## Notes
+
+- Jupyter notebooks: when editing, ignore output cells; focus on code and markdown cells only.
+- No external dependencies should be added beyond what is already used in the repo.
