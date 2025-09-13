@@ -42,7 +42,7 @@ for xlsx_path in glob.glob(os.path.join(in_dir, "*.xlsx")):
             'bleach': True,
             # Kinetics source and progression
             'fit_source': 'global',
-            'decay_progression_mode': 'linear',
+            'decay_progression_mode': 'free_monotonic',
             'model': 'double_exp',
 
             'plot': {

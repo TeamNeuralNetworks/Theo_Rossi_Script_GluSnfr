@@ -171,7 +171,27 @@ def _fit_single_pulse_amp(
     local_mask = (t >= (stim_time - pre_zoom_s)) & (t <= (stim_time + post_zoom_s))
     if not np.any(local_mask):
         return 0.0, shift_min_s
+    t_seg = t[local_mask]
     y_seg = y[local_mask]
+    # Build a small baseline subspace (intercept [+ optional slope]) and
+    # orthogonalize both y and the kernel against it to avoid overshoot/undershoot
+    # from lingering decays of previous pulses. This co-fits baseline implicitly
+    # while keeping the event amplitude non-negative.
+    t_rel = t_seg - float(stim_time)
+    pre_mask_loc = t_seg < float(stim_time)
+    use_slope = np.count_nonzero(pre_mask_loc) >= 3
+    if use_slope:
+        B = np.column_stack([np.ones_like(t_rel), t_rel])
+    else:
+        B = np.ones((t_rel.size, 1))
+    # QR for stable projection onto baseline subspace
+    try:
+        Qb, _ = np.linalg.qr(B, mode='reduced')
+        # Project y onto orthogonal complement of baseline space
+        y_perp = y_seg - Qb @ (Qb.T @ y_seg)
+    except Exception:
+        Qb = None
+        y_perp = y_seg
     best_a, best_d = 0.0, shift_min_s
     shifts = (np.arange(shift_min_s, delta_max_s + 1e-12, delta_step_s)
               if allow_shift else np.array([shift_min_s]))
@@ -180,7 +200,15 @@ def _fit_single_pulse_amp(
         k_loc = k_full[local_mask]
         if k_loc.size < 3 or np.all(k_loc == 0):
             continue
-        a_loc = _nnls_irls_singlecol(y_seg, k_loc, robust=robust, huber_delta=huber_delta, iters=irls_iters)
+        # Orthogonalize kernel against baseline subspace too
+        if Qb is not None:
+            k_perp = k_loc - Qb @ (Qb.T @ k_loc)
+        else:
+            k_perp = k_loc
+        # Safeguard degenerate shapes
+        if np.allclose(k_perp, 0) or (np.linalg.norm(k_perp) < 1e-12):
+            continue
+        a_loc = _nnls_irls_singlecol(y_perp, k_perp, robust=robust, huber_delta=huber_delta, iters=irls_iters)
         if a_loc > best_a:
             best_a, best_d = a_loc, d
     return float(best_a), float(best_d)
@@ -641,6 +669,7 @@ def extract_metrics(
             raise ValueError(f"Unknown library model '{name}': {e}")
         def _kernel_from_params(params_fixed: Dict[str, float]):
             # returns kernel(dt_s, tau_r, tau_d) ignoring tau_r/tau_d (fixed template)
+            # Amplitude is peak-scaled as defined by the model spec (no area normalization).
             def kfun(dt_s: np.ndarray, tau_r: float, tau_d: float) -> np.ndarray:
                 dt_s = np.asarray(dt_s, float)
                 dt_ms = dt_s * 1000.0
@@ -653,22 +682,16 @@ def extract_metrics(
                     else:
                         pars.append(params_fixed[p])
                 y = spec['func'](dt_ms, *pars)
-                tp = np.maximum(dt_s, 0.0)
-                support = tp <= 0.2
-                area = np.trapz(y[support], dt_s[support]) if np.any(support) else 1.0
-                return y / max(area, 1e-12)
+                return y
             return kfun
         def _kernel_tau_varying(mapper):
-            # mapper builds full param vector from tau_r,tau_d
+            # mapper builds full param vector from tau_r,tau_d; no extra normalization
             def kfun(dt_s: np.ndarray, tau_r: float, tau_d: float) -> np.ndarray:
                 dt_s = np.asarray(dt_s, float)
                 dt_ms = dt_s * 1000.0
                 pars = mapper(float(tau_r), float(tau_d))
                 y = spec['func'](dt_ms, *pars)
-                tp = np.maximum(dt_s, 0.0)
-                support = tp <= 0.2
-                area = np.trapz(y[support], dt_s[support]) if np.any(support) else 1.0
-                return y / max(area, 1e-12)
+                return y
             return kfun
         return spec, _kernel_from_params, _kernel_tau_varying
 
@@ -800,9 +823,46 @@ def extract_metrics(
         except Exception:
             return None, None
 
+    def _curvefit_on_average_event(model_name: str, t_s: np.ndarray, y_avg_vec: np.ndarray):
+        """Direct curve_fit on the average event window (0..50 ms) like the demo.
+
+        Returns dict of fitted params keyed by spec['params'] or None on failure.
+        """
+        try:
+            try:
+                from Model_Calibration.event_models import get_event_model
+            except Exception:
+                from event_models import get_event_model  # type: ignore
+            spec = get_event_model(model_name)
+            t_ms = (np.asarray(t_s, float) - float(train_start)) * 1000.0
+            m = (t_ms >= 0.0) & (t_ms <= 50.0)
+            if not np.any(m):
+                return None
+            tf = t_ms[m]; yf = np.asarray(y_avg_vec, float)[m]
+            p0 = spec['p0_func'](yf, tf)
+            from scipy.optimize import curve_fit as _cf
+            popt, _ = _cf(spec['func'], tf, yf, p0=p0, bounds=spec['bounds'], maxfev=3000)
+            return {name: float(val) for name, val in zip(spec['params'], popt)}
+        except Exception:
+            return None
+
     # Choose kinetics according to fit_source
     fit_source = str(cfg.get('fit_source', 'global')).lower()
-    dec_mode = str(cfg.get('decay_progression_mode', 'linear')).lower()
+    # Normalize decay mode and accept a few synonyms/typos
+    raw_mode = str(cfg.get('decay_progression_mode', 'linear')).strip().lower()
+    _mode_map = {
+        'linear_anchored': 'linear',
+        'monotonic': 'free_monotonic',
+        'free': 'free_monotonic',
+        'freed_monotonic': 'free_monotonic',
+    }
+    dec_mode = _mode_map.get(raw_mode, raw_mode)
+    if dec_mode not in {'fixed', 'free_monotonic', 'linear'}:
+        try:
+            progress_print(f"[warn] Unknown decay_progression_mode='{raw_mode}', falling back to 'linear'. Allowed: fixed|free_monotonic|linear")
+        except Exception:
+            pass
+        dec_mode = 'linear'
 
     def _estimate_last_tau(tau_r_local, tau_d0_local):
         try:
@@ -811,7 +871,7 @@ def extract_metrics(
             tf = t[zmask_last]; yf = y_avg[zmask_last]
             tau_d_grid_ms = np.array(cfg['kin_taud0_grid_ms'], float)
             tau_d_grid = tau_d_grid_ms / 1000.0
-            best = (np.inf, tau_d0_local)
+            best = (np.inf, tau_d0_local, 1.0)
             for td in tau_d_grid:
                 k = _KERNEL_FUN(tf - last_st, tau_r_local, td)
                 denom = float(np.sum(k**2))
@@ -819,16 +879,16 @@ def extract_metrics(
                 fit = amp * k
                 err = float(np.nanmean((yf - fit) ** 2))
                 if err < best[0]:
-                    best = (err, td)
-            tau_last = float(best[1])
+                    best = (err, td, amp)
+            tau_last = float(best[1]); amp_last = float(best[2])
             try:
                 if tau_last >= (float(np.max(tau_d_grid)) - 1e-9):
                     progress_print(f"[decay] τd_last hit upper grid bound ({np.max(tau_d_grid_ms):.1f} ms). Consider extending 'kin_taud0_grid_ms'.")
             except Exception:
                 pass
-            return tau_last
+            return tau_last, amp_last
         except Exception:
-            return float(tau_d0_local)
+            return float(tau_d0_local), 1.0
 
     def _apply_progression(tau_r_in, tau_d_vec_in, tau_d0_in):
         # Apply dec_mode smoothing/progression rules to tau_d_vec
@@ -856,18 +916,36 @@ def extract_metrics(
             yfit = np.linspace(float(y[0]), float(y[-1]), n_pulses)
             return tau_r_in, np.maximum.accumulate(yfit)
 
+    # Variables for optional display overlays and logging
+    tau_last_display = None
+    amp_last_display = None
+
     if fit_source == 'global':
-        tr_b, td0_b = _estimate_from_recut_median()
-        if tr_b is None:
-            # fallback to average-trace fit
-            tr_b, td0_b, slope, tau_d_vec0 = estimate_kinetics_from_average(
-                t, y_avg, stim_times,
-                taur_grid_ms=cfg['kin_taur_grid_ms'], taud0_grid_ms=cfg['kin_taud0_grid_ms'],
-                slope_grid_ms=cfg['kin_slope_grid_ms'], pre_zoom_s=cfg['pre_zoom_s'], post_zoom_s=cfg['post_zoom_s']
-            )
-        tau_r = float(tr_b); tau_d0 = float(td0_b)
+        # Match the demo: fit kinetics on the average event via curve_fit
+        fitted = _curvefit_on_average_event(event_model, t, y_avg)
+        if fitted is None:
+            # Fallback to recut median or average grid search
+            tr_b, td0_b = _estimate_from_recut_median()
+            if tr_b is None:
+                tr_b, td0_b, slope, tau_d_vec0 = estimate_kinetics_from_average(
+                    t, y_avg, stim_times,
+                    taur_grid_ms=cfg['kin_taur_grid_ms'], taud0_grid_ms=cfg['kin_taud0_grid_ms'],
+                    slope_grid_ms=cfg['kin_slope_grid_ms'], pre_zoom_s=cfg['pre_zoom_s'], post_zoom_s=cfg['post_zoom_s']
+                )
+            tau_r = float(tr_b); tau_d0 = float(td0_b)
+        else:
+            tau_r = float(fitted.get('tau_rise', np.nan))
+            tau_d0 = float(fitted.get('tau_decay', np.nan))
+            # If cooperative, adopt fitted n_coop for the kernel and re-apply
+            if event_model == 'cooperative' and ('n_coop' in fitted):
+                cfg.setdefault('event_model_settings', {})
+                cfg['event_model_settings']['n_coop'] = float(fitted['n_coop'])
+                ev_model_name, n_coop_effective = _apply_event_model_from_cfg()
+                is_varying_model = ev_model_name in varying_supported_names
+            progress_print(f"[fit][global] curve_fit τr={tau_r*1000:.2f}ms τd={tau_d0*1000:.2f}ms model={event_model}")
         if dec_mode in ('linear','free_monotonic'):
-            tau_last = _estimate_last_tau(tau_r, tau_d0)
+            tau_last, amp_last = _estimate_last_tau(tau_r, tau_d0)
+            tau_last_display, amp_last_display = float(tau_last), float(amp_last)
             tau_d_vec0 = np.linspace(float(tau_d0), float(tau_last), n_pulses)
         else:
             tau_d_vec0 = np.full(n_pulses, float(tau_d0))
@@ -903,9 +981,22 @@ def extract_metrics(
             taur_grid_ms=cfg['kin_taur_grid_ms'], taud0_grid_ms=cfg['kin_taud0_grid_ms'],
             slope_grid_ms=cfg['kin_slope_grid_ms'], pre_zoom_s=cfg['pre_zoom_s'], post_zoom_s=cfg['post_zoom_s']
         )
+        # For linear/monotonic, also anchor to the last event using the average trace
+        if dec_mode in ('linear','free_monotonic'):
+            tau_last, amp_last = _estimate_last_tau(tau_r, tau_d_vec0[0])
+            tau_last_display, amp_last_display = float(tau_last), float(amp_last)
+            tau_d_vec0 = np.linspace(float(tau_d_vec0[0]), float(tau_last), n_pulses)
         tau_r, tau_d_vec = _apply_progression(tau_r, tau_d_vec0, tau_d_vec0[0])
         if is_varying_model:
             progress_print(f"[fit] source=average | τd0={tau_d_vec[0]*1000:.2f}ms → τdN={tau_d_vec[-1]*1000:.2f}ms | mode={dec_mode}")
+
+    # Print the τd vector to be used for constrained refitting
+    try:
+        td_ms_list = ", ".join(f"{v*1000:.2f}" for v in np.asarray(tau_d_vec).tolist())
+        progress_print(f"[constrain] τd vector (ms) prior to NNLS refit: [{td_ms_list}]")
+        progress_print("[constrain] Refitting average and trials with τd fixed per pulse to this vector (amp+jitter only).")
+    except Exception:
+        pass
 
     # Fit average trace (backward, no overlap) and measure amplitudes
     a_avg, d_avg, X_avg, yhat_avg = fit_amplitudes_no_overlap_backward(
@@ -1270,6 +1361,14 @@ def extract_metrics(
                 amp_prev = float(a_avg[p - 1])
                 k_prev = _KERNEL_FUN(tz - (st_prev + sh_prev), tau_r, td_prev)
                 ax.plot(tz, amp_prev * k_prev, color='tab:orange', linestyle='--', linewidth=1.0, alpha=0.85)
+        # If anchored (linear/monotonic), show the last-event pre-refit fit as an additional red overlay
+        try:
+            if dec_mode in ('linear','free_monotonic') and (tau_last_display is not None) and (amp_last_display is not None):
+                last_st = float(stim_times[-1])
+                k_last = _KERNEL_FUN(tz - last_st, tau_r, float(tau_last_display))
+                ax.plot(tz, float(amp_last_display) * k_last, color='crimson', linestyle='--', linewidth=1.4, alpha=0.9, label='last fit (pre-refit)')
+        except Exception:
+            pass
         ax.set_xlim(z0, z1)
         ax.set_xlabel('Time (s)')
         ax.set_ylabel('ΔF/F0' if use_dff else 'ΔF')
