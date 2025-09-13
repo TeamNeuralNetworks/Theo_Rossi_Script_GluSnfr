@@ -572,6 +572,9 @@ def extract_metrics(
           - baseline: bool (default False) — for each trial, plot a two-panel
           figure with baseline fits + noise histogram and the train; forces
           trials=True when enabled
+          - residuals: bool (default False) — add residual diagnostics panels
+            comparing pre-train baseline noise vs. residuals after subtracting
+            the selected measurement model (NNLS or SavGol)
     """
     # Parse options (merge into a single config dict)
     opts = options.copy() if isinstance(options, dict) else {}
@@ -581,6 +584,7 @@ def extract_metrics(
     show_decay = bool(plot_opts.get('show_decay', True))
     plot_trials = bool(plot_opts.get('trials', False))
     baseline_figs = bool(plot_opts.get('baseline', False))
+    plot_residuals = bool(plot_opts.get('residuals', False))
     if baseline_figs:
         plot_trials = True  # baseline panel requires per-trial figures
     cfg = {**DEFAULTS, **{k: v for k, v in opts.items() if k != 'plot'}}
@@ -1282,11 +1286,61 @@ def extract_metrics(
                 pass
             figures_trials.append(fig_t)
 
+            # Optional residuals figure per trial
+            if plot_residuals:
+                try:
+                    # Select the model used for subtraction based on measurement
+                    model_t = (yj_sg if (meas == 'SAVGOL' and yj_sg is not None) else yhat_t)
+                    resid_t = yj - model_t
+                    fig_r, (ax_r1, ax_r2) = plt.subplots(1, 2, figsize=(11, 3.6))
+                    # Residual vs baseline traces
+                    base_mask = (t < float(train_start))
+                    tb = t[base_mask]
+                    if tb.size:
+                        ax_r1.plot(tb, yj[base_mask], color='0.5', lw=1.0, label='baseline (pre-train)')
+                    # Use the same zoom window for residual display
+                    ax_r1.plot(tz, resid_t[zmask_t], color='tab:purple', lw=1.2, label='residual (trial − model)')
+                    ax_r1.axvline(float(train_start), color='k', ls=':', lw=0.8, alpha=0.6)
+                    ax_r1.set_xlabel('Time (s)')
+                    ax_r1.set_ylabel('ΔF/F0' if use_dff else 'ΔF')
+                    ax_r1.set_title(f'Trial {j+1}: residual vs baseline')
+                    ax_r1.legend(loc='upper right', frameon=False, fontsize=8)
+                    # Distribution overlay
+                    base_vals_t = yj[base_mask]
+                    resid_vals_t = resid_t[zmask_t]
+                    vals_t = np.concatenate([
+                        base_vals_t[np.isfinite(base_vals_t)],
+                        resid_vals_t[np.isfinite(resid_vals_t)]
+                    ]) if (np.isfinite(base_vals_t).any() or np.isfinite(resid_vals_t).any()) else np.array([])
+                    if vals_t.size:
+                        lo_t, hi_t = np.nanpercentile(vals_t, [1, 99])
+                        bins_t = np.linspace(lo_t, hi_t, 30)
+                    else:
+                        bins_t = 30
+                    ax_r2.hist(base_vals_t, bins=bins_t, color='0.5', alpha=0.5, density=True, label='baseline')
+                    ax_r2.hist(resid_vals_t, bins=bins_t, color='tab:purple', alpha=0.5, density=True, label='residual')
+                    ax_r2.set_xlabel('Value')
+                    ax_r2.set_ylabel('Density')
+                    ax_r2.set_title(f'Trial {j+1}: distributions')
+                    ax_r2.legend(frameon=False, fontsize=8)
+                    try:
+                        plt.show(block=False); plt.pause(0.01)
+                    except Exception:
+                        pass
+                    figures_trials.append(fig_r)
+                except Exception:
+                    pass
+
     # Optional: average plot with a left event-fit panel (0–30 ms) + right main plot
     figure = None
     if want_plot:
-        figure = plt.figure(figsize=(12, 5))
-        gs = figure.add_gridspec(1, 2, width_ratios=[1.5, 4], wspace=0.15)
+        # If residual diagnostics requested, allocate an extra bottom row
+        if plot_residuals:
+            figure = plt.figure(figsize=(12, 8))
+            gs = figure.add_gridspec(2, 2, height_ratios=[2.0, 1.2], width_ratios=[1.5, 4], wspace=0.15, hspace=0.28)
+        else:
+            figure = plt.figure(figsize=(12, 5))
+            gs = figure.add_gridspec(1, 2, width_ratios=[1.5, 4], wspace=0.15)
         # Left: aggregated event + model fit (−3..next stim)
         axL = figure.add_subplot(gs[0, 0])
         try:
@@ -1418,6 +1472,49 @@ def extract_metrics(
             plt.show(block=False); plt.pause(0.05)
         except Exception:
             pass
+
+        # Residual diagnostics panel (average): overlay baseline and residual trace + distributions
+        if plot_residuals:
+            try:
+                # Choose model per requested measurement series
+                if meas == 'SAVGOL' and (y_sg_avg is not None):
+                    model_avg = y_sg_avg
+                else:
+                    model_avg = yhat_avg
+                resid_avg = (y_avg - model_avg)
+                # Left-bottom: baseline vs residual traces (residual shown in zoom window)
+                axR = figure.add_subplot(gs[1, 0])
+                # Baseline (pre-train)
+                mbase = (t < float(train_start))
+                if np.any(mbase):
+                    axR.plot(t[mbase], y_avg[mbase], color='0.5', lw=1.0, label='baseline (pre-train)')
+                # Residual in zoom window
+                axR.plot(tz, resid_avg[zmask], color='tab:purple', lw=1.2, label='residual (avg − model)')
+                axR.axvline(float(train_start), color='k', ls=':', lw=0.8, alpha=0.6)
+                axR.set_xlabel('Time (s)')
+                axR.set_ylabel('ΔF/F0' if use_dff else 'ΔF')
+                axR.set_title('Residual vs baseline (average)')
+                axR.legend(loc='upper right', frameon=False, fontsize=8)
+
+                # Right-bottom: distribution overlay of baseline noise vs residuals
+                axH = figure.add_subplot(gs[1, 1])
+                base_vals = y_avg[mbase]
+                resid_vals = resid_avg[zmask]
+                # Use common bins centered on zero
+                vals = np.concatenate([base_vals[np.isfinite(base_vals)], resid_vals[np.isfinite(resid_vals)]])
+                if vals.size:
+                    lo, hi = np.nanpercentile(vals, [1, 99])
+                    bins = np.linspace(lo, hi, 40)
+                else:
+                    bins = 30
+                axH.hist(base_vals, bins=bins, color='0.5', alpha=0.5, density=True, label='baseline')
+                axH.hist(resid_vals, bins=bins, color='tab:purple', alpha=0.5, density=True, label='residual')
+                axH.set_xlabel('Value')
+                axH.set_ylabel('Density')
+                axH.set_title('Distributions: baseline vs residual')
+                axH.legend(frameon=False, fontsize=8)
+            except Exception:
+                pass
 
     return {
         'tau_r_s': float(tau_r),

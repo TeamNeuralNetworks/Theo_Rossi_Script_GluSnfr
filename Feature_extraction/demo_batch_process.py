@@ -60,7 +60,7 @@ for in_dir in folders:
             train_start=train_start, isi=isi, n_pulses=n_pulses,
             options={'normalize_dff': True, 'bleach': True,
                      'fit_source': 'global', 'decay_progression_mode': 'linear',
-                     'plot': {'enabled': True, 'traces': ['raw','savgol','nnls'], 'show_decay': True, 'trials': False}}
+                     'plot': {'enabled': True, 'traces': ['raw','savgol','nnls'], 'show_decay': True, 'trials': False, 'residuals': True}}
         )
 
         base = os.path.splitext(os.path.basename(xlsx_path))[0]
