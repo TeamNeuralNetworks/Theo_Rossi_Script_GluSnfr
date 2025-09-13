@@ -562,10 +562,11 @@ def extract_metrics(
       - measurement: {'NNLS'|'SAVGOL'|'RAW'} (default 'NNLS') — which amplitudes are
         used for p‑values/classification
       - threshold_mode: {'auto'|'mad'|'sd'} (default 'auto') — auto = MAD for NNLS,
-        SD for SAVGOL
-      - share_thr_1to3: bool (default True) — reuse A1 threshold for pulses 2 and 3
+        SD for SAVGOL. Failure rates compare pulses 1–3 against a single baseline
+        threshold computed from pulse 1; pulses 2/3 amplitudes subtract residual
+        pre‑stim currents before comparison
       - allow_shift: bool (default True) — enable per‑pulse micro‑shifts
-      - event_model: {'double_exp'|'cooperative'} (default 'cooperative') — template used
+      - event_model: {'double_exp'|'cooperative'} (default 'double_exp') — template used
         for NNLS fitting and residual subtraction; 'cooperative' uses a Hill‑like rise*exp decay
       - coop_n: float (default 2.0) — cooperative exponent for the cooperative model
       - plot: dict with keys
@@ -579,7 +580,6 @@ def extract_metrics(
     """
     # Parse options (merge into a single config dict)
     opts = options.copy() if isinstance(options, dict) else {}
-    user_specified_event_model = isinstance(opts, dict) and ('event_model' in opts)
     plot_opts = opts.get('plot', {}) if isinstance(opts.get('plot', {}), dict) else {}
     want_plot = bool(plot_opts.get('enabled', False))
     traces = list(plot_opts.get('traces', ['nnls']))
@@ -1104,7 +1104,7 @@ def extract_metrics(
         a1 = float(a_for_p[0]) if a_for_p.size else np.nan
         p1 = float(pfun(a1)) if np.isfinite(a1) else np.nan
         thr_list.append(thr1); pval_list.append(p1)
-        # Compute p-values for pulses 2 and 3 using the same threshold as A1
+        # Compute p-values for pulses 2 and 3 using the same baseline threshold as A1
         p2 = float(pfun(a_for_p[1])) if (a_for_p.size >= 2 and np.isfinite(a_for_p[1])) else np.nan
         p3 = float(pfun(a_for_p[2])) if (a_for_p.size >= 3 and np.isfinite(a_for_p[2])) else np.nan
 

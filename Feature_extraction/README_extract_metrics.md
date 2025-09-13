@@ -10,9 +10,11 @@ The function keeps the math equivalent to the main pipeline while exposing a sma
 - Core controls:
   - `measurement`: `'NNLS'|'SAVGOL'|'RAW'` (default `'NNLS'`) — p‑values use this amplitude series
   - `fail_method`: `'NNLS'|'SAVGOL'|'RAW'` (default: same as `measurement`) — controls null/threshold rule
-  - `threshold_mode`: `'auto'|'mad'|'sd'` (default `'auto'`)
-  - `allow_shift`: bool (default True) — enable per‑pulse micro‑shifts
-  - `event_model`: kernel used for fitting. Default `'double_exp'` (one rise τ and one decay τ). If you pass a value here it is respected; there is no auto‑replacement.
+    - `threshold_mode`: `'auto'|'mad'|'sd'` (default `'auto'`) — failure rates compare
+      pulses 1–3 against a single baseline threshold; pulses 2/3 amplitudes are
+      corrected for residual pre‑stim currents
+    - `allow_shift`: bool (default True) — enable per‑pulse micro‑shifts
+    - `event_model`: kernel used for fitting. Default `'double_exp'` (one rise τ and one decay τ). If you pass a value here it is respected; there is no auto‑replacement.
     - Extras for `'cooperative'`: `event_model_settings={'n_coop': 2.0}`
   - `fit_source`: `'global'|'average'|'individual'` (default `'global'`)
     - `global`: fit a single template from all trials (recut median) then apply progression
@@ -56,7 +58,6 @@ res = extract_metrics(
         'fail_method': 'NNLS',        # default: same as measurement
         'threshold_mode': 'auto',     # or 'mad', 'sd'
         'allow_shift': True,
-        'share_thr_1to3': True,
         'fit_source': 'global',
         'decay_progression_mode': 'linear',
         'plot': {
@@ -310,7 +311,7 @@ res = extract_metrics(
 - `tau_d_s` (array): per‑pulse decay times (s), non‑decreasing by construction
 - `stim_times_s` (array): stimulus times (s)
 - `average` (dict): `y_avg`, `yhat_avg`, `amp_raw`, `amp_savgol`, `amp_nnls`, `ppr_nnls`
-- `per_trial` (list of dict): for each trial, the same amplitude/PPR triplets plus fitted `a_coeff` and `delta_s`
+- `per_trial` (list of dict): for each trial, the same amplitude/PPR triplets plus fitted `a_coeff`, `delta_s`, shared threshold (`thr_shared`), and `pval_amp1/2/3`
 - `threshold_amp1` (array): MAD‑rule thresholds for pulse 1 per trial
 - `pval_amp1` (array): empirical p‑values for pulse 1 per trial
 - `figure` (matplotlib Figure or None): average trace with selected overlays

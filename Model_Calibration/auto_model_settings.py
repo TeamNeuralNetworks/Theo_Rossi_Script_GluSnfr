@@ -142,7 +142,6 @@ def auto_select_event_model_settings(
         'fail_method': 'NNLS',
         'threshold_mode': 'auto',
         'allow_shift': True,
-        'share_thr_1to3': True,
     }
 
     return {
