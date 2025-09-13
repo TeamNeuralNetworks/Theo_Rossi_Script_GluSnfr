@@ -49,7 +49,7 @@ for xlsx_path in glob.glob(os.path.join(in_dir, "*.xlsx")):
                 'enabled': True,
                 'traces': ['raw','nnls'],
                 'show_decay': True,
-                'trials': False
+                'trials': True
             }
         }
     )

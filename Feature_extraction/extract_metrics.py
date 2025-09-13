@@ -9,7 +9,7 @@ Key steps performed (mirrors batch_measure_complex):
   1) Interpolate NaNs and (optionally) correct slow bleaching
   2) Baseline to ΔF/F0 using the median over the full pre‑train interval
   3) Estimate kinetics from the average trace (rise τr; per‑pulse decay τd)
-  4) Robust NNLS per‑pulse amplitudes with micro‑shifts (backward, no overlap)
+  4) Robust NNLS per‑pulse amplitudes with micro‑shifts (forward, no overlap)
   5) Per‑pulse amplitudes via local averaged max around each stimulus
   6) Null amplitudes and a MAD‑based threshold/p‑value for A1
 
@@ -31,7 +31,6 @@ try:
             iglusnfr_kernel,
             time_zoom_mask,
             windowed_max,
-            pick_peak_on_series,
             compute_no_signal_mask,
             build_median_recut_waveform,
     )
@@ -48,7 +47,6 @@ except Exception:
         iglusnfr_kernel,
         time_zoom_mask,
         windowed_max,
-        pick_peak_on_series,
         compute_no_signal_mask,
         build_median_recut_waveform,
     )
@@ -163,58 +161,32 @@ def _fit_single_pulse_amp(
     delta_step_s: float,
     shift_min_s: float,
 ) -> Tuple[float, float]:
-    """Estimate a single‑pulse amplitude at `stim_time` with optional micro‑shift.
+    """Estimate amplitude at ``stim_time`` with optional micro-shift.
 
-    Returns (amplitude, best_shift_s). Amplitude is read by robust NNLS against
-    the kernel segment in the local window [stim − pre, stim + post].
+    Assumes baseline has been corrected; residual from earlier events should be
+    subtracted before calling. Returns ``(amplitude, best_shift_s)``.
     """
     local_mask = (t >= (stim_time - pre_zoom_s)) & (t <= (stim_time + post_zoom_s))
     if not np.any(local_mask):
         return 0.0, shift_min_s
-    t_seg = t[local_mask]
     y_seg = y[local_mask]
-    # Build a small baseline subspace (intercept [+ optional slope]) and
-    # orthogonalize both y and the kernel against it to avoid overshoot/undershoot
-    # from lingering decays of previous pulses. This co-fits baseline implicitly
-    # while keeping the event amplitude non-negative.
-    t_rel = t_seg - float(stim_time)
-    pre_mask_loc = t_seg < float(stim_time)
-    use_slope = np.count_nonzero(pre_mask_loc) >= 3
-    if use_slope:
-        B = np.column_stack([np.ones_like(t_rel), t_rel])
-    else:
-        B = np.ones((t_rel.size, 1))
-    # QR for stable projection onto baseline subspace
-    try:
-        Qb, _ = np.linalg.qr(B, mode='reduced')
-        # Project y onto orthogonal complement of baseline space
-        y_perp = y_seg - Qb @ (Qb.T @ y_seg)
-    except Exception:
-        Qb = None
-        y_perp = y_seg
     best_a, best_d = 0.0, shift_min_s
-    shifts = (np.arange(shift_min_s, delta_max_s + 1e-12, delta_step_s)
-              if allow_shift else np.array([shift_min_s]))
+    shifts = (
+        np.arange(shift_min_s, delta_max_s + 1e-12, delta_step_s)
+        if allow_shift else np.array([shift_min_s])
+    )
     for d in shifts:
         k_full = _KERNEL_FUN(t - (stim_time + d), tau_r_s, tau_d_s)
         k_loc = k_full[local_mask]
         if k_loc.size < 3 or np.all(k_loc == 0):
             continue
-        # Orthogonalize kernel against baseline subspace too
-        if Qb is not None:
-            k_perp = k_loc - Qb @ (Qb.T @ k_loc)
-        else:
-            k_perp = k_loc
-        # Safeguard degenerate shapes
-        if np.allclose(k_perp, 0) or (np.linalg.norm(k_perp) < 1e-12):
-            continue
-        a_loc = _nnls_irls_singlecol(y_perp, k_perp, robust=robust, huber_delta=huber_delta, iters=irls_iters)
+        a_loc = _nnls_irls_singlecol(y_seg, k_loc, robust=robust, huber_delta=huber_delta, iters=irls_iters)
         if a_loc > best_a:
             best_a, best_d = a_loc, d
     return float(best_a), float(best_d)
 
 
-def fit_amplitudes_no_overlap_backward(
+def fit_amplitudes_no_overlap_forward(
     y: np.ndarray,
     t: np.ndarray,
     stim_times: np.ndarray,
@@ -231,20 +203,20 @@ def fit_amplitudes_no_overlap_backward(
     delta_step_s: float,
     shift_min_s: float,
 ):
-    """Backward, non‑overlap per‑pulse fitting with micro‑shifts.
+    """Forward, non‑overlap per‑pulse fitting with micro‑shifts.
 
-    For pulse p, fit in [t_p − pre, min(t_{p+1}, t_p + post)] and subtract the
-    reconstructed component before moving to the previous pulse. Returns
-    (amplitudes, shifts, design, reconstruction).
+    For pulse ``p``, fit in ``[t_p − pre, min(t_{p+1}, t_p + post)]`` and subtract
+    the reconstructed component before moving to the next pulse. Returns
+    ``(amplitudes, shifts, design, reconstruction)``.
     """
     n = len(stim_times)
     a = np.zeros(n, float)
     d = np.zeros(n, float)
     residual = y.copy()
     components = []
-    for p in reversed(range(n)):
+    for p in range(n):
         st = float(stim_times[p])
-        next_st = float(stim_times[p+1]) if p < n - 1 else None
+        next_st = float(stim_times[p + 1]) if p < n - 1 else None
         max_end = min(st + post_zoom_s, next_st) if next_st is not None else (st + post_zoom_s)
         avail_post = max(0.0, max_end - st)
         if avail_post < 1e-6:
@@ -257,17 +229,21 @@ def fit_amplitudes_no_overlap_backward(
             allow_shift=allow_shift, delta_max_s=delta_max_s, delta_step_s=delta_step_s,
             shift_min_s=shift_min_s,
         )
-        a[p] = a_p; d[p] = d_p
+        a[p] = a_p
+        d[p] = d_p
         k = _KERNEL_FUN(t - (st + d_p), tau_r_s, float(tau_d_vec_s[p]))
         comp = a_p * k
         residual = residual - comp
         components.append((p, comp))
-    components.sort(key=lambda x: x[0])
     yhat = np.sum([c for _, c in components], axis=0) if components else np.zeros_like(y)
-    X = np.column_stack([
-        _KERNEL_FUN(t - (float(stim_times[p]) + d[p]), tau_r_s, float(tau_d_vec_s[p]))
-        for p in range(n)
-    ]) if n else np.zeros((t.size, 0))
+    X = (
+        np.column_stack([
+            _KERNEL_FUN(t - (float(stim_times[p]) + d[p]), tau_r_s, float(tau_d_vec_s[p]))
+            for p in range(n)
+        ])
+        if n
+        else np.zeros((t.size, 0))
+    )
     return a, d, X, yhat
 
 
@@ -278,31 +254,35 @@ def compute_localmax_corrected_amps(
     win_ms: float,
     n_avg: int,
     pre_ms: float,
-    a_vec: np.ndarray,
     d_vec: np.ndarray,
     tau_r_s: float,
     tau_d_vec_s: np.ndarray,
 ):
-    """Local averaged max around each stimulus, minus previous event residual."""
+    """Local averaged max around each stimulus, removing earlier events.
+
+    Events are processed sequentially from start to finish. After measuring the
+    peak for pulse ``p`` the corresponding kernel scaled by that peak is
+    subtracted from ``y`` so that later pulses are unaffected by the earlier
+    ones.
+    """
     if y is None or t.size == 0 or np.size(y) == 0:
         return np.zeros(len(stim_times), float)
+    y_resid = y.copy()
     amps = []
     for p, st in enumerate(stim_times):
-        v = windowed_max(t, y, [st], win_ms, int(n_avg), pre_ms)
+        v = windowed_max(t, y_resid, [st], win_ms, int(n_avg), pre_ms)
         amp_p = float(v[0]) if np.size(v) else 0.0
-        tp, _ = pick_peak_on_series(t, y, st, win_ms, pre_ms)
-        if (
-            p > 0 and a_vec is not None and d_vec is not None and tau_d_vec_s is not None
-            and len(a_vec) > (p - 1) and len(d_vec) > (p - 1) and len(tau_d_vec_s) > (p - 1)
-        ):
-            st_prev = float(stim_times[p - 1])
-            td_prev = float(tau_d_vec_s[p - 1])
-            sh_prev = float(d_vec[p - 1])
-            a_prev = float(a_vec[p - 1])
-            prev = a_prev * _KERNEL_FUN(t - (st_prev + sh_prev), tau_r_s, td_prev)
-            prev_at_tp = float(np.interp(tp, t, prev)) if np.isfinite(tp) else 0.0
-            amp_p -= prev_at_tp
         amps.append(amp_p)
+        if (
+            d_vec is not None
+            and tau_d_vec_s is not None
+            and len(d_vec) > p
+            and len(tau_d_vec_s) > p
+        ):
+            k = _KERNEL_FUN(
+                t - (float(st) + float(d_vec[p])), tau_r_s, float(tau_d_vec_s[p])
+            )
+            y_resid = y_resid - amp_p * k
     return np.asarray(amps, float)
 
 
@@ -998,8 +978,8 @@ def extract_metrics(
     except Exception:
         pass
 
-    # Fit average trace (backward, no overlap) and measure amplitudes
-    a_avg, d_avg, X_avg, yhat_avg = fit_amplitudes_no_overlap_backward(
+    # Fit average trace (forward, no overlap) and measure amplitudes
+    a_avg, d_avg, X_avg, yhat_avg = fit_amplitudes_no_overlap_forward(
         y_avg, t, stim_times, tau_r, tau_d_vec,
         pre_zoom_s=cfg['pre_zoom_s'], post_zoom_s=cfg['post_zoom_s'],
         robust=True, huber_delta=cfg['huber_delta'], irls_iters=cfg['irls_iters'],
@@ -1009,15 +989,25 @@ def extract_metrics(
     y_sg_avg = sg_smooth(y_avg, sgW, sgP) if 'savgol' in traces else None
 
     amp_nnls_avg = compute_localmax_corrected_amps(
-        t, yhat_avg, stim_times, win_ms, n_avg, pre_ms, a_avg, d_avg, tau_r, tau_d_vec
+        t, yhat_avg, stim_times, win_ms, n_avg, pre_ms, d_avg, tau_r, tau_d_vec
     )
     def _norm(a):
         a = np.asarray(a, float)
         d = a[0] if a.size else np.nan
         return a / d if np.isfinite(d) and abs(d) > 1e-12 else a * np.nan
     ppr_nnls_avg = _norm(amp_nnls_avg)
-    amp_raw_avg = compute_localmax_corrected_amps(t, y_avg, stim_times, win_ms, n_avg, pre_ms, a_avg, d_avg, tau_r, tau_d_vec)
-    amp_sg_avg = compute_localmax_corrected_amps(t, y_sg_avg if y_sg_avg is not None else y_avg, stim_times, win_ms, n_avg, pre_ms, a_avg, d_avg, tau_r, tau_d_vec)
+    amp_raw_avg = compute_localmax_corrected_amps(t, y_avg, stim_times, win_ms, n_avg, pre_ms, d_avg, tau_r, tau_d_vec)
+    amp_sg_avg = compute_localmax_corrected_amps(
+        t,
+        y_sg_avg if y_sg_avg is not None else y_avg,
+        stim_times,
+        win_ms,
+        n_avg,
+        pre_ms,
+        d_avg,
+        tau_r,
+        tau_d_vec,
+    )
 
     # Per‑trial metrics and null thresholds (MAD rule) for A1
     per_trial: List[Dict] = []
@@ -1028,16 +1018,20 @@ def extract_metrics(
         yj = Yd[:, j]
         # Always compute SG-smoothed series; may be used for SAVGOL-based thresholds
         yj_sg = sg_smooth(yj, sgW, sgP)
-        a_t, d_t, X_t, yhat_t = fit_amplitudes_no_overlap_backward(
+        a_t, d_t, X_t, yhat_t = fit_amplitudes_no_overlap_forward(
             yj, t, stim_times, tau_r, tau_d_vec,
             pre_zoom_s=cfg['pre_zoom_s'], post_zoom_s=cfg['post_zoom_s'],
             robust=True, huber_delta=cfg['huber_delta'], irls_iters=cfg['irls_iters'],
             allow_shift=allow_shift, delta_max_s=cfg['delta_max_s'], delta_step_s=cfg['delta_step_s'],
             shift_min_s=cfg['shift_min_s'],
         )
-        amp_raw = compute_localmax_corrected_amps(t, yj, stim_times, win_ms, n_avg, pre_ms, a_t, d_t, tau_r, tau_d_vec)
-        amp_sg = compute_localmax_corrected_amps(t, yj_sg, stim_times, win_ms, n_avg, pre_ms, a_t, d_t, tau_r, tau_d_vec)
-        amp_nn = compute_localmax_corrected_amps(t, yhat_t, stim_times, win_ms, n_avg, pre_ms, a_t, d_t, tau_r, tau_d_vec)
+        amp_raw = compute_localmax_corrected_amps(t, yj, stim_times, win_ms, n_avg, pre_ms, d_t, tau_r, tau_d_vec)
+        amp_sg = compute_localmax_corrected_amps(
+            t, yj_sg, stim_times, win_ms, n_avg, pre_ms, d_t, tau_r, tau_d_vec
+        )
+        amp_nn = compute_localmax_corrected_amps(
+            t, yhat_t, stim_times, win_ms, n_avg, pre_ms, d_t, tau_r, tau_d_vec
+        )
 
         # Choose threshold rule and null amplitude strategy (auto follows fail_method)
         eff_mode = ('sd' if failm == 'SAVGOL' or failm == 'RAW' else 'mad') if thr_mode == 'auto' else thr_mode
