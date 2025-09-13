@@ -43,7 +43,7 @@ for xlsx_path in glob.glob(os.path.join(in_dir, "*.xlsx")):
             # Kinetics source and progression
             'fit_source': 'global',
             'decay_progression_mode': 'free_monotonic',
-            'model': 'double_exp',
+            'model': 'double_cooperative',
 
             'plot': {
                 'enabled': True,

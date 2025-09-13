@@ -204,24 +204,23 @@ def fit_amplitudes_no_overlap_forward(
     shift_min_s: float,
 ):
     """Forward, non‑overlap per‑pulse fitting with micro‑shifts.
-
-    For pulse ``p``, fit in ``[t_p − pre, min(t_{p+1}, t_p + post)]`` and subtract
-    the reconstructed component before moving to the next pulse. Returns
-    ``(amplitudes, shifts, design, reconstruction)``.
+    
+    Returns (amplitudes, shifts, design, reconstruction, components_list).
     """
     n = len(stim_times)
     a = np.zeros(n, float)
     d = np.zeros(n, float)
     residual = y.copy()
-    components = []
+    
     for p in range(n):
         st = float(stim_times[p])
         next_st = float(stim_times[p + 1]) if p < n - 1 else None
         max_end = min(st + post_zoom_s, next_st) if next_st is not None else (st + post_zoom_s)
         avail_post = max(0.0, max_end - st)
+        
         if avail_post < 1e-6:
-            components.append((p, np.zeros_like(y)))
             continue
+            
         a_p, d_p = _fit_single_pulse_amp(
             residual, t, st, tau_r_s, float(tau_d_vec_s[p]),
             pre_zoom_s=pre_zoom_s, post_zoom_s=avail_post,
@@ -229,13 +228,29 @@ def fit_amplitudes_no_overlap_forward(
             allow_shift=allow_shift, delta_max_s=delta_max_s, delta_step_s=delta_step_s,
             shift_min_s=shift_min_s,
         )
+        
         a[p] = a_p
         d[p] = d_p
+        
+        # Subtract this component from residual for next iteration
         k = _KERNEL_FUN(t - (st + d_p), tau_r_s, float(tau_d_vec_s[p]))
         comp = a_p * k
         residual = residual - comp
-        components.append((p, comp))
-    yhat = np.sum([c for _, c in components], axis=0) if components else np.zeros_like(y)
+    
+    # NOW reconstruct all components using the fitted parameters
+    # These are the actual components as they appear in the final signal
+    components = []
+    for p in range(n):
+        if a[p] > 0:  # Only create component if amplitude is non-zero
+            k = _KERNEL_FUN(t - (float(stim_times[p]) + d[p]), tau_r_s, float(tau_d_vec_s[p]))
+            components.append(a[p] * k)
+        else:
+            components.append(np.zeros_like(y))
+    
+    # The reconstruction is the sum of all components
+    yhat = np.sum(components, axis=0) if components else np.zeros_like(y)
+    
+    # Build design matrix for reference
     X = (
         np.column_stack([
             _KERNEL_FUN(t - (float(stim_times[p]) + d[p]), tau_r_s, float(tau_d_vec_s[p]))
@@ -244,8 +259,8 @@ def fit_amplitudes_no_overlap_forward(
         if n
         else np.zeros((t.size, 0))
     )
-    return a, d, X, yhat
-
+    
+    return a, d, X, yhat, components
 
 def compute_localmax_corrected_amps(
     t: np.ndarray,
@@ -569,6 +584,9 @@ def extract_metrics(
     if baseline_figs:
         plot_trials = True  # baseline panel requires per-trial figures
     cfg = {**DEFAULTS, **{k: v for k, v in opts.items() if k != 'plot'}}
+    # Backward-compat: allow 'model' as alias for 'event_model'
+    if 'model' in opts:
+        cfg['event_model'] = opts['model']
     # Optional auto-calibration of event model from multi-trial data (run after preprocessing)
     do_bleach = bool(cfg.get('bleach', True))
     use_dff = bool(cfg.get('normalize_dff', True))
@@ -629,7 +647,8 @@ def extract_metrics(
             Yd[:, j] = fill_nans_timewise(Yd[:, j], t)
 
     # Configure kernel function for the chosen event model (τ‑varying or fixed template)
-    event_model = str(cfg.get('event_model', 'cooperative')).strip().lower()
+    # Default must match DEFAULTS['event_model'] for consistency
+    event_model = str(cfg.get('event_model', DEFAULTS.get('event_model', 'double_exp'))).strip().lower()
     coop_n_default = float(cfg.get('coop_n', 2.0))
     em_settings = cfg.get('event_model_settings', {})
     if em_settings is None:
@@ -979,7 +998,7 @@ def extract_metrics(
         pass
 
     # Fit average trace (forward, no overlap) and measure amplitudes
-    a_avg, d_avg, X_avg, yhat_avg = fit_amplitudes_no_overlap_forward(
+    a_avg, d_avg, X_avg, yhat_avg, comp_avg = fit_amplitudes_no_overlap_forward(
         y_avg, t, stim_times, tau_r, tau_d_vec,
         pre_zoom_s=cfg['pre_zoom_s'], post_zoom_s=cfg['post_zoom_s'],
         robust=True, huber_delta=cfg['huber_delta'], irls_iters=cfg['irls_iters'],
@@ -1018,7 +1037,7 @@ def extract_metrics(
         yj = Yd[:, j]
         # Always compute SG-smoothed series; may be used for SAVGOL-based thresholds
         yj_sg = sg_smooth(yj, sgW, sgP)
-        a_t, d_t, X_t, yhat_t = fit_amplitudes_no_overlap_forward(
+        a_t, d_t, X_t, yhat_t, comp_t = fit_amplitudes_no_overlap_forward(
             yj, t, stim_times, tau_r, tau_d_vec,
             pre_zoom_s=cfg['pre_zoom_s'], post_zoom_s=cfg['post_zoom_s'],
             robust=True, huber_delta=cfg['huber_delta'], irls_iters=cfg['irls_iters'],
@@ -1113,6 +1132,7 @@ def extract_metrics(
             'delta_s': d_t,
             'y_proc': yj,
             'yhat': yhat_t,
+            'components': comp_t,
             'thr_shared': thr1,
             'pval_amp1': p1,
             'pval_amp2': p2,
@@ -1138,14 +1158,23 @@ def extract_metrics(
                     ax_train.plot(tz, yj_sg[zmask_t], label='savgol', color='tab:green')
                 if 'nnls' in traces:
                     ax_train.plot(tz, yhat_t[zmask_t], label='nnls model', color='tab:blue')
-                if show_decay and 'nnls' in traces and np.size(a_t):
-                    for p in range(1, int(n_pulses)):
-                        st_prev = float(stim_times[p - 1])
-                        td_prev = float(tau_d_vec[p - 1])
-                        sh_prev = float(d_t[p - 1]) if len(d_t) > (p - 1) else 0.0
-                        amp_prev = float(a_t[p - 1]) if len(a_t) > (p - 1) else 0.0
-                        k_prev = _KERNEL_FUN(tz - (st_prev + sh_prev), tau_r, td_prev)
-                        ax_train.plot(tz, amp_prev * k_prev, color='tab:orange', linestyle='--', linewidth=1.0, alpha=0.85)
+                if show_decay and 'nnls' in traces and comp_t is not None:
+                    cumulative_t = np.zeros_like(yj)
+                    for p in range(len(stim_times)):
+                        if p >= len(comp_t):
+                            continue
+                        # Add this component to the cumulative sum
+                        cumulative_t = cumulative_t + comp_t[p]
+                        
+                        # Plot the cumulative reconstruction up to this point
+                        ax_train.plot(
+                            tz,
+                            cumulative_t[zmask_t],
+                            color='tab:orange',
+                            linestyle='--',
+                            linewidth=1.0,
+                            alpha=0.6 - p * 0.04,  # Fade with each pulse
+                        )
                 # Failure threshold line (thin red dotted)
                 if np.isfinite(thr1):
                     ax_train.axhline(thr1, color='red', linestyle=':', linewidth=0.8)
@@ -1225,15 +1254,20 @@ def extract_metrics(
                     ax_t.plot(tz, yj_sg[zmask_t], label='savgol', color='tab:green')
                 if 'nnls' in traces:
                     ax_t.plot(tz, yhat_t[zmask_t], label='nnls model', color='tab:blue')
-                if show_decay and 'nnls' in traces and np.size(a_t):
-                    for p in range(1, int(n_pulses)):
-                        st_prev = float(stim_times[p - 1])
-                        td_prev = float(tau_d_vec[p - 1])
-                        sh_prev = float(d_t[p - 1]) if len(d_t) > (p - 1) else 0.0
-                        amp_prev = float(a_t[p - 1]) if len(a_t) > (p - 1) else 0.0
-                        # Use the active kernel, not hardcoded iglusnfr
-                        k_prev = _KERNEL_FUN(tz - (st_prev + sh_prev), tau_r, td_prev)
-                        ax_t.plot(tz, amp_prev * k_prev, color='tab:orange', linestyle='--', linewidth=1.0, alpha=0.85)
+                if show_decay and 'nnls' in traces and comp_t is not None:
+                    cumulative_t = np.zeros_like(yj)
+                    for p in range(len(stim_times)):
+                        if p >= len(comp_t):
+                            continue
+                        cumulative_t = cumulative_t + comp_t[p]
+                        ax_t.plot(
+                            tz,
+                            cumulative_t[zmask_t],
+                            color='tab:orange',
+                            linestyle='--',
+                            linewidth=1.0,
+                            alpha=0.6 - p * 0.04,
+                        )
                 if np.isfinite(thr1):
                     ax_t.axhline(thr1, color='red', linestyle=':', linewidth=0.8)
                 ax_t.set_xlim(z0, z1)
@@ -1347,14 +1381,26 @@ def extract_metrics(
             ax.plot(tz, y_sg_avg[zmask], label='savgol', color='tab:green')
         if 'nnls' in traces:
             ax.plot(tz, yhat_avg[zmask], label='nnls model', color='tab:blue')
-        if show_decay and 'nnls' in traces and np.size(a_avg):
-            for p in range(1, int(n_pulses)):
-                st_prev = float(stim_times[p - 1])
-                td_prev = float(tau_d_vec[p - 1])
-                sh_prev = float(d_avg[p - 1])
-                amp_prev = float(a_avg[p - 1])
-                k_prev = _KERNEL_FUN(tz - (st_prev + sh_prev), tau_r, td_prev)
-                ax.plot(tz, amp_prev * k_prev, color='tab:orange', linestyle='--', linewidth=1.0, alpha=0.85)
+        # Replace the orange line plotting section with:
+        # Replace the orange line plotting with cumulative reconstruction:
+        if show_decay and 'nnls' in traces and comp_avg is not None:
+            cumulative = np.zeros_like(y_avg)
+            for p in range(len(stim_times)):
+                if p >= len(comp_avg):
+                    continue
+                # Add this component to the cumulative sum
+                cumulative = cumulative + comp_avg[p]
+                
+                # Plot the cumulative reconstruction up to this point
+                # This shows the "baseline" including all decay from previous pulses
+                ax.plot(
+                    tz,
+                    cumulative[zmask],
+                    color='tab:orange',
+                    linestyle='--',
+                    linewidth=1.0,
+                    alpha=0.6 - p * 0.04,  # Fade with each pulse
+                )
         # If anchored (linear/monotonic), show the last-event pre-refit fit as an additional red overlay
         try:
             if dec_mode in ('linear','free_monotonic') and (tau_last_display is not None) and (amp_last_display is not None):
