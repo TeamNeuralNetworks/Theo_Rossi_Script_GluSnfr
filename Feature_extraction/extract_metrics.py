@@ -855,9 +855,12 @@ def extract_metrics(
             pass
         dec_mode = 'linear'
 
+    # Offset (seconds) between stimulus time and actual event onset
+    event_t0_s = 0.0
+
     def _estimate_last_tau(tau_r_local, tau_d0_local):
         try:
-            last_st = stim_times[-1]
+            last_st = stim_times[-1] + event_t0_s
             zmask_last = (t >= last_st) & (t <= (last_st + cfg['post_zoom_s']))
             tf = t[zmask_last]; yf = y_avg[zmask_last]
             tau_d_grid_ms = np.array(cfg['kin_taud0_grid_ms'], float)
@@ -931,6 +934,7 @@ def extract_metrics(
             fitted, t_avg_evt, y_avg_evt = res
             tau_r = float(fitted.get('tau_rise', np.nan))
             tau_d0 = float(fitted.get('tau_decay', np.nan))
+            event_t0_s = float(fitted.get('t_peak', 0.0)) / 1000.0
             # If cooperative, adopt fitted n_coop for the kernel and re-apply
             if event_model == 'cooperative' and ('n_coop' in fitted):
                 cfg.setdefault('event_model_settings', {})
@@ -1453,7 +1457,7 @@ def extract_metrics(
         # If anchored (linear/monotonic), show the last-event pre-refit fit as an additional red overlay
         try:
             if dec_mode in ('linear','free_monotonic') and (tau_last_display is not None) and (amp_last_display is not None):
-                last_st = float(stim_times[-1])
+                last_st = float(stim_times[-1]) + event_t0_s
                 k_last = _KERNEL_FUN(tz - last_st, tau_r, float(tau_last_display))
                 ax.plot(tz, float(amp_last_display) * k_last, color='crimson', linestyle='--', linewidth=1.4, alpha=0.9, label='last fit (pre-refit)')
         except Exception:
