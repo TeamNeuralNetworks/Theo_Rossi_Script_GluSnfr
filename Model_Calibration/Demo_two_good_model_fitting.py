@@ -13,8 +13,14 @@ import matplotlib.pyplot as plt
 from scipy.optimize import curve_fit
 from scipy import stats
 from pathlib import Path
+from typing import Dict
 import warnings
 warnings.filterwarnings('ignore', category=RuntimeWarning)
+
+try:
+    from Model_Calibration.simple_curve_fit import fit_average_event
+except Exception:  # pragma: no cover - allow running as script
+    from simple_curve_fit import fit_average_event  # type: ignore
 
 # =============================================================================
 # ANALYSIS SETTINGS
@@ -336,46 +342,40 @@ def _get_bounds_safe_initial_params(model_info, y_data, t_data):
     
     return p0_safe
 
-def fit_models_to_average(time_analysis, y_avg, avg_noise, which_models=("cooperative",)):
-    """Fit both models to the average trace"""
+def fit_models_to_average(time_analysis, traces_array, which_models=("cooperative",)):
+    """Recut all trials, average, and fit models to the global event."""
 
-    # Set up fitting region (configurable range)
-    fit_mask = (time_analysis >= FIT_TIME_START_MS) & (time_analysis <= FIT_TIME_END_MS)
-    t_fit = time_analysis[fit_mask]
-    y_fit_data = y_avg[fit_mask]
-    
-    # Model specifications - must be available via package path
     from Model_Calibration.event_models import get_models
     models_to_test = get_models(list(which_models))
-    
-    print("\n=== AVERAGE TRACE FITTING ===")
-    print(f"Fitting on {len(t_fit)} points from {t_fit[0]:.1f} to {t_fit[-1]:.1f} ms")
-    
-    fit_results = {}
-    
+
+    stim_times = [0.0]
+    t_sec = np.asarray(time_analysis, float) / 1000.0
+    fit_results: Dict[str, Dict] = {}
+    avg_t_ms = None
+    avg_wave = None
+    fit_mask = None
+    y_fit_data = None
+
     for model_name, model_info in models_to_test.items():
         try:
-            # Get bounds-safe initial parameters
-            p0 = _get_bounds_safe_initial_params(model_info, y_fit_data, t_fit)
-            
-            # Fit model
-            popt, pcov = curve_fit(
-                model_info['func'], 
-                t_fit, y_fit_data,
-                p0=p0,
-                bounds=model_info['bounds'],
-                maxfev=MAX_FEV_AVERAGE
-            )
-            
-            # Generate predictions
-            y_pred_full = model_info['func'](time_analysis, *popt)
+            res = fit_average_event(t_sec, traces_array.T, model_name, stim_times,
+                                   align_by_peak=False)
+            if res is None:
+                raise RuntimeError('curve_fit failed')
+            params, t_ms, y_avg = res
+            if avg_t_ms is None:
+                avg_t_ms, avg_wave = t_ms, y_avg
+                fit_mask = (t_ms >= FIT_TIME_START_MS) & (t_ms <= FIT_TIME_END_MS)
+                y_fit_data = avg_wave[fit_mask]
+                print("\n=== AVERAGE TRACE FITTING ===")
+                tf = t_ms[fit_mask]
+                print(f"Fitting on {len(tf)} points from {tf[0]:.1f} to {tf[-1]:.1f} ms")
+            popt = [params.get(p, 0.0) for p in model_info['params']]
+            y_pred_full = model_info['func'](avg_t_ms, *popt)
             y_pred_fit = y_pred_full[fit_mask]
-            
-            # Calculate metrics
             residuals = y_fit_data - y_pred_fit
             r_squared = 1 - np.sum(residuals**2) / np.sum((y_fit_data - np.mean(y_fit_data))**2)
             rmse = np.sqrt(np.mean(residuals**2))
-            
             fit_results[model_name] = {
                 'params': popt,
                 'param_names': model_info['params'],
@@ -385,10 +385,8 @@ def fit_models_to_average(time_analysis, y_avg, avg_noise, which_models=("cooper
                 'rmse': rmse,
                 'success': True
             }
-            
-            # Print results
             print(f"\n{model_name.upper()}:")
-            for i, (name, val) in enumerate(zip(model_info['params'], popt)):
+            for name, val in zip(model_info['params'], popt):
                 if 'tau' in name and 'peak' not in name:
                     print(f"  {name}: {val*1000:.2f} ms")
                 elif 't_' in name:
@@ -396,12 +394,11 @@ def fit_models_to_average(time_analysis, y_avg, avg_noise, which_models=("cooper
                 else:
                     print(f"  {name}: {val:.3f}")
             print(f"  R² = {r_squared:.3f}, RMSE = {rmse:.4f}")
-            
         except Exception as e:
             fit_results[model_name] = {'success': False, 'error': str(e)}
             print(f"\n{model_name.upper()}: FAILED - {e}")
-    
-    return fit_results, models_to_test, fit_mask
+
+    return fit_results, models_to_test, fit_mask, avg_t_ms, avg_wave
 
 
 def fit_individual_traces(time_analysis, traces_array, models_to_test, fit_mask):
@@ -682,7 +679,9 @@ def main():
         print(f"[auto] Selected event model: {sel}")
 
     # Fit selected model(s) to average trace
-    fit_results, models_to_test, fit_mask = fit_models_to_average(time_analysis, y_avg, avg_noise, which_models=which)
+    fit_results, models_to_test, fit_mask, time_analysis, y_avg = fit_models_to_average(
+        time_analysis, traces_array, which_models=which
+    )
 
     # Fit models to individual traces
     individual_results = fit_individual_traces(time_analysis, traces_array, models_to_test, fit_mask)

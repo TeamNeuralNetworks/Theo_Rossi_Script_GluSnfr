@@ -421,8 +421,15 @@ def build_median_recut_waveform(
     align_by_peak=True,
     peak_win_ms=25.0,
     peak_search_pre_ms=2.0,
+    stat="median",
 ):
-    """Median waveform across all events after recutting around each stimulus."""
+    """Aggregate waveform across all events after recutting around each stimulus.
+
+    Parameters
+    ----------
+    stat : {'median', 'mean'}, optional
+        Reduction to apply across recut snippets, by default ``'median'``.
+    """
     time = np.asarray(time, float)
     if time.size < 2 or Y_all is None or np.size(Y_all) == 0:
         return None, None
@@ -455,8 +462,11 @@ def build_median_recut_waveform(
     S = np.vstack(snippets)
     if S.size == 0:
         return None, None
-    med = np.nanmedian(S, axis=0)
-    return t_rel, med
+    if stat == "mean":
+        wave = np.nanmean(S, axis=0)
+    else:
+        wave = np.nanmedian(S, axis=0)
+    return t_rel, wave
 
 
 def fit_template_decay(

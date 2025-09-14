@@ -7,7 +7,7 @@ if REPO_ROOT not in sys.path:
 
 from Feature_extraction.extract_metrics import extract_metrics
 
-in_dir  = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Theo_4Ca\\"
+in_dir  = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\WT_Theo\\"
 out_dir = r"C:\Users\Antoine.Valera\Desktop\Testout"
 os.makedirs(out_dir, exist_ok=True)
 rows, per_trial_rows = [], []
@@ -36,7 +36,7 @@ for xlsx_path in glob.glob(os.path.join(in_dir, "*.xlsx")):
 
     res = extract_metrics(
         time, trials,
-        train_start=0.499, isi=0.05, n_pulses=10,
+        train_start=0.5-0.003, isi=0.05, n_pulses=10,
         options={
             'normalize_dff': True,
             'bleach': True,

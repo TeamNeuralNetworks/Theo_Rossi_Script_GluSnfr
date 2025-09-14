@@ -51,6 +51,11 @@ except Exception:
         build_median_recut_waveform,
     )
 
+try:
+    from Model_Calibration.simple_curve_fit import fit_average_event
+except Exception:  # pragma: no cover - allow running from subfolder
+    from simple_curve_fit import fit_average_event  # type: ignore
+
 
 """
 Default parameters consolidated into a single dictionary for clarity.
@@ -107,6 +112,8 @@ DEFAULTS = {
     'fail_method': None,
     # Toggle per-pulse micro-shifts during fitting and null sampling
     'allow_shift': True,
+    # Align recut snippets by their local peak before averaging
+    'align_by_peak': False,
     # Kinetics source and progression controls
     #  - fit_source: 'global' | 'average' | 'individual'
     #    * global: fit a single event template from all trials (recut median)
@@ -561,6 +568,8 @@ def extract_metrics(
         threshold computed from pulse 1; pulses 2/3 amplitudes subtract residual
         pre‑stim currents before comparison
       - allow_shift: bool (default True) — enable per‑pulse micro‑shifts
+      - align_by_peak: bool (default False) — align recut snippets by their
+        local peak before averaging
       - event_model: {'double_exp'|'cooperative'} (default 'double_exp') — template used
         for NNLS fitting and residual subtraction; 'cooperative' uses a Hill‑like rise*exp decay
       - coop_n: float (default 2.0) — cooperative exponent for the cooperative model
@@ -601,6 +610,7 @@ def extract_metrics(
     failm = str((cfg.get('fail_method') or meas)).strip().upper()
     thr_mode = str(cfg.get('threshold_mode', 'auto')).strip().lower()
     allow_shift = bool(cfg.get('allow_shift', True))
+    align_by_peak = bool(cfg.get('align_by_peak', False))
 
     # Shapes & schedule
     t = np.asarray(time, float).reshape(-1)
@@ -795,15 +805,16 @@ def extract_metrics(
     # Average trace and kinetics
     y_avg = np.nanmean(Yd, axis=1)
 
-    # Helper: estimate base kinetics from recut median of all trials/events
-    def _estimate_from_recut_median():
+    # Helper: estimate base kinetics from recut average of all trials/events
+    def _estimate_from_recut_average():
         try:
-            t_rel, med = build_median_recut_waveform(
-                t, Yd, stim_times, pre_ms=5.0, post_ms=50.0, align_by_peak=True,
-                peak_win_ms=25.0, peak_search_pre_ms=0.0
+            t_rel, avg = build_median_recut_waveform(
+                t, Yd, stim_times, pre_ms=5.0, post_ms=50.0,
+                align_by_peak=align_by_peak,
+                peak_win_ms=25.0, peak_search_pre_ms=0.0, stat="mean"
             )
-            if t_rel is None or med is None:
-                raise ValueError('recut_median unavailable')
+            if t_rel is None or avg is None:
+                raise ValueError('recut_average unavailable')
             # Grid search on (tau_r, tau_d0) using current kernel
             tau_r_grid = np.array(cfg['kin_taur_grid_ms'], float) / 1000.0
             tau_d0_grid = np.array(cfg['kin_taud0_grid_ms'], float) / 1000.0
@@ -815,9 +826,9 @@ def extract_metrics(
                 for td in tau_d0_grid:
                     k = _KERNEL_FUN(t_rel, tr, td)
                     denom = float(np.sum(k**2))
-                    amp = float(np.sum(med * k)) / denom if denom > 0 else 1.0
+                    amp = float(np.sum(avg * k)) / denom if denom > 0 else 1.0
                     fit = amp * k
-                    err = float(np.nanmean((med - fit) ** 2))
+                    err = float(np.nanmean((avg - fit) ** 2))
                     if err < best[0]:
                         best = (err, tr, td)
             _, tau_r_b, tau_d0_b = best
@@ -825,29 +836,6 @@ def extract_metrics(
             return float(tau_r_b), float(tau_d0_b)
         except Exception:
             return None, None
-
-    def _curvefit_on_average_event(model_name: str, t_s: np.ndarray, y_avg_vec: np.ndarray):
-        """Direct curve_fit on the average event window (0..50 ms) like the demo.
-
-        Returns dict of fitted params keyed by spec['params'] or None on failure.
-        """
-        try:
-            try:
-                from Model_Calibration.event_models import get_event_model
-            except Exception:
-                from event_models import get_event_model  # type: ignore
-            spec = get_event_model(model_name)
-            t_ms = (np.asarray(t_s, float) - float(train_start)) * 1000.0
-            m = (t_ms >= 0.0) & (t_ms <= 50.0)
-            if not np.any(m):
-                return None
-            tf = t_ms[m]; yf = np.asarray(y_avg_vec, float)[m]
-            p0 = spec['p0_func'](yf, tf)
-            from scipy.optimize import curve_fit as _cf
-            popt, _ = _cf(spec['func'], tf, yf, p0=p0, bounds=spec['bounds'], maxfev=3000)
-            return {name: float(val) for name, val in zip(spec['params'], popt)}
-        except Exception:
-            return None
 
     # Choose kinetics according to fit_source
     fit_source = str(cfg.get('fit_source', 'global')).lower()
@@ -924,11 +912,12 @@ def extract_metrics(
     amp_last_display = None
 
     if fit_source == 'global':
-        # Match the demo: fit kinetics on the average event via curve_fit
-        fitted = _curvefit_on_average_event(event_model, t, y_avg)
-        if fitted is None:
+        # Match the demo: recut + average all events then fit via curve_fit
+        res = fit_average_event(t, Yd, event_model, stim_times,
+                                align_by_peak=align_by_peak)
+        if res is None:
             # Fallback to recut median or average grid search
-            tr_b, td0_b = _estimate_from_recut_median()
+            tr_b, td0_b = _estimate_from_recut_average()
             if tr_b is None:
                 tr_b, td0_b, slope, tau_d_vec0 = estimate_kinetics_from_average(
                     t, y_avg, stim_times,
@@ -936,7 +925,10 @@ def extract_metrics(
                     slope_grid_ms=cfg['kin_slope_grid_ms'], pre_zoom_s=cfg['pre_zoom_s'], post_zoom_s=cfg['post_zoom_s']
                 )
             tau_r = float(tr_b); tau_d0 = float(td0_b)
+            t_avg_evt = (t - float(train_start)) * 1000.0
+            y_avg_evt = y_avg
         else:
+            fitted, t_avg_evt, y_avg_evt = res
             tau_r = float(fitted.get('tau_rise', np.nan))
             tau_d0 = float(fitted.get('tau_decay', np.nan))
             # If cooperative, adopt fitted n_coop for the kernel and re-apply
@@ -945,7 +937,9 @@ def extract_metrics(
                 cfg['event_model_settings']['n_coop'] = float(fitted['n_coop'])
                 ev_model_name, n_coop_effective = _apply_event_model_from_cfg()
                 is_varying_model = ev_model_name in varying_supported_names
-            progress_print(f"[fit][global] curve_fit τr={tau_r*1000:.2f}ms τd={tau_d0*1000:.2f}ms model={event_model}")
+            progress_print(
+                f"[fit][global] curve_fit τr={tau_r*1000:.2f}ms τd={tau_d0*1000:.2f}ms model={event_model}"
+            )
         if dec_mode in ('linear','free_monotonic'):
             tau_last, amp_last = _estimate_last_tau(tau_r, tau_d0)
             tau_last_display, amp_last_display = float(tau_last), float(amp_last)
@@ -1344,12 +1338,13 @@ def extract_metrics(
         # Left: aggregated event + model fit (−3..next stim)
         axL = figure.add_subplot(gs[0, 0])
         try:
-            t_ms = (t - float(train_start)) * 1000.0
+            t_ms_evt = t_avg_evt if 't_avg_evt' in locals() else (t - float(train_start)) * 1000.0
+            y_evt = y_avg_evt if 'y_avg_evt' in locals() else y_avg
             isi_ms = float(isi) * 1000.0
             min_x = -3.0
             max_x = min(isi_ms, 30.0)
-            m0 = (t_ms >= min_x) & (t_ms < max_x)
-            axL.plot(t_ms[m0], y_avg[m0], color='k', lw=1.5, label='Average')
+            m0 = (t_ms_evt >= min_x) & (t_ms_evt < max_x)
+            axL.plot(t_ms_evt[m0], y_evt[m0], color='k', lw=1.5, label='Average')
             # Overlay best-fit library model matching current kernel choice
             try:
                 try:
@@ -1361,7 +1356,7 @@ def extract_metrics(
                 if _name.startswith('library:'):
                     _name = _name.split(':', 1)[1].strip().lower()
                 spec = get_event_model(_name)
-                tf = t_ms[m0]; yf = y_avg[m0]
+                tf = t_ms_evt[m0]; yf = y_evt[m0]
                 # Build overlay params to reflect the model actually used:
                 popt = None
                 if _name in {'double_exp','cooperative','bilinear'}:
@@ -1406,7 +1401,7 @@ def extract_metrics(
             axL.set_xlim(min_x, max_x)
             # Autoscale y with a small margin to avoid a squashed panel
             try:
-                y_slice = y_avg[m0]
+                y_slice = y_evt[m0]
                 ymins = np.nanmin(y_slice) if np.size(y_slice) else 0.0
                 ymaxs = np.nanmax(y_slice) if np.size(y_slice) else 1.0
                 if 'yhat_ev' in locals():
