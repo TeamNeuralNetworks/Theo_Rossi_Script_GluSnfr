@@ -40,6 +40,7 @@ train_start_by_folder = {
 }
 
 summaries = {}
+per_trial_rows = []
 
 for in_dir in folders:
     out_dir = os.path.join(root_out, os.path.basename(in_dir))
@@ -97,18 +98,56 @@ for in_dir in folders:
         if res.get('figure') is not None:
             res['figure'].savefig(os.path.join(out_dir, f"{base}.png"), dpi=150)
 
-        row = {'file': base}
+        row = {'measurement': 'NNLS', 'ID': base}
         amp = res['average']['amp_nnls']; ppr = res['average']['ppr_nnls']
-        for i, v in enumerate(amp): row[f'amp_{i+1}'] = float(v)
-        for i, v in enumerate(ppr): row[f'ppr_{i+1}'] = float(v)
+        for i, v in enumerate(amp, 1):
+            row[f'AMP{i}'] = float(v)
+        for i in range(2, len(ppr) + 1):
+            row[f'PPR{i}/1'] = float(ppr[i - 1])
+
+        fail_counts = {i: [0, 0] for i in range(1, 4)}
+        for idx_trial, rtrial in enumerate(res.get('per_trial', [])):
+            amp_trial = np.asarray(rtrial.get('amp_nnls'), float)
+            thr = float(rtrial.get('thr_shared', np.nan))
+            a1 = amp_trial[0] if amp_trial.size else np.nan
+            status = 'NA'
+            if np.isfinite(a1) and np.isfinite(thr):
+                status = 'success' if a1 > thr else 'failure'
+                per_trial_rows.append({
+                    'AMP1': float(a1),
+                    'status': status,
+                    'file': base,
+                    'folder': os.path.basename(in_dir),
+                    'trial': idx_trial + 1,
+                })
+            for p in range(1, min(3, amp_trial.size) + 1):
+                val = amp_trial[p - 1]
+                if np.isfinite(val) and np.isfinite(thr):
+                    fail_counts[p][1] += 1
+                    if val <= thr:
+                        fail_counts[p][0] += 1
+        for p in range(1, 4):
+            n_fail, n_valid = fail_counts[p]
+            if n_valid:
+                row[f'%Fail{p}'] = round((n_fail / n_valid) * 100.0, 2)
         rows.append(row)
 
     # Save per-folder summary and collect for global workbook
     df_rows = pd.DataFrame(rows)
+    ordered = [f'AMP{i}' for i in range(1, n_pulses + 1)] \
+        + [f'PPR{i}/1' for i in range(2, n_pulses + 1)] \
+        + [f'%Fail{i}' for i in range(1, 4)]
+    for col in ['measurement', 'ID', *ordered]:
+        if col not in df_rows.columns:
+            df_rows[col] = np.nan
+    df_rows = df_rows[['ID', *ordered, 'measurement']]
     df_rows.to_csv(os.path.join(out_dir, "summary.csv"), index=False)
     summaries[os.path.basename(in_dir)] = df_rows
 
 # Save a multi-sheet workbook with one sheet per input folder
-with pd.ExcelWriter(os.path.join(root_out, "summary.xlsx")) as writer:
+main_out = os.path.join(root_out, "summary.xlsx")
+with pd.ExcelWriter(main_out) as writer:
     for folder_name, df in summaries.items():
         df.to_excel(writer, sheet_name=_safe_sheet_name(folder_name), index=False)
+if per_trial_rows:
+    pd.DataFrame(per_trial_rows).to_excel(os.path.splitext(main_out)[0] + "_trials.xlsx", index=False)
