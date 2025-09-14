@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
+
 """
 Comparison of event models (Double‑Exponential vs Cooperative Binding)
-with reusable model specs and a CLI flag to choose the underlying model.
-
-Default event model: both (cooperative and double_exp).
+with reusable model specs and a CLI flag to choose the underlying event model: both (cooperative and double_exp).
 """
 
 import sys
@@ -18,10 +17,39 @@ import warnings
 warnings.filterwarnings('ignore', category=RuntimeWarning)
 
 # =============================================================================
-# DATA LOADING (from original notebook)
+# ANALYSIS SETTINGS
 # =============================================================================
 
-DEFAULT_DATA_DIR = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Theo_1_5Ca\\"
+# Data input settings
+DEFAULT_INPUT_DIR = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\WT_Anthime\\"  # Default data directory
+
+# Time windows and fitting parameters
+ANALYSIS_TIME_START_MS = -5      # Start of analysis window (ms)
+ANALYSIS_TIME_END_MS = 50        # End of analysis window (ms)
+FIT_TIME_START_MS = 0            # Start of fitting region (ms)
+FIT_TIME_END_MS = 50             # End of fitting region (ms)
+
+# Stimulus train parameters
+TRAIN_START_S = 1.0              # Start time of stimulus train (s)
+ISI_S = 0.05                     # Inter-stimulus interval (s)
+N_PULSES = 10                    # Number of pulses in train
+
+# Fitting optimization settings
+MAX_FEV_AVERAGE = 3000           # Max function evaluations for average trace fitting
+MAX_FEV_INDIVIDUAL = 2000        # Max function evaluations for individual trace fitting
+MAX_WORKERS = 24                 # Max parallel workers for data loading
+
+# Statistical analysis settings
+NORMALITY_TEST_MAX_SAMPLES = 5000  # Max samples for Shapiro-Wilk test
+SIGNIFICANCE_ALPHA = 0.05          # Significance level for statistical tests
+
+# Baseline correction settings (now unused but kept for documentation)
+BASELINE_FRACTION = 0.25         # Fraction of trace to use for baseline (if no pre-stim data)
+
+
+# =============================================================================
+# DATA LOADING (from original notebook)
+# =============================================================================
 
 def _scan_argv_for_dir(argv) -> str | None:
     for a in argv[1:]:
@@ -33,7 +61,7 @@ def _scan_argv_for_dir(argv) -> str | None:
     return None
 
 def _resolve_input_dir(cli_arg: str | None) -> str:
-    """Resolve input directory with precedence: positional existing dir > CLI arg (if valid) > GLUSNFR_IN_DIR env > default."""
+    """Resolve input directory with precedence: positional existing dir > CLI arg (if valid) > GLUSNFR_IN_DIR env > global setting."""
     # If a specific CLI arg provided and valid
     if cli_arg and not cli_arg.startswith('-'):
         ap = os.path.abspath(cli_arg)
@@ -46,7 +74,10 @@ def _resolve_input_dir(cli_arg: str | None) -> str:
     env_dir = os.environ.get("GLUSNFR_IN_DIR")
     if env_dir and os.path.isdir(env_dir):
         return env_dir
-    return DEFAULT_DATA_DIR
+    # Use global setting as final fallback
+    if os.path.isdir(DEFAULT_INPUT_DIR):
+        return DEFAULT_INPUT_DIR
+    raise ValueError(f"No valid input directory found. Tried: (1) CLI argument, (2) GLUSNFR_IN_DIR env variable, (3) DEFAULT_INPUT_DIR='{DEFAULT_INPUT_DIR}'")
 
 def load_calcium_data(input_dir: str | None = None, *, verbose: bool = True):
     """Load data using the same approach as the original notebook.
@@ -72,24 +103,18 @@ def load_calcium_data(input_dir: str | None = None, *, verbose: bool = True):
             sys.path.insert(0, p)
     
     try:
-        # Import the demo module (prefer package path)
-        try:
-            demo = importlib.import_module('Model_Calibration.demo_adjust_fit_events')
-        except Exception:
-            demo = importlib.import_module('demo_adjust_fit_events')
+        # Import the demo module - must be available via package path
+        demo = importlib.import_module('Model_Calibration.demo_adjust_fit_events')
         
         # Determine which input directory to use
         if input_dir is None:
-            # Try to reuse logic from demo module if available
+            # Must have resolve function in demo module
             if hasattr(demo, "_resolve_input_dir"):
-                try:
-                    input_dir = demo._resolve_input_dir(None)  # type: ignore[attr-defined]
-                except Exception:
-                    input_dir = _resolve_input_dir(None)
+                input_dir = demo._resolve_input_dir(None)  # type: ignore[attr-defined]
             elif hasattr(demo, "DEFAULT_IN_DIR"):
                 input_dir = getattr(demo, "DEFAULT_IN_DIR")
             else:
-                input_dir = _resolve_input_dir(None)
+                raise ValueError("Demo module must provide either '_resolve_input_dir' function or 'DEFAULT_IN_DIR' attribute")
 
         print(f"Using data directory: {input_dir}")
 
@@ -104,17 +129,38 @@ def load_calcium_data(input_dir: str | None = None, *, verbose: bool = True):
                 print("No .xlsx files detected. Check that the path is correct or override with CLI arg or GLUSNFR_IN_DIR.")
 
         # Process the folder with configured settings
-        RESULTS = demo.process_folder(
-            input_dir,
-            max_workers=getattr(demo, "MAX_WORKERS", 24)
-        )
+        # Override demo module's stimulus timing with our settings
+        original_train_start = getattr(demo, 'TRAIN_START_S', None)
+        original_isi = getattr(demo, 'ISI_S', None) 
+        original_n_pulses = getattr(demo, 'N_PULSES', None)
+        
+        try:
+            # Temporarily override the demo module's timing parameters
+            demo.TRAIN_START_S = TRAIN_START_S
+            demo.ISI_S = ISI_S
+            demo.N_PULSES = N_PULSES
+            print(f"Overriding demo module stimulus timing: TRAIN_START_S={TRAIN_START_S}, ISI_S={ISI_S}, N_PULSES={N_PULSES}")
+            
+            RESULTS = demo.process_folder(
+                input_dir,
+                max_workers=getattr(demo, "MAX_WORKERS", MAX_WORKERS)
+            )
+        finally:
+            # Restore original values
+            if original_train_start is not None:
+                demo.TRAIN_START_S = original_train_start
+            if original_isi is not None:
+                demo.ISI_S = original_isi
+            if original_n_pulses is not None:
+                demo.N_PULSES = original_n_pulses
         
         if RESULTS:
             # Apply the same time shift as in original notebook
-            RESULTS['time_grid'] = RESULTS['time_grid'] + 0.003  # +3 ms alignment
+            RESULTS['time_grid'] = RESULTS['time_grid']  # +3 ms alignment
             
             print(f"Loaded data from {RESULTS['n_files']} files")
             print(f"Time range: {RESULTS['time_grid'][0]*1000:.1f} to {RESULTS['time_grid'][-1]*1000:.1f} ms")
+            print(f"Using stimulus timing: TRAIN_START_S={TRAIN_START_S}s, ISI_S={ISI_S}s, N_PULSES={N_PULSES}")
             
             if demo.EVENT_INDEX is not None:
                 print(f"Event {demo.EVENT_INDEX + 1} only")
@@ -145,11 +191,19 @@ class SynapticCurrentAnalyzer:
         trace = np.array(trace, dtype=float)
         
         if np.all(np.isnan(trace)):
-            return None
+            raise ValueError("Trace contains only NaN values")
             
         valid_mask = ~np.isnan(trace)
         if np.sum(valid_mask) < 5:
-            return None
+            raise ValueError(f"Insufficient valid data points: {np.sum(valid_mask)}, need >= 5")
+            
+        if not np.all(valid_mask):
+            x = np.arange(len(trace))
+            trace_clean = np.interp(x, x[valid_mask], trace[valid_mask])
+        else:
+            trace_clean = trace
+            
+        return trace_clean
             
         if not np.all(valid_mask):
             x = np.arange(len(trace))
@@ -164,15 +218,13 @@ class SynapticCurrentAnalyzer:
         baseline_mask = time_ms < 0
         
         if not np.any(baseline_mask):
-            n_baseline = max(1, len(time_ms) // 4)
-            baseline_mask = np.zeros(len(time_ms), dtype=bool)
-            baseline_mask[:n_baseline] = True
+            raise ValueError("No pre-stimulus baseline data available (no time points < 0)")
             
         baseline_data = trace[baseline_mask]
         baseline_data = baseline_data[np.isfinite(baseline_data)]
         
         if len(baseline_data) == 0:
-            return trace, 0
+            raise ValueError("No valid baseline data points found (all NaN/inf)")
             
         F0 = np.median(baseline_data)
         return trace - F0, F0
@@ -181,14 +233,13 @@ class SynapticCurrentAnalyzer:
         """Estimate noise level from baseline period"""
         baseline_mask = time_ms < 0
         if not np.any(baseline_mask):
-            baseline_mask = np.zeros(len(time_ms), dtype=bool)
-            baseline_mask[:len(time_ms)//4] = True
+            raise ValueError("No pre-stimulus baseline data available for noise estimation")
             
         baseline_data = trace[baseline_mask]
         baseline_data = baseline_data[np.isfinite(baseline_data)]
         
         if len(baseline_data) < 3:
-            return 0.001  # Default small value
+            raise ValueError(f"Insufficient baseline data for noise estimation: {len(baseline_data)} points, need >= 3")
             
         return np.std(baseline_data)
 
@@ -202,8 +253,8 @@ def preprocess_data(RESULTS):
     time_grid = RESULTS['time_grid'] * 1000  # Convert to ms
     traces = RESULTS['traces']
     
-    # Apply analysis window (-5ms to 50ms for better model fitting)
-    analysis_mask = (time_grid >= -5) & (time_grid <= 50)
+    # Apply analysis window (configurable range for better model fitting)
+    analysis_mask = (time_grid >= ANALYSIS_TIME_START_MS) & (time_grid <= ANALYSIS_TIME_END_MS)
     time_analysis = time_grid[analysis_mask]
     
     # Process traces
@@ -214,21 +265,23 @@ def preprocess_data(RESULTS):
     print(f"Analysis window: {time_analysis[0]:.1f} to {time_analysis[-1]:.1f} ms")
     
     for i, trace in enumerate(traces):
-        trace_clean = analyzer.clean_trace(trace)
-        if trace_clean is None:
-            continue
+        try:
+            trace_clean = analyzer.clean_trace(trace)
+            trace_cut = trace_clean[analysis_mask]
+            trace_corrected, f0 = analyzer.baseline_correct(time_analysis, trace_cut)
             
-        trace_cut = trace_clean[analysis_mask]
-        trace_corrected, f0 = analyzer.baseline_correct(time_analysis, trace_cut)
-        
-        if np.all(np.isnan(trace_corrected)):
-            continue
+            if np.all(np.isnan(trace_corrected)):
+                raise ValueError(f"Trace {i}: All corrected values are NaN")
+                
+            # Estimate noise level for this trace
+            noise_level = analyzer.estimate_noise_level(time_analysis, trace_corrected)
             
-        # Estimate noise level for this trace
-        noise_level = analyzer.estimate_noise_level(time_analysis, trace_corrected)
-        
-        clean_traces.append(trace_corrected)
-        noise_levels.append(noise_level)
+            clean_traces.append(trace_corrected)
+            noise_levels.append(noise_level)
+            
+        except ValueError as e:
+            print(f"Warning: Trace {i} failed processing: {e}")
+            continue
     
     print(f"Successfully processed: {len(clean_traces)}/{len(traces)} traces")
     
@@ -255,19 +308,44 @@ def preprocess_data(RESULTS):
 # FITTING AND ANALYSIS
 # =============================================================================
 
+def _get_bounds_safe_initial_params(model_info, y_data, t_data):
+    """Get initial parameters that are guaranteed to be within bounds."""
+    p0_raw = model_info['p0_func'](y_data, t_data)
+    bounds_lower, bounds_upper = model_info['bounds']
+    param_names = model_info.get('params', [f'p{i}' for i in range(len(p0_raw))])
+    
+    # Clip each parameter to be within bounds
+    p0_safe = []
+    adjustments_made = []
+    
+    for i, (param_val, lower, upper, name) in enumerate(zip(p0_raw, bounds_lower, bounds_upper, param_names)):
+        if param_val < lower:
+            safe_val = lower + (upper - lower) * 0.05  # 5% above lower bound
+            p0_safe.append(safe_val)
+            adjustments_made.append(f"{name}: {param_val:.4f} -> {safe_val:.4f} (below bound)")
+        elif param_val > upper:
+            safe_val = upper - (upper - lower) * 0.05  # 5% below upper bound
+            p0_safe.append(safe_val)
+            adjustments_made.append(f"{name}: {param_val:.4f} -> {safe_val:.4f} (above bound)")
+        else:
+            p0_safe.append(param_val)
+    
+    # Log adjustments if any were made
+    if adjustments_made:
+        print(f"  Parameter bounds adjustments: {'; '.join(adjustments_made)}")
+    
+    return p0_safe
+
 def fit_models_to_average(time_analysis, y_avg, avg_noise, which_models=("cooperative",)):
     """Fit both models to the average trace"""
 
-    # Set up fitting region (0 to 50 ms)
-    fit_mask = (time_analysis >= 0) & (time_analysis <= 50)
+    # Set up fitting region (configurable range)
+    fit_mask = (time_analysis >= FIT_TIME_START_MS) & (time_analysis <= FIT_TIME_END_MS)
     t_fit = time_analysis[fit_mask]
     y_fit_data = y_avg[fit_mask]
     
-    # Model specifications
-    try:
-        from Model_Calibration.event_models import get_models
-    except Exception:
-        from event_models import get_models  # fallback when running from this folder
+    # Model specifications - must be available via package path
+    from Model_Calibration.event_models import get_models
     models_to_test = get_models(list(which_models))
     
     print("\n=== AVERAGE TRACE FITTING ===")
@@ -277,8 +355,8 @@ def fit_models_to_average(time_analysis, y_avg, avg_noise, which_models=("cooper
     
     for model_name, model_info in models_to_test.items():
         try:
-            # Get initial parameters
-            p0 = model_info['p0_func'](y_fit_data, t_fit)
+            # Get bounds-safe initial parameters
+            p0 = _get_bounds_safe_initial_params(model_info, y_fit_data, t_fit)
             
             # Fit model
             popt, pcov = curve_fit(
@@ -286,7 +364,7 @@ def fit_models_to_average(time_analysis, y_avg, avg_noise, which_models=("cooper
                 t_fit, y_fit_data,
                 p0=p0,
                 bounds=model_info['bounds'],
-                maxfev=3000
+                maxfev=MAX_FEV_AVERAGE
             )
             
             # Generate predictions
@@ -339,46 +417,40 @@ def fit_individual_traces(time_analysis, traces_array, models_to_test, fit_mask)
     for trial_idx, trace in enumerate(traces_array):
         trace_fit = trace[fit_mask]
         
-        # Skip traces with insufficient data
+        # Require sufficient data for fitting
         if np.sum(np.isfinite(trace_fit)) < 5:
-            for model_name in models_to_test.keys():
-                individual_results[model_name].append({'success': False})
-            continue
+            raise ValueError(f"Trace {trial_idx}: Insufficient valid data points for fitting: {np.sum(np.isfinite(trace_fit))}")
         
         for model_name, model_info in models_to_test.items():
-            try:
-                # Get initial parameters based on trace
-                p0 = model_info['p0_func'](trace_fit, t_fit)
-                
-                # Fit model
-                popt, pcov = curve_fit(
-                    model_info['func'],
-                    t_fit, trace_fit,
-                    p0=p0,
-                    bounds=model_info['bounds'],
-                    maxfev=2000
-                )
-                
-                # Generate predictions
-                y_pred_full = model_info['func'](time_analysis, *popt)
-                y_pred_fit = y_pred_full[fit_mask]
-                
-                # Calculate metrics
-                residuals = trace_fit - y_pred_fit
-                r_squared = 1 - np.sum(residuals**2) / np.sum((trace_fit - np.mean(trace_fit))**2)
-                rmse = np.sqrt(np.mean(residuals**2))
-                
-                individual_results[model_name].append({
-                    'success': True,
-                    'params': popt,
-                    'y_pred_full': y_pred_full,
-                    'residuals': residuals,
-                    'r_squared': r_squared,
-                    'rmse': rmse
-                })
-                
-            except Exception:
-                individual_results[model_name].append({'success': False})
+            # Get bounds-safe initial parameters based on trace
+            p0 = _get_bounds_safe_initial_params(model_info, trace_fit, t_fit)
+            
+            # Fit model
+            popt, pcov = curve_fit(
+                model_info['func'],
+                t_fit, trace_fit,
+                p0=p0,
+                bounds=model_info['bounds'],
+                maxfev=MAX_FEV_INDIVIDUAL
+            )
+            
+            # Generate predictions
+            y_pred_full = model_info['func'](time_analysis, *popt)
+            y_pred_fit = y_pred_full[fit_mask]
+            
+            # Calculate metrics
+            residuals = trace_fit - y_pred_fit
+            r_squared = 1 - np.sum(residuals**2) / np.sum((trace_fit - np.mean(trace_fit))**2)
+            rmse = np.sqrt(np.mean(residuals**2))
+            
+            individual_results[model_name].append({
+                'success': True,
+                'params': popt,
+                'y_pred_full': y_pred_full,
+                'residuals': residuals,
+                'r_squared': r_squared,
+                'rmse': rmse
+            })
     
     # Print success rates
     for model_name in models_to_test.keys():
@@ -529,7 +601,7 @@ def statistical_comparison(all_residuals, model_names):
             residuals = all_residuals[model_name]
             
             # Normality test (subsample if too many points)
-            test_residuals = np.random.choice(residuals, min(5000, len(residuals)), replace=False)
+            test_residuals = np.random.choice(residuals, min(NORMALITY_TEST_MAX_SAMPLES, len(residuals)), replace=False)
             _, p_normal = stats.shapiro(test_residuals)
             
             print(f"\n{model_name.replace('_', ' ').title()}:")
@@ -537,7 +609,7 @@ def statistical_comparison(all_residuals, model_names):
             print(f"  Mean: {np.mean(residuals):.4f}")
             print(f"  Std: {np.std(residuals):.4f}")
             print(f"  Shapiro p-value: {p_normal:.4f}")
-            print(f"  Normality: {'✓ Normal' if p_normal > 0.05 else '✗ Non-normal'}")
+            print(f"  Normality: {'✓ Normal' if p_normal > SIGNIFICANCE_ALPHA else '✗ Non-normal'}")
     
     # Compare the two residual distributions
     if len(model_names) == 2:
@@ -550,7 +622,7 @@ def statistical_comparison(all_residuals, model_names):
             
             print(f"\nComparison between models:")
             print(f"  Kolmogorov-Smirnov p-value: {p_ks:.4f}")
-            print(f"  Distributions: {'Significantly different' if p_ks < 0.05 else 'Not significantly different'}")
+            print(f"  Distributions: {'Significantly different' if p_ks < SIGNIFICANCE_ALPHA else 'Not significantly different'}")
             
             # F-test for variance comparison
             f_stat = np.var(res1) / np.var(res2)
@@ -567,75 +639,63 @@ def main():
     print("=== CALCIUM RESPONSE MODEL COMPARISON ===")
     print("Double Exponential vs Cooperative Binding")
     
-    try:
-        # CLI: optional directory arg + event model choice
-        import argparse as _argparse
-        ap = _argparse.ArgumentParser(description="Event model fitting demo")
-        ap.add_argument('input', nargs='?', default=None, help='Optional input directory')
-        ap.add_argument('--event-model', default='both', choices=['cooperative','double_exp','both','auto'], help='Underlying event model')
-        # Be tolerant of Jupyter/IPython extra args like --f=...
-        args, _unknown = ap.parse_known_args(sys.argv[1:])
-        cli_dir = args.input
-        input_dir = _resolve_input_dir(cli_dir)
+    # CLI: optional directory arg + event model choice
+    import argparse as _argparse
+    ap = _argparse.ArgumentParser(description="Event model fitting demo")
+    ap.add_argument('input', nargs='?', default=None, help='Optional input directory')
+    ap.add_argument('--event-model', default='both', choices=['cooperative','double_exp','both','auto'], help='Underlying event model')
+    # Be tolerant of Jupyter/IPython extra args like --f=...
+    args, _unknown = ap.parse_known_args(sys.argv[1:])
+    cli_dir = args.input
+    input_dir = _resolve_input_dir(cli_dir)
 
-        # Load data
-        RESULTS = load_calcium_data(input_dir)
+    # Load data
+    RESULTS = load_calcium_data(input_dir)
 
-        # Preprocess data
-        time_analysis, traces_array, y_avg, avg_noise = preprocess_data(RESULTS)
+    # Preprocess data
+    time_analysis, traces_array, y_avg, avg_noise = preprocess_data(RESULTS)
 
-        # Select model(s)
-        if args.event_model == 'both':
-            which = ('double_exp','cooperative')
-        elif args.event_model == 'double_exp':
-            which = ('double_exp',)
-        elif args.event_model == 'cooperative':
-            which = ('cooperative',)
-        else:
-            # auto: pick best model from multi-trial average
-            try:
-                from Model_Calibration.auto_model_settings import auto_select_event_model_settings
-            except Exception:
-                from auto_model_settings import auto_select_event_model_settings  # fallback when running locally
-            # Recover multi-trial matrix from RESULTS: traces is a list of vectors on the common grid
-            try:
-                trials = np.vstack(RESULTS['traces']).T  # (N,T)
-                time_s = RESULTS['time_grid']
-                # Use defaults from demo_adjust_fit_events
-                train_start = getattr(importlib.import_module('Model_Calibration.demo_adjust_fit_events'), 'TRAIN_START_S', 0.5)
-                isi_s = getattr(importlib.import_module('Model_Calibration.demo_adjust_fit_events'), 'ISI_S', 0.05)
-                n_pulses = getattr(importlib.import_module('Model_Calibration.demo_adjust_fit_events'), 'N_PULSES', 10)
-            except Exception:
-                # Fallback: reconstruct from preprocessed data
-                trials = traces_array.T
-                time_s = time_analysis / 1000.0 + 0.0
-                train_start = 0.0; isi_s = 0.05; n_pulses = 10
-            auto = auto_select_event_model_settings(
-                time_s, trials, train_start=train_start, isi=isi_s, n_pulses=n_pulses,
-                candidates=("double_exp","cooperative"), window_ms=(0.0, 30.0)
-            )
-            sel = auto.get('event_model','cooperative')
-            which = (sel,)
-            print(f"[auto] Selected event model: {sel}")
-
-        # Fit selected model(s) to average trace
-        fit_results, models_to_test, fit_mask = fit_models_to_average(time_analysis, y_avg, avg_noise, which_models=which)
-
-        # Fit models to individual traces
-        individual_results = fit_individual_traces(time_analysis, traces_array, models_to_test, fit_mask)
-
-        # Create comparison plots
-        all_residuals = create_comparison_plots(
-            time_analysis, y_avg, traces_array, fit_results, individual_results, models_to_test
+    # Select model(s)
+    if args.event_model == 'both':
+        which = ('double_exp','cooperative')
+    elif args.event_model == 'double_exp':
+        which = ('double_exp',)
+    elif args.event_model == 'cooperative':
+        which = ('cooperative',)
+    else:
+        # auto: pick best model from multi-trial average
+        from Model_Calibration.auto_model_settings import auto_select_event_model_settings
+        
+        # Recover multi-trial matrix from RESULTS: traces is a list of vectors on the common grid
+        trials = np.vstack(RESULTS['traces']).T  # (N,T)
+        time_s = RESULTS['time_grid']
+        # Use our global settings directly (not from demo module)
+        train_start = TRAIN_START_S
+        isi_s = ISI_S
+        n_pulses = N_PULSES
+        auto = auto_select_event_model_settings(
+            time_s, trials, train_start=train_start, isi=isi_s, n_pulses=n_pulses,
+            candidates=("double_exp","cooperative"), window_ms=(0.0, 30.0)
         )
+        sel = auto.get('event_model','cooperative')
+        which = (sel,)
+        print(f"[auto] Selected event model: {sel}")
 
-        # Statistical comparison
-        statistical_comparison(all_residuals, list(models_to_test.keys()))
+    # Fit selected model(s) to average trace
+    fit_results, models_to_test, fit_mask = fit_models_to_average(time_analysis, y_avg, avg_noise, which_models=which)
 
-        print("\n=== ANALYSIS COMPLETE ===")
-    except Exception as e:
-        print(f"Error during analysis: {e}")
-        raise
+    # Fit models to individual traces
+    individual_results = fit_individual_traces(time_analysis, traces_array, models_to_test, fit_mask)
+
+    # Create comparison plots
+    all_residuals = create_comparison_plots(
+        time_analysis, y_avg, traces_array, fit_results, individual_results, models_to_test
+    )
+
+    # Statistical comparison
+    statistical_comparison(all_residuals, list(models_to_test.keys()))
+
+    print("\n=== ANALYSIS COMPLETE ===")
 
 
 if __name__ == "__main__":
