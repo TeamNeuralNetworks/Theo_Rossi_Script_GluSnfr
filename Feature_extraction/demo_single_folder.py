@@ -36,24 +36,43 @@ for xlsx_path in glob.glob(os.path.join(in_dir, "*.xlsx")):
 
     res = extract_metrics(
         time, trials,
-        train_start=0.5-0.003, isi=0.05, n_pulses=10,
+        train_start=0.5-0.001, isi=0.05, n_pulses=10,
         options={
             'normalize_dff': True,
             'bleach': True,
             # Kinetics source and progression
             'fit_source': 'global',
             'decay_progression_mode': 'free_monotonic',
-            'model': 'double_exp',
+            'model': 'binding_kinetics',
 
             'plot': {
                 'enabled': True,
                 'traces': ['raw','nnls'],
                 'show_decay': True,
-                'trials': False,
+                'trials': True,
                 'residuals': True
             }
         }
     )
+
+    """
+    Available models:
+    - 'double_exp' (default): classic double exponential (constrained)
+    - 'cooperative': cooperative binding (Hill-like rise, exp decay)
+    - 'single_exp': single exponential decay (constrained)
+    - 'alpha': alpha function (constrained)
+    - 'gamma': gamma function (constrained)
+    - 'bilinear': bilinear rise + exp decay (constrained)
+    - 'binding_kinetics': binding kinetics model with on/off rates + clearance (constrained)
+    - 'two_component': two-component model with shared rise time (constrained)
+    - 'desensitization': model with desensitization term (constrained)
+    - 'coop_plus_linear': cooperative binding + linear component (constrained)
+    - 'diffusion_clearance': diffusion rise + bi-exponential clearance (constrained)
+    - 'double_cooperative': sum of two cooperative binding components (constrained)
+    - 'hetero_coop': heterogeneous cooperative binding (constrained)
+    """
+
+
 
 
     base = os.path.splitext(os.path.basename(xlsx_path))[0]
@@ -118,19 +137,3 @@ if per_trial_rows:
 #  - 'free_monotonic': interpolate between first and last τd (non-decreasing)
 #  - 'linear': non-negative-slope linear regression across pulses
 
-"""
-Available models:
-- 'double_exp' (default): classic double exponential (constrained)
-- 'cooperative': cooperative binding (Hill-like rise, exp decay)
-- 'single_exp': single exponential decay (constrained)
-- 'alpha': alpha function (constrained)
-- 'gamma': gamma function (constrained)
-- 'bilinear': bilinear rise + exp decay (constrained)
-- 'binding_kinetics': binding kinetics model with on/off rates + clearance (constrained)
-- 'two_component': two-component model with shared rise time (constrained)
-- 'desensitization': model with desensitization term (constrained)
-- 'coop_plus_linear': cooperative binding + linear component (constrained)
-- 'diffusion_clearance': diffusion rise + bi-exponential clearance (constrained)
-- 'double_cooperative': sum of two cooperative binding components (constrained)
-- 'hetero_coop': heterogeneous cooperative binding (constrained)
-"""

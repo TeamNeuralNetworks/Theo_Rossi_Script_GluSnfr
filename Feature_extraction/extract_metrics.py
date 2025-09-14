@@ -936,11 +936,19 @@ def extract_metrics(
             tau_d0 = float(fitted.get('tau_decay', np.nan))
             event_t0_s = float(fitted.get('t_peak', 0.0)) / 1000.0
             # If cooperative, adopt fitted n_coop for the kernel and re-apply
+            if not np.isfinite(tau_r):
+                tau_r = 0.002
+            if not np.isfinite(tau_d0):
+                tau_d0 = 0.010
+            cfg.setdefault('event_model_settings', {})
             if event_model == 'cooperative' and ('n_coop' in fitted):
-                cfg.setdefault('event_model_settings', {})
                 cfg['event_model_settings']['n_coop'] = float(fitted['n_coop'])
-                ev_model_name, n_coop_effective = _apply_event_model_from_cfg()
-                is_varying_model = ev_model_name in varying_supported_names
+            elif event_model not in varying_supported_names:
+                for k, v in fitted.items():
+                    if k not in ('amp', 't_peak') and np.isfinite(v):
+                        cfg['event_model_settings'][k] = float(v)
+            ev_model_name, n_coop_effective = _apply_event_model_from_cfg()
+            is_varying_model = ev_model_name in varying_supported_names
             progress_print(
                 f"[fit][global] curve_fit τr={tau_r*1000:.2f}ms τd={tau_d0*1000:.2f}ms model={event_model}"
             )
