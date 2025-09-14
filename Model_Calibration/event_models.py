@@ -25,6 +25,49 @@ from __future__ import annotations
 from typing import Callable, Dict, Tuple, List
 import numpy as np
 
+# Global fit limits that can be tweaked by calling code. These bounds
+# are applied across models for common parameters like t_peak and tau
+# values.  "tau_primary" refers to faster/primary components (e.g. rise
+# times or fast decays) while "tau_secondary" covers slower components.
+FIT_LIMITS: Dict[str, Tuple[float, float]] = {
+    't_peak': (0.0, 10.0),
+    'tau': (0.001, 0.200),
+    'tau_primary': (0.0005, 0.020),
+    'tau_secondary': (0.010, 1.000),
+}
+
+
+def set_fit_limits(**kwargs) -> None:
+    """Update global fit limit tuples.
+
+    Example::
+
+        set_fit_limits(t_peak=(0, 8), tau_secondary=(0.020, 0.500))
+    """
+    for key, val in kwargs.items():
+        if key in FIT_LIMITS and isinstance(val, (tuple, list)) and len(val) == 2:
+            FIT_LIMITS[key] = (float(val[0]), float(val[1]))
+
+
+def _apply_global_bounds(spec: Dict) -> Dict:
+    """Override bounds for common parameters using FIT_LIMITS."""
+    lb, ub = spec['bounds']
+    lb = list(lb)
+    ub = list(ub)
+    for i, p in enumerate(spec['params']):
+        if p == 't_peak':
+            lb[i], ub[i] = FIT_LIMITS['t_peak']
+        elif 'tau' in p:
+            if any(s in p for s in ('fast', 'rise')) or p.endswith('1'):
+                bounds = FIT_LIMITS.get('tau_primary')
+            elif any(s in p for s in ('slow',)) or p.endswith('2') or 'decay' in p:
+                bounds = FIT_LIMITS.get('tau_secondary')
+            else:
+                bounds = FIT_LIMITS.get('tau')
+            if bounds:
+                lb[i], ub[i] = bounds
+    spec['bounds'] = (lb, ub)
+    return spec
 
 def model_double_exp_constrained(t, amp, tau_rise, tau_decay, t_peak):
     """Classic double exponential: (exp(-t/tau_decay) - exp(-t/tau_rise)).
@@ -275,131 +318,131 @@ def get_event_model(name: str) -> Dict:
     """
     nm = (name or '').strip().lower()
     if nm in ('double', 'double_exp', 'double-exponential', 'biexp'):
-        return {
+        return _apply_global_bounds({
             'name': 'double_exp',
             'func': model_double_exp_constrained,
             'params': ['amp', 'tau_rise', 'tau_decay', 't_peak'],
             'bounds': ([0, 0.0005, 0.001, 0], [np.inf, 0.010, 0.200, 10]),
             'p0_func': lambda y, t: [float(np.nanmax(y)), 0.002, 0.020, float(t[np.nanargmax(y)])],
             'complexity': 4,
-        }
+        })
     if nm in ('coop', 'cooperative', 'cooperative_binding'):
-        return {
+        return _apply_global_bounds({
             'name': 'cooperative',
             'func': model_cooperative_binding,
             'params': ['amp', 'tau_rise', 'tau_decay', 'n_coop', 't_peak'],
             'bounds': ([0, 0.001, 0.005, 0.5, 0], [np.inf, 0.020, 0.200, 5.0, 10]),
             'p0_func': lambda y, t: [float(np.nanmax(y)), 0.005, 0.030, 2.0, float(t[np.nanargmax(y)])],
             'complexity': 5,
-        }
+        })
     if nm in ('single', 'single_exp', 'single-exponential'):
-        return {
+        return _apply_global_bounds({
             'name': 'single_exp',
             'func': model_single_exp_constrained,
             'params': ['amp', 'tau_decay', 't_peak'],
             'bounds': ([0, 0.001, 0], [np.inf, 0.200, 10]),
             'p0_func': lambda y, t: [float(np.nanmax(y)), 0.020, float(t[np.nanargmax(y)])],
             'complexity': 3,
-        }
+        })
     if nm in ('alpha',):
-        return {
+        return _apply_global_bounds({
             'name': 'alpha',
             'func': model_alpha_constrained,
             'params': ['amp', 'tau', 't_peak'],
             'bounds': ([0, 0.001, 0], [np.inf, 0.100, 10]),
             'p0_func': lambda y, t: [float(np.nanmax(y)) * np.e, 0.010, float(t[np.nanargmax(y)])],
             'complexity': 3,
-        }
+        })
     if nm in ('gamma',):
-        return {
+        return _apply_global_bounds({
             'name': 'gamma',
             'func': model_gamma_constrained,
             'params': ['amp', 'n', 'tau', 't_peak'],
             'bounds': ([0, 0.5, 0.001, 0], [np.inf, 8.0, 0.100, 10]),
             'p0_func': lambda y, t: [float(np.nanmax(y)) * 3.0, 2.0, 0.010, float(t[np.nanargmax(y)])],
             'complexity': 4,
-        }
+        })
     if nm in ('bilinear',):
-        return {
+        return _apply_global_bounds({
             'name': 'bilinear',
             'func': model_bilinear_constrained,
             'params': ['amp', 't_rise', 't_decay', 't_peak'],
             'bounds': ([0, 0.1, 1, 0], [np.inf, 10, 100, 10]),
             'p0_func': lambda y, t: [float(np.nanmax(y)), 2.0, 20.0, float(t[np.nanargmax(y)])],
             'complexity': 4,
-        }
+        })
     if nm in ('binding_kinetics', 'binding'):
-        return {
+        return _apply_global_bounds({
             'name': 'binding_kinetics',
             'func': model_binding_kinetics,
             'params': ['amp', 'kon', 'koff', 'tau_clear', 't_peak'],
             'bounds': ([0, 10, 1, 0.001, 0], [np.inf, 1000, 200, 0.200, 10]),
             'p0_func': lambda y, t: [float(np.nanmax(y)), 200, 50, 0.030, float(t[np.nanargmax(y)])],
             'complexity': 5,
-        }
+        })
     if nm in ('two_component', 'two-component', 'two_component_shared_rise'):
-        return {
+        return _apply_global_bounds({
             'name': 'two_component',
             'func': model_two_component_shared_rise,
             'params': ['amp_fast', 'tau_rise', 'tau_fast', 'amp_slow', 'tau_slow', 't_peak'],
             'bounds': ([0, 0.0005, 0.001, 0, 0.010, 0], [np.inf, 0.010, 0.100, np.inf, 1.000, 10]),
             'p0_func': lambda y, t: [float(np.nanmax(y))*0.6, 0.002, 0.015, float(np.nanmax(y))*0.4, 0.080, float(t[np.nanargmax(y)])],
             'complexity': 6,
-        }
+        })
     if nm in ('desens', 'desensitization'):
-        return {
+        return _apply_global_bounds({
             'name': 'desensitization',
             'func': model_desensitization,
             'params': ['amp', 'tau_rise', 'tau_decay', 'tau_recovery', 'desens_factor', 't_peak'],
             'bounds': ([0, 0.001, 0.005, 0.020, 0, 0], [np.inf, 0.010, 0.100, 1.000, 0.8, 10]),
             'p0_func': lambda y, t: [float(np.nanmax(y)), 0.003, 0.020, 0.100, 0.3, float(t[np.nanargmax(y)])],
             'complexity': 6,
-        }
+        })
     if nm in ('coop_plus_linear', 'cooperative_plus_linear'):
-        return {
+        return _apply_global_bounds({
             'name': 'coop_plus_linear',
             'func': model_cooperative_plus_linear,
             'params': ['amp_coop', 'tau_rise_coop', 'tau_decay_coop', 'n_coop', 'amp_linear', 'tau_decay_linear', 't_peak'],
             'bounds': ([0, 0.001, 0.005, 0.5, 0, 0.010, 0], [np.inf, 0.020, 0.200, 5.0, np.inf, 0.500, 10]),
             'p0_func': lambda y, t: [float(np.nanmax(y))*0.8, 0.005, 0.030, 2.0, float(np.nanmax(y))*0.2, 0.100, float(t[np.nanargmax(y)])],
             'complexity': 7,
-        }
+        })
     if nm in ('diffusion_clearance', 'diffusion'):
-        return {
+        return _apply_global_bounds({
             'name': 'diffusion_clearance',
             'func': model_diffusion_clearance,
             'params': ['amp', 'tau_diff', 'tau_clear1', 'tau_clear2', 'frac_clear1', 't_peak'],
             'bounds': ([0, 0.001, 0.005, 0.020, 0.1, 0], [np.inf, 0.020, 0.100, 0.500, 0.9, 10]),
             'p0_func': lambda y, t: [float(np.nanmax(y))*np.e, 0.003, 0.015, 0.080, 0.6, float(t[np.nanargmax(y)])],
             'complexity': 7,
-        }
+        })
     if nm in ('double_cooperative', 'double_coop'):
-        return {
+        return _apply_global_bounds({
             'name': 'double_cooperative',
             'func': model_double_cooperative,
             'params': ['amp', 'tau_rise1', 'tau_decay1', 'n1', 'tau_rise2', 'tau_decay2', 'n2', 't_peak'],
             'bounds': ([0, 0.001, 0.005, 0.5, 0.005, 0.020, 0.5, 0], [np.inf, 0.020, 0.100, 5.0, 0.100, 0.500, 5.0, 10]),
             'p0_func': lambda y, t: [float(np.nanmax(y)), 0.003, 0.015, 2.0, 0.010, 0.080, 1.5, float(t[np.nanargmax(y)])],
             'complexity': 8,
-        }
+        })
     if nm in ('hetero_coop', 'heterogeneous_cooperative'):
-        return {
+        return _apply_global_bounds({
             'name': 'hetero_coop',
             'func': model_heterogeneous_cooperative,
             'params': ['amp', 'tau_rise1', 'tau_decay1', 'n1', 'frac1', 'tau_rise2', 'tau_decay2', 'n2', 't_peak'],
             'bounds': ([0, 0.001, 0.005, 0.5, 0.1, 0.005, 0.020, 0.5, 0], [np.inf, 0.020, 0.200, 5.0, 0.9, 0.100, 1.000, 5.0, 10]),
             'p0_func': lambda y, t: [float(np.nanmax(y)), 0.003, 0.020, 2.0, 0.6, 0.010, 0.080, 1.5, float(t[np.nanargmax(y)])],
             'complexity': 9,
-        }
+        })
     if nm in ('two_comp_coop', 'two_component_cooperative'):
-        return {
+        return _apply_global_bounds({
             'name': 'two_comp_coop',
             'func': model_two_component_cooperative,
             'params': ['amp_fast', 'tau_rise_fast', 'tau_decay_fast', 'n_fast', 'amp_slow', 'tau_rise_slow', 'tau_decay_slow', 'n_slow', 't_peak'],
             'bounds': ([0, 0.001, 0.005, 0.5, 0, 0.005, 0.020, 0.5, 0], [np.inf, 0.020, 0.100, 5.0, np.inf, 0.100, 1.000, 5.0, 10]),
             'p0_func': lambda y, t: [float(np.nanmax(y))*0.6, 0.003, 0.015, 2.0, float(np.nanmax(y))*0.4, 0.010, 0.080, 1.5, float(t[np.nanargmax(y)])],
             'complexity': 9,
-        }
+        })
     raise ValueError(f"Unknown model '{name}'")
 
 

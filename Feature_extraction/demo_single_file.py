@@ -20,14 +20,16 @@ trials = _trials[valid, :]
 
 res = extract_metrics(
     time, trials,
-    train_start=0.5,   # seconds
+    train_start=0.5-0.001,   # seconds
     isi=0.05,          # seconds
     n_pulses=10,
     options={
         'normalize_dff': True,
         'bleach': True,
+        # Kinetics source and progression
         'fit_source': 'global',
-        'decay_progression_mode': 'linear',
+        'decay_progression_mode': 'free_monotonic',
+        'model': 'coop_plus_linear',
         'plot': {
             'enabled': True,
             'traces': ['raw','savgol','nnls'],  # show all average overlays
