@@ -1,5 +1,75 @@
 import os, sys, glob, zipfile, numpy as np, pandas as pd
 
+"""
+Compact model & options reference (from `Model_Calibration/event_models.py`)
+
+Canonical models (accepted aliases) and their fit parameter names:
+ - 'double_exp'  (aliases: 'double','double-exponential','biexp')
+     params: ['amp', 'tau_rise', 'tau_decay', 't_peak']
+
+ - 'cooperative' (aliases: 'coop','cooperative_binding')
+     params: ['amp', 'tau_rise', 'tau_decay', 'n_coop', 't_peak']
+
+ - 'single_exp'  (aliases: 'single','single-exponential')
+     params: ['amp', 'tau_decay', 't_peak']
+
+ - 'alpha'
+     params: ['amp', 'tau', 't_peak']
+
+ - 'gamma'
+     params: ['amp', 'n', 'tau', 't_peak']
+
+ - 'bilinear'
+     params: ['amp', 't_rise', 't_decay', 't_peak']
+
+ - 'binding_kinetics' (alias: 'binding')
+     params: ['amp', 'kon', 'koff', 'tau_clear', 't_peak']
+
+ - 'two_component' (aliases: 'two-component','two_component_shared_rise')
+     params: ['amp_fast', 'tau_rise', 'tau_fast', 'amp_slow', 'tau_slow', 't_peak']
+
+ - 'desensitization' (aliases: 'desens')
+     params: ['amp', 'tau_rise', 'tau_decay', 'tau_recovery', 'desens_factor', 't_peak']
+
+ - 'coop_plus_linear' (alias: 'cooperative_plus_linear')
+     params: ['amp_coop', 'tau_rise_coop', 'tau_decay_coop', 'n_coop', 'amp_linear', 'tau_decay_linear', 't_peak']
+
+ - 'diffusion_clearance' (alias: 'diffusion')
+     params: ['amp', 'tau_diff', 'tau_clear1', 'tau_clear2', 'frac_clear1', 't_peak']
+
+ - 'double_cooperative' (alias: 'double_coop')
+     params: ['amp', 'tau_rise1', 'tau_decay1', 'n1', 'tau_rise2', 'tau_decay2', 'n2', 't_peak']
+
+ - 'hetero_coop' (alias: 'heterogeneous_cooperative')
+     params: ['amp', 'tau_rise1', 'tau_decay1', 'n1', 'frac1', 'tau_rise2', 'tau_decay2', 'n2', 't_peak']
+
+ - 'two_comp_coop' (alias: 'two_component_cooperative')
+     params: ['amp_fast', 'tau_rise_fast', 'tau_decay_fast', 'n_fast', 'amp_slow', 'tau_rise_slow', 'tau_decay_slow', 'n_slow', 't_peak']
+
+Notes:
+ - Use `event_model` (preferred) or `model` (backwards-compatible alias) in the `options` dict.
+ - Some models accept extra model-specific settings (e.g. `n_coop` for cooperative models).
+
+Decay progression modes (options['decay_progression_mode']):
+ - 'fixed'         : a single tau_d applied to whole train (median)
+ - 'free_monotonic': interpolate per-pulse tau_d non-decreasingly
+ - 'linear'        : non-negative linear slope across pulses (default)
+
+Kinetics fit source (options['fit_source']):
+ - 'global'     : fit one template from all trials (recut median) (default)
+ - 'average'    : fit kinetics on the multi-trial average trace
+ - 'individual' : fit kinetics per trial then aggregate (median)
+
+Examples (usage):
+        options={
+                'event_model': 'cooperative',
+                'decay_progression_mode': 'free_monotonic',
+                'fit_source': 'global',
+                'event_model_settings': {'n_coop': 2.0},
+        }
+
+"""
+
 # Ensure repo root is on sys.path when running this script from the subfolder
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
 if REPO_ROOT not in sys.path:
