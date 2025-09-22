@@ -40,6 +40,9 @@ if REPO_ROOT not in sys.path:
 from Feature_extraction.extract_metrics import extract_metrics
 
 xlsx_path = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Theo_4Ca\20211125_linescan1_20Hz_10pulses_4mMCa_bouton1_traces_converted.xlsx"
+xlsx_path = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Theo_1_5Ca\20220726_linescan3_20Hz_10pulses_1.5mMCa_bouton3_traces_converted.xlsx"
+
+
 out_dir = r"C:\Users\Antoine.Valera\Desktop\Testout"
 os.makedirs(out_dir, exist_ok=True)
 df = pd.read_excel(xlsx_path, sheet_name=0, engine="openpyxl")
@@ -60,14 +63,19 @@ res = extract_metrics(
         'bleach': True,
         # Kinetics source and progression
         'fit_source': 'global',
-        'decay_progression_mode': 'free_monotonic',
-        'model': 'coop_plus_linear',
+        'decay_progression_mode': 'linear',
+        'model': 'two_component',  # backwards-compatible alias
+        'recut_projection': 'robust_mean',  # 'mean'|'median'|'std'
+        'recut_oversample': 20,     # integer >=1
         'plot': {
             'enabled': True,
             'traces': ['raw','savgol','nnls'],  # show all average overlays
             'show_decay': True,
             'trials': True,
-            'baseline': True
+            'baseline': True,
+            'residuals': False,
+            
+
         }
     }
 )

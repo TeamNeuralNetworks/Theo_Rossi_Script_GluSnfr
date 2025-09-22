@@ -57,6 +57,11 @@ def tv_denoise_1d(signal, lambda_tv=1.0, n_iter=100):
 def wavelet_denoise(signal, wavelet="db4", level=None, threshold_factor=1.0):
     """Wavelet denoising with soft thresholding using PyWavelets."""
     x = np.asarray(signal, float)
+    try:
+        import pywt
+    except Exception:
+        # PyWavelets not available — return original signal unchanged
+        return x
     if level is None:
         level = pywt.dwt_max_level(len(x), wavelet)
     coeffs = pywt.wavedec(x, wavelet, level=level)
@@ -422,13 +427,27 @@ def build_median_recut_waveform(
     peak_win_ms=25.0,
     peak_search_pre_ms=2.0,
     stat="median",
+    *,
+    oversample: int = 1,
+    projection: str = "median",
 ):
     """Aggregate waveform across all events after recutting around each stimulus.
 
+    Enhancements:
+      - `oversample`: integer >0. If >1, constructs a finer time grid (dt/oversample)
+        and projects/interpolates each snippet onto that grid before reducing.
+      - `projection`: one of {'mean','median','std'} specifying how to reduce the
+        stack of snippets along the event axis. For backward compatibility, the
+        `stat` parameter is still accepted and maps to the same behavior if
+        provided.
+
     Parameters
     ----------
-    stat : {'median', 'mean'}, optional
-        Reduction to apply across recut snippets, by default ``'median'``.
+    oversample : int
+        Factor by which to refine the time grid. Default 1 (no oversampling).
+    projection : str
+        Reduction to apply across recut snippets: 'mean' | 'median' | 'std'.
+        Default 'median'. `stat` is supported as an alias for older callers.
     """
     time = np.asarray(time, float)
     if time.size < 2 or Y_all is None or np.size(Y_all) == 0:
@@ -436,7 +455,20 @@ def build_median_recut_waveform(
     dt = float(np.median(np.diff(time)))
     pre_s = float(pre_ms) / 1000.0
     post_s = float(post_ms) / 1000.0
-    t_rel = np.arange(-pre_s, post_s + 1e-12, dt)
+
+    # Resolve projection mode with backward-compatible `stat` argument
+    proj = (projection or '').strip().lower()
+    if not proj:
+        proj = (stat or 'median').strip().lower()
+    allowed = {'mean', 'median', 'std', 'max', 'robust_mean'}
+    if proj not in allowed:
+        proj = 'median'
+
+    # Build oversampled relative time grid
+    os_factor = max(1, int(oversample))
+    dt_os = dt / float(os_factor)
+    t_rel = np.arange(-pre_s, post_s + 1e-12, dt_os)
+
     Y_all = np.atleast_2d(Y_all)
     snippets = []
     for st in np.atleast_1d(stim_times):
@@ -453,17 +485,44 @@ def build_median_recut_waveform(
                     pass
             t_win = center + t_rel
             y_win = np.full_like(t_win, np.nan, dtype=float)
+            # Only interpolate points that lie within the original recording time
             m = (t_win >= time[0]) & (t_win <= time[-1])
             if np.any(m):
+                # Project values onto the oversampled grid via interpolation
                 y_win[m] = np.interp(t_win[m], time, y)
             snippets.append(y_win)
+
     if not snippets:
         return None, None
     S = np.vstack(snippets)
     if S.size == 0:
         return None, None
-    if stat == "mean":
+
+    # Reduce across snippets using requested projection
+    if proj == 'mean':
         wave = np.nanmean(S, axis=0)
+    elif proj == 'std':
+        wave = np.nanstd(S, axis=0)
+    elif proj == 'max':
+        wave = np.nanmax(S, axis=0)
+    elif proj == 'robust_mean':
+        # Trim extremes per time point (default 10% trim each side)
+        def trimmed_mean(arr, trim_frac=0.1):
+            a = np.asarray(arr)
+            a = a[np.isfinite(a)]
+            if a.size == 0:
+                return np.nan
+            if trim_frac <= 0 or a.size < 3:
+                return float(np.nanmean(a))
+            lo = int(np.floor(trim_frac * a.size))
+            hi = int(np.ceil((1.0 - trim_frac) * a.size))
+            if hi <= lo:
+                return float(np.nanmean(a))
+            a_sorted = np.sort(a)
+            a_trim = a_sorted[lo:hi]
+            return float(np.nanmean(a_trim))
+
+        wave = np.array([trimmed_mean(S[:, i], trim_frac=0.1) for i in range(S.shape[1])])
     else:
         wave = np.nanmedian(S, axis=0)
     return t_rel, wave

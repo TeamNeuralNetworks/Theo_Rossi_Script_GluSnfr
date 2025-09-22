@@ -127,6 +127,12 @@ DEFAULTS = {
     'decay_progression_mode': 'linear',
 }
 
+# Recut options: oversample factor and projection ('mean'|'median'|'std')
+DEFAULTS.update({
+    'recut_oversample': 1,
+    'recut_projection': 'median',
+})
+
 # Selected kernel (set inside extract_metrics based on options; default is iglusnfr_kernel)
 _KERNEL_FUN = iglusnfr_kernel
 
@@ -823,7 +829,10 @@ def extract_metrics(
             t_rel, avg = build_median_recut_waveform(
                 t, Yd, stim_times, pre_ms=5.0, post_ms=50.0,
                 align_by_peak=align_by_peak,
-                peak_win_ms=25.0, peak_search_pre_ms=0.0, stat="mean"
+                peak_win_ms=25.0, peak_search_pre_ms=0.0,
+                oversample=int(cfg.get('recut_oversample', 1)),
+                projection=str(cfg.get('recut_projection', cfg.get('stat', 'mean'))).lower(),
+                stat="mean",
             )
             if t_rel is None or avg is None:
                 raise ValueError('recut_average unavailable')
@@ -928,8 +937,12 @@ def extract_metrics(
 
     if fit_source == 'global':
         # Match the demo: recut + average all events then fit via curve_fit
-        res = fit_average_event(t, Yd, event_model, stim_times,
-                                align_by_peak=align_by_peak)
+        res = fit_average_event(
+            t, Yd, event_model, stim_times,
+            align_by_peak=align_by_peak,
+            oversample=int(cfg.get('recut_oversample', 1)),
+            projection=str(cfg.get('recut_projection', 'mean')).lower(),
+        )
         if res is None:
             # Fallback to recut median or average grid search
             tr_b, td0_b = _estimate_from_recut_average()

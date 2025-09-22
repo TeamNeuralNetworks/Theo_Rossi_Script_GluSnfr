@@ -23,6 +23,8 @@ def fit_average_event(
     pre_ms: float = 5.0,
     post_ms: float = 50.0,
     align_by_peak: bool = False,
+    oversample: int = 1,
+    projection: str = 'mean',
 ) -> Optional[Tuple[Dict[str, float], np.ndarray, np.ndarray]]:
     """Recut trials, average, and fit an event model.
 
@@ -78,6 +80,8 @@ def fit_average_event(
                 peak_win_ms=25.0,
                 peak_search_pre_ms=0.0,
                 stat="mean",
+                oversample=int(oversample),
+                projection=str(projection).lower(),
             )
             if t_rel_s is None or avg is None:
                 return None
