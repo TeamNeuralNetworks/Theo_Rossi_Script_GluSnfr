@@ -1,4 +1,5 @@
 import os, sys, numpy as np, pandas as pd
+import matplotlib.pyplot as plt
 
 # Ensure repo root is on sys.path when running this script from the subfolder
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
@@ -94,3 +95,8 @@ if per_trial_rows:
 fig = res.get('figure')
 if fig is not None:
     fig.savefig(r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\fiber_plot.png", dpi=150)
+    try:
+        plt.show()
+    except Exception:
+        # If running in an environment without an interactive backend, ignore.
+        pass
