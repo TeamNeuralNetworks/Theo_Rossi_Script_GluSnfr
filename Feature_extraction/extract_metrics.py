@@ -175,13 +175,19 @@ def _fit_single_pulse_amp(
     """
     local_mask = (t >= (stim_time - pre_zoom_s)) & (t <= (stim_time + post_zoom_s))
     if not np.any(local_mask):
-        return 0.0, shift_min_s
+        return 0.0, 0.0
     y_seg = y[local_mask]
-    best_a, best_d = 0.0, shift_min_s
-    shifts = (
-        np.arange(shift_min_s, delta_max_s + 1e-12, delta_step_s)
-        if allow_shift else np.array([shift_min_s])
-    )
+    best_a, best_d = 0.0, 0.0
+    if allow_shift:
+        start = max(float(shift_min_s), 0.0)
+        if delta_max_s > 0 and start <= delta_max_s + 1e-12:
+            pos_shifts = np.arange(start, delta_max_s + 1e-12, delta_step_s)
+            shifts = np.concatenate(([0.0], pos_shifts)) if pos_shifts.size else np.array([0.0])
+        else:
+            shifts = np.array([0.0])
+    else:
+        shifts = np.array([0.0])
+    shifts = np.unique(shifts.astype(float))
     for d in shifts:
         k_full = _KERNEL_FUN(t - (stim_time + d), tau_r_s, tau_d_s)
         k_loc = k_full[local_mask]
@@ -332,7 +338,7 @@ def sample_null_amplitudes_consistent(
     pre_peak_ms: float,
     shift_min_s: float,
     n_samples: int = 1000,
-    seed: int = 0,
+    seed: int = 42,
 ):
     """Null distribution for A1 using the same single‑pulse estimator.
 
@@ -355,9 +361,11 @@ def sample_null_amplitudes_consistent(
     if starts_full.size == 0:
         return np.array([])
     limit = int(min(int(null_sim_max_points), int(n_samples)))
+    rng = np.random.default_rng(seed)
     if starts_full.size > limit:
-        idx = np.linspace(0, starts_full.size - 1, limit).round().astype(int)
-        starts = starts_full[idx]
+        idx_sel = rng.choice(starts_full.size, size=limit, replace=False)
+        idx_sel.sort()
+        starts = starts_full[idx_sel]
     else:
         starts = starts_full
 
@@ -486,7 +494,11 @@ def apply_bleach_correction(
             t, y, mask_quiet, n_iter=4,
             huber_delta=huber_delta, tau_range_factor=tau_range_factor, n_tau=n_tau
         )
-        corrected = y - trend + float(np.nanmedian(y[t < train_start_s]))
+        baseline_sel = y[(t < train_start_s) & np.isfinite(y)]
+        if baseline_sel.size == 0:
+            baseline_sel = y[np.isfinite(y)]
+        baseline_ref = float(np.nanmedian(baseline_sel)) if baseline_sel.size else 0.0
+        corrected = y - trend + baseline_ref
         return corrected
     except Exception:
         return y.copy()
@@ -1111,7 +1123,7 @@ def extract_metrics(
                 allow_shift=allow_shift, delta_max_s=cfg['delta_max_s'], delta_step_s=cfg['delta_step_s'],
                 null_min_post_zoom_s=cfg['null_min_post_zoom_s'], null_sim_max_points=cfg['null_sim_max_points'],
                 peak_window_ms=cfg['peak_window_ms'], peak_avg_points=cfg['peak_avg_points'], pre_peak_ms=cfg['pre_peak_ms'],
-                shift_min_s=cfg['shift_min_s'], n_samples=1000, seed=10_000 + j,
+                shift_min_s=cfg['shift_min_s'], n_samples=1000,
             )
 
         thr1, pfun = baseline_threshold_and_pval(null_amps, null_N, mode=eff_mode)
@@ -1373,15 +1385,22 @@ def extract_metrics(
                 popt = None
                 if _name in {'double_exp','cooperative','bilinear'}:
                     # Use the kinetics selected for this run (tau_r, tau_d0)
+                    # Respect any fitted t_peak so the overlay shifts correctly
+                    t_peak_ms = 0.0
+                    try:
+                        if 'fitted' in locals() and fitted is not None:
+                            t_peak_ms = float(fitted.get('t_peak', 0.0))
+                    except Exception:
+                        t_peak_ms = 0.0
                     if _name == 'double_exp':
                         # [amp, tau_rise(s), tau_decay(s), t_peak(ms)]
-                        pars = [1.0, float(tau_r), float(tau_d0), 0.0]
+                        pars = [1.0, float(tau_r), float(tau_d0), t_peak_ms]
                     elif _name == 'cooperative':
                         n_used = float(cfg.get('event_model_settings', {}).get('n_coop', cfg.get('coop_n', 2.0)))
                         # [amp, tau_rise(s), tau_decay(s), n_coop, t_peak(ms)]
-                        pars = [1.0, float(tau_r), float(tau_d0), n_used, 0.0]
+                        pars = [1.0, float(tau_r), float(tau_d0), n_used, t_peak_ms]
                     else:  # bilinear expects ms values for rise/decay durations
-                        pars = [1.0, float(tau_r)*1000.0, float(tau_d0)*1000.0, 0.0]
+                        pars = [1.0, float(tau_r)*1000.0, float(tau_d0)*1000.0, t_peak_ms]
                     yshape = spec['func'](tf, *pars)
                     denom = float(np.sum(yshape**2)) if np.isfinite(yshape).any() else 0.0
                     amp_ls = float(np.sum(yf*yshape))/denom if denom > 0 else 1.0
