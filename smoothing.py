@@ -430,28 +430,19 @@ def build_median_recut_waveform(
     *,
     oversample: int = 1,
     projection: str = "median",
+    peak_recenter=0,
+    return_snippets: bool = False,
 ):
     """Aggregate waveform across all events after recutting around each stimulus.
 
     Enhancements:
       - `oversample`: integer >0. If >1, constructs a finer time grid (dt/oversample)
         and projects/interpolates each snippet onto that grid before reducing.
-      - `projection`: one of {'mean','median','std'} specifying how to reduce the
-        stack of snippets along the event axis. For backward compatibility, the
-        `stat` parameter is still accepted and maps to the same behavior if
-        provided.
-
-    Parameters
-    ----------
-    oversample : int
-        Factor by which to refine the time grid. Default 1 (no oversampling).
-    projection : str
-        Reduction to apply across recut snippets: 'mean' | 'median' | 'std'.
-        Default 'median'. `stat` is supported as an alias for older callers.
+      - `projection`: one of {'mean','median','std','max','robust_mean'} specifying
+        how to reduce the stack of snippets along the event axis. For backward
+        compatibility, the `stat` parameter is still accepted and maps to the
+        same behavior.
     """
-    time = np.asarray(time, float)
-    if time.size < 2 or Y_all is None or np.size(Y_all) == 0:
-        return None, None
     dt = float(np.median(np.diff(time)))
     pre_s = float(pre_ms) / 1000.0
     post_s = float(post_ms) / 1000.0
@@ -493,10 +484,10 @@ def build_median_recut_waveform(
             snippets.append(y_win)
 
     if not snippets:
-        return None, None
+        return (None, None, None) if return_snippets else (None, None)
     S = np.vstack(snippets)
     if S.size == 0:
-        return None, None
+        return (None, None, None) if return_snippets else (None, None)
 
     # Reduce across snippets using requested projection
     if proj == 'mean':
@@ -525,6 +516,8 @@ def build_median_recut_waveform(
         wave = np.array([trimmed_mean(S[:, i], trim_frac=0.1) for i in range(S.shape[1])])
     else:
         wave = np.nanmedian(S, axis=0)
+    if return_snippets:
+        return t_rel, wave, S
     return t_rel, wave
 
 
@@ -586,6 +579,12 @@ def build_median_recut_figure(
     med_wave,
     fit_curve=None,
     title="Median recut transient",
+    snippets=None,
+    overlay_snippets: bool = True,
+    overlay_alpha: float = 0.12,
+    overlay_max_traces: int = 200,
+    ax=None,
+    plot_median_first: bool = False,
 ):
     """Create a figure showing the median recut waveform.
 
@@ -604,8 +603,35 @@ def build_median_recut_figure(
         return None
 
     import matplotlib.pyplot as plt
-    fig, ax = plt.subplots(figsize=(6, 4))
-    ax.plot(t_rel * 1000.0, med_wave, linewidth=1.6, label="Median")
+    created_fig = False
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(6, 4))
+        created_fig = True
+
+    # Plot order: optionally plot median first then snippets on top
+    if plot_median_first:
+        ax.plot(t_rel * 1000.0, med_wave, linewidth=1.6, label="Median", zorder=1)
+
+    # Optionally overlay individual recut snippets as light gray traces
+    if overlay_snippets and snippets is not None:
+        try:
+            S = np.asarray(snippets)
+            ntr = S.shape[0]
+            if ntr > 0:
+                # Subsample traces if there are too many
+                step = max(1, int(np.ceil(ntr / max(1, overlay_max_traces))))
+                idx = np.arange(0, ntr, step)
+                for i in idx:
+                    ax.plot(t_rel * 1000.0, S[i, :], color="0.35", linewidth=0.6, alpha=overlay_alpha, zorder=2)
+        except Exception:
+            pass
+
+    if not plot_median_first:
+        ax.plot(t_rel * 1000.0, med_wave, linewidth=1.6, label="Median", zorder=3)
+
+    # Ensure we return a Figure object regardless of whether we created one
+    if not created_fig:
+        fig = ax.figure
 
     if fit_curve is not None:
         ax.plot(

@@ -67,6 +67,8 @@ res = extract_metrics(
         'model': 'two_component',  # backwards-compatible alias
         'recut_projection': 'robust_mean',  # 'mean'|'median'|'std'
         'recut_oversample': 20,     # integer >=1
+        'recut_peak_recenter': 3,   # integer >=0; 0=none, else window in ms
+        'recut_snippets': True,
         'plot': {
             'enabled': True,
             'traces': ['raw','savgol','nnls'],  # show all average overlays
@@ -133,9 +135,57 @@ if per_trial_rows:
 # Save plot if enabled
 fig = res.get('figure')
 if fig is not None:
-    fig.savefig(r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\fiber_plot.png", dpi=150)
+    # If the recutter returned snippets, ensure overlay is enabled in the figure
+    try:
+        fig.savefig(r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\fiber_plot.png", dpi=150)
+    except Exception:
+        pass
     try:
         plt.show()
     except Exception:
-        # If running in an environment without an interactive backend, ignore.
         pass
+
+# If recut snippets were returned, create an overlay figure using the smoothing helper
+try:
+    snips = res.get('recut_snippets')
+    t_rel_rec = res.get('recut_t_rel')
+    avg_rec = res.get('recut_avg')
+    if snips is not None and t_rel_rec is not None and avg_rec is not None:
+        from smoothing import build_median_recut_figure
+        # If the main figure exists and has axes, plot recut overlay into its first subplot
+        try:
+            ax_target = None
+            if fig is not None:
+                axes = getattr(fig, 'axes', None)
+                if axes:
+                    ax_target = axes[0]
+            # Build recut figure into existing axes (plot median first so it controls the visual)
+            fig2 = build_median_recut_figure(t_rel_rec, avg_rec, snippets=snips, ax=ax_target, plot_median_first=True)
+            try:
+                # If fig2 is the same as fig (we plotted into existing axes), save the main fig
+                outpath = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\fiber_recuts_overlay.png"
+                saved_fig = None
+                if fig is not None and getattr(fig, 'axes', None) and fig.axes[0] is ax_target:
+                    fig.savefig(outpath, dpi=150)
+                    saved_fig = fig
+                else:
+                    fig2.savefig(outpath, dpi=150)
+                    saved_fig = fig2
+                print('[demo] saved overlay to', outpath)
+                # Ensure the displayed figure is updated (refresh canvas)
+                try:
+                    if saved_fig is not None:
+                        saved_fig.canvas.draw()
+                        plt.pause(0.001)
+                except Exception:
+                    pass
+            except Exception as e:
+                print('[demo] failed saving overlay:', e)
+            try:
+                plt.show()
+            except Exception:
+                pass
+        except Exception as e:
+            print('[demo] error building overlay:', e)
+except Exception:
+    pass

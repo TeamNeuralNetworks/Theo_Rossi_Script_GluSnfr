@@ -131,6 +131,7 @@ DEFAULTS = {
 DEFAULTS.update({
     'recut_oversample': 1,
     'recut_projection': 'median',
+    'recut_peak_recenter': 0,
 })
 
 # Selected kernel (set inside extract_metrics based on options; default is iglusnfr_kernel)
@@ -822,20 +823,57 @@ def extract_metrics(
 
     # Average trace and kinetics
     y_avg = np.nanmean(Yd, axis=1)
+    # Optional: store recut snippets for plotting/diagnostics
+    recut_snippets = None
+    recut_t_rel = None
+    recut_avg = None
 
     # Helper: estimate base kinetics from recut average of all trials/events
     def _estimate_from_recut_average():
         try:
-            t_rel, avg = build_median_recut_waveform(
-                t, Yd, stim_times, pre_ms=5.0, post_ms=50.0,
-                align_by_peak=align_by_peak,
-                peak_win_ms=25.0, peak_search_pre_ms=0.0,
-                oversample=int(cfg.get('recut_oversample', 1)),
-                projection=str(cfg.get('recut_projection', cfg.get('stat', 'mean'))).lower(),
-                stat="mean",
+            # Honor explicit top-level option 'recut_snippets' (preferred) and
+            # also accept legacy 'return_snippets' for backward compatibility.
+            need_snips = bool(
+                cfg.get('plot', {}).get('enabled', False)
+                or cfg.get('recut_snippets', False)
+                or cfg.get('return_snippets', False)
             )
+            if need_snips:
+                print('[recut] need_snips=True; calling build_median_recut_waveform with return_snippets=True')
+                t_rel, avg, snippets = build_median_recut_waveform(
+                    t, Yd, stim_times, pre_ms=5.0, post_ms=50.0,
+                    align_by_peak=align_by_peak,
+                    peak_win_ms=25.0, peak_search_pre_ms=0.0,
+                    oversample=int(cfg.get('recut_oversample', 1)),
+                    projection=str(cfg.get('recut_projection', cfg.get('stat', 'mean'))).lower(),
+                    stat="mean",
+                    peak_recenter=cfg.get('recut_peak_recenter', 0),
+                    return_snippets=True,
+                )
+                print('[recut] returned', 't_rel=', None if t_rel is None else getattr(t_rel, 'shape', type(t_rel)),
+                      'avg=', None if avg is None else getattr(avg, 'shape', type(avg)),
+                      'snippets=', None if snippets is None else getattr(snippets, 'shape', type(snippets)))
+            else:
+                print('[recut] need_snips=False; calling build_median_recut_waveform without snippets')
+                t_rel, avg = build_median_recut_waveform(
+                    t, Yd, stim_times, pre_ms=5.0, post_ms=50.0,
+                    align_by_peak=align_by_peak,
+                    peak_win_ms=25.0, peak_search_pre_ms=0.0,
+                    oversample=int(cfg.get('recut_oversample', 1)),
+                    projection=str(cfg.get('recut_projection', cfg.get('stat', 'mean'))).lower(),
+                    stat="mean",
+                    peak_recenter=cfg.get('recut_peak_recenter', 0),
+                )
+                print('[recut] returned', 't_rel=', None if t_rel is None else getattr(t_rel, 'shape', type(t_rel)),
+                      'avg=', None if avg is None else getattr(avg, 'shape', type(avg)))
             if t_rel is None or avg is None:
                 raise ValueError('recut_average unavailable')
+            # Capture snippets and recut outputs for outer scope plotting if returned
+            nonlocal recut_snippets, recut_t_rel, recut_avg
+            recut_t_rel = t_rel
+            recut_avg = avg
+            if 'snippets' in locals():
+                recut_snippets = snippets
             # Grid search on (tau_r, tau_d0) using current kernel
             tau_r_grid = np.array(cfg['kin_taur_grid_ms'], float) / 1000.0
             tau_d0_grid = np.array(cfg['kin_taud0_grid_ms'], float) / 1000.0
@@ -937,11 +975,18 @@ def extract_metrics(
 
     if fit_source == 'global':
         # Match the demo: recut + average all events then fit via curve_fit
+        # Determine whether downstream helpers should return snippets
+        need_snips = bool(
+            cfg.get('plot', {}).get('enabled', False)
+            or cfg.get('recut_snippets', False)
+            or cfg.get('return_snippets', False)
+        )
         res = fit_average_event(
             t, Yd, event_model, stim_times,
             align_by_peak=align_by_peak,
             oversample=int(cfg.get('recut_oversample', 1)),
             projection=str(cfg.get('recut_projection', 'mean')).lower(),
+            return_snippets=need_snips,
         )
         if res is None:
             # Fallback to recut median or average grid search
@@ -957,6 +1002,19 @@ def extract_metrics(
             y_avg_evt = y_avg
         else:
             fitted, t_avg_evt, y_avg_evt = res
+            # If the fit helper attached recut outputs to the params dict, capture them
+            try:
+                if isinstance(fitted, dict) and '_recut' in fitted:
+                    t_rel_s, avg_s, snippets_s = fitted.pop('_recut')
+                    recut_t_rel = t_rel_s
+                    recut_avg = avg_s
+                    recut_snippets = snippets_s
+                    print('[recut] extracted recut data from fit_average_event; shapes ->',
+                          getattr(recut_t_rel, 'shape', type(recut_t_rel)),
+                          getattr(recut_avg, 'shape', type(recut_avg)),
+                          getattr(recut_snippets, 'shape', type(recut_snippets)))
+            except Exception:
+                pass
             tau_r = float(fitted.get('tau_rise', np.nan))
             tau_d0 = float(fitted.get('tau_decay', np.nan))
             event_t0_s = float(fitted.get('t_peak', 0.0)) / 1000.0
@@ -1568,6 +1626,9 @@ def extract_metrics(
             'y_avg': np.asarray(y_avg, float),
             'yhat_avg': np.asarray(yhat_avg, float),
         },
+        'recut_snippets': recut_snippets,
+        'recut_t_rel': np.asarray(recut_t_rel, float) if recut_t_rel is not None else None,
+        'recut_avg': np.asarray(recut_avg, float) if recut_avg is not None else None,
         'per_trial': per_trial,
         'time_s': np.asarray(t, float),
         'threshold_amp1': np.asarray(thr_list, float),

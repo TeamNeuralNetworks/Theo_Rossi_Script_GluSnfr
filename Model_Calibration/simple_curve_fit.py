@@ -25,6 +25,8 @@ def fit_average_event(
     align_by_peak: bool = False,
     oversample: int = 1,
     projection: str = 'mean',
+    peak_recenter=0,
+    return_snippets: bool = False,
 ) -> Optional[Tuple[Dict[str, float], np.ndarray, np.ndarray]]:
     """Recut trials, average, and fit an event model.
 
@@ -70,7 +72,7 @@ def fit_average_event(
                 if REPO_ROOT not in sys.path:
                     sys.path.insert(0, REPO_ROOT)
                 from smoothing import build_median_recut_waveform  # type: ignore
-            t_rel_s, avg = build_median_recut_waveform(
+            res = build_median_recut_waveform(
                 time,
                 data,
                 stim_times_s,
@@ -82,7 +84,14 @@ def fit_average_event(
                 stat="mean",
                 oversample=int(oversample),
                 projection=str(projection).lower(),
+                peak_recenter=peak_recenter,
+                return_snippets=bool(return_snippets),
             )
+            # Unpack depending on whether snippets were returned
+            if return_snippets:
+                t_rel_s, avg, snippets = res
+            else:
+                t_rel_s, avg = res
             if t_rel_s is None or avg is None:
                 return None
             t_ms = np.asarray(t_rel_s, float) * 1000.0
@@ -106,6 +115,14 @@ def fit_average_event(
             spec['func'], tf, yf, p0=p0, bounds=spec['bounds'], maxfev=maxfev
         )
         params = {name: float(val) for name, val in zip(spec['params'], popt)}
+        # If caller requested recut snippets, attach them to the params dict
+        # so callers that call this helper via the pipeline can access them
+        # without changing the function's primary return signature.
+        try:
+            if return_snippets and 'snippets' in locals() and 't_rel_s' in locals() and 'avg' in locals():
+                params['_recut'] = (t_rel_s, avg, snippets)
+        except Exception:
+            pass
         return params, t_ms, y_avg
     except Exception:
         return None
