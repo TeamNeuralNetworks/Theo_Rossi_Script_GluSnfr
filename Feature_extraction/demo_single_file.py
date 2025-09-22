@@ -171,7 +171,6 @@ try:
                 else:
                     fig2.savefig(outpath, dpi=150)
                     saved_fig = fig2
-                print('[demo] saved overlay to', outpath)
                 # Ensure the displayed figure is updated (refresh canvas)
                 try:
                     if saved_fig is not None:
@@ -179,13 +178,13 @@ try:
                         plt.pause(0.001)
                 except Exception:
                     pass
-            except Exception as e:
-                print('[demo] failed saving overlay:', e)
+            except Exception:
+                pass
             try:
                 plt.show()
             except Exception:
                 pass
-        except Exception as e:
-            print('[demo] error building overlay:', e)
+        except Exception:
+            pass
 except Exception:
     pass

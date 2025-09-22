@@ -839,7 +839,6 @@ def extract_metrics(
                 or cfg.get('return_snippets', False)
             )
             if need_snips:
-                print('[recut] need_snips=True; calling build_median_recut_waveform with return_snippets=True')
                 t_rel, avg, snippets = build_median_recut_waveform(
                     t, Yd, stim_times, pre_ms=5.0, post_ms=50.0,
                     align_by_peak=align_by_peak,
@@ -850,11 +849,7 @@ def extract_metrics(
                     peak_recenter=cfg.get('recut_peak_recenter', 0),
                     return_snippets=True,
                 )
-                print('[recut] returned', 't_rel=', None if t_rel is None else getattr(t_rel, 'shape', type(t_rel)),
-                      'avg=', None if avg is None else getattr(avg, 'shape', type(avg)),
-                      'snippets=', None if snippets is None else getattr(snippets, 'shape', type(snippets)))
             else:
-                print('[recut] need_snips=False; calling build_median_recut_waveform without snippets')
                 t_rel, avg = build_median_recut_waveform(
                     t, Yd, stim_times, pre_ms=5.0, post_ms=50.0,
                     align_by_peak=align_by_peak,
@@ -864,8 +859,6 @@ def extract_metrics(
                     stat="mean",
                     peak_recenter=cfg.get('recut_peak_recenter', 0),
                 )
-                print('[recut] returned', 't_rel=', None if t_rel is None else getattr(t_rel, 'shape', type(t_rel)),
-                      'avg=', None if avg is None else getattr(avg, 'shape', type(avg)))
             if t_rel is None or avg is None:
                 raise ValueError('recut_average unavailable')
             # Capture snippets and recut outputs for outer scope plotting if returned
@@ -1009,10 +1002,6 @@ def extract_metrics(
                     recut_t_rel = t_rel_s
                     recut_avg = avg_s
                     recut_snippets = snippets_s
-                    print('[recut] extracted recut data from fit_average_event; shapes ->',
-                          getattr(recut_t_rel, 'shape', type(recut_t_rel)),
-                          getattr(recut_avg, 'shape', type(recut_avg)),
-                          getattr(recut_snippets, 'shape', type(recut_snippets)))
             except Exception:
                 pass
             tau_r = float(fitted.get('tau_rise', np.nan))
