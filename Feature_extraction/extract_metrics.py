@@ -125,6 +125,10 @@ DEFAULTS = {
     #  - 'free_monotonic': interpolate between first and last τd, non-decreasing
     #  - 'linear': non-negative slope linear regression across pulses
     'decay_progression_mode': 'linear',
+    # NNLS weight control
+    'nnls_weight_mode': 'uniform',  # 'uniform', 'linear', 'exponential'
+    'nnls_weight_tau_s': None,  # Time constant for exponential or slope for linear (auto if None)
+    'nnls_show_weights': False,  # Display weight pattern for the train
 }
 
 # Recut options: oversample factor and projection ('mean'|'median'|'std')
@@ -142,6 +146,78 @@ _KERNEL_FUN = iglusnfr_kernel
 # Small utilities
 # -------------------------
 
+def _calculate_nnls_weights(
+    t: np.ndarray, 
+    stim_times: np.ndarray, 
+    isi: float,
+    weight_mode: str = 'uniform',
+    weight_tau_s: Optional[float] = None
+) -> np.ndarray:
+    """
+    Calculate weights for NNLS fitting based on weight_mode.
+    
+    Args:
+        t: Time array
+        stim_times: Stimulus times array  
+        isi: Inter-stimulus interval in seconds
+        weight_mode: 'uniform', 'linear', or 'exponential'
+        weight_tau_s: Time constant for exponential decay or linear slope (in seconds)
+        
+    Returns:
+        weights: Array same length as t with weights for each timepoint
+    """
+    weights = np.ones_like(t)
+    
+    if weight_mode == 'uniform':
+        return weights
+    
+    elif weight_mode == 'linear':
+        tau = weight_tau_s if weight_tau_s is not None else isi
+        for i, stim_t in enumerate(stim_times):
+            # Find next stimulus time (or end of trace)
+            if i < len(stim_times) - 1:
+                next_stim_t = stim_times[i + 1]
+            else:
+                # For last stimulus, use same interval as previous
+                if len(stim_times) > 1:
+                    next_stim_t = stim_t + (stim_times[-1] - stim_times[-2])
+                else:
+                    next_stim_t = stim_t + isi
+            
+            # Create linear decay from 1 to 0 over the interval
+            mask = (t >= stim_t) & (t < next_stim_t)
+            if np.any(mask):
+                t_rel = t[mask] - stim_t
+                duration = next_stim_t - stim_t
+                # Linear decay with controllable slope
+                slope_factor = tau / duration  # tau controls how steep the decay is
+                decay = 1.0 - (t_rel / duration) * slope_factor
+                weights[mask] = np.maximum(decay, 0.0)  # Clip at 0
+                
+    elif weight_mode == 'exponential':
+        tau = weight_tau_s if weight_tau_s is not None else 0.010  # Default 10ms
+        for i, stim_t in enumerate(stim_times):
+            # Find next stimulus time (or end of trace) 
+            if i < len(stim_times) - 1:
+                next_stim_t = stim_times[i + 1]
+            else:
+                if len(stim_times) > 1:
+                    next_stim_t = stim_t + (stim_times[-1] - stim_times[-2])
+                else:
+                    next_stim_t = stim_t + isi
+            
+            # Create exponential decay
+            mask = (t >= stim_t) & (t < next_stim_t)
+            if np.any(mask):
+                t_rel = t[mask] - stim_t
+                weights[mask] = np.exp(-t_rel / tau)
+    
+    else:
+        raise ValueError(f"Unknown weight_mode: {weight_mode}")
+    
+    return weights
+
+
 def _nnls_irls_singlecol(y: np.ndarray, k: np.ndarray, *, robust: bool, huber_delta: float, iters: int) -> float:
     """Single‑column NNLS with optional Huber IRLS (amplitude ≥ 0)."""
     a = max(0.0, nnls(k[:, None], y)[0][0])
@@ -156,6 +232,29 @@ def _nnls_irls_singlecol(y: np.ndarray, k: np.ndarray, *, robust: bool, huber_de
         yw = y * Wsqrt
         a = max(0.0, nnls(kw[:, None], yw)[0][0])
     return float(a)
+
+
+def _nnls_weighted(X: np.ndarray, y: np.ndarray, weights: np.ndarray) -> np.ndarray:
+    """
+    Weighted NNLS solver.
+    
+    Args:
+        X: Design matrix (n_timepoints, n_pulses)
+        y: Target vector (n_timepoints,)
+        weights: Weight vector (n_timepoints,)
+        
+    Returns:
+        amplitudes: Non-negative amplitudes (n_pulses,)
+    """
+    if X.size == 0:
+        return np.zeros(X.shape[1] if X.ndim > 1 else 0)
+    
+    # Apply weights by scaling both X and y
+    Wsqrt = np.sqrt(weights)
+    X_weighted = X * Wsqrt[:, None]
+    y_weighted = y * Wsqrt
+    
+    return np.maximum(0.0, nnls(X_weighted, y_weighted)[0])
 
 
 def _fit_single_pulse_amp(
@@ -525,17 +624,27 @@ def estimate_kinetics_from_average(
     slope_grid_ms,
     pre_zoom_s: float,
     post_zoom_s: float,
+    isi: float = 0.05,
+    weight_mode: str = 'uniform',
+    weight_tau_s: Optional[float] = None,
 ) -> Tuple[float, float, float, np.ndarray]:
     """Grid search τr, τd0, slope on the average trace (zoomed window)."""
     tau_r_grid = np.array(taur_grid_ms, float) / 1000.0
     tau_d0_grid = np.array(taud0_grid_ms, float) / 1000.0
     slope_grid = np.array(slope_grid_ms, float) / 1000.0
-    isi_guess = float(stim_times[1] - stim_times[0]) if len(stim_times) > 1 else 0.05
+    isi_guess = float(stim_times[1] - stim_times[0]) if len(stim_times) > 1 else isi
     zmask, _, _ = time_zoom_mask(t, float(stim_times[0]), isi_guess, len(stim_times), pre_zoom_s, post_zoom_s)
+
+    # Calculate weights for NNLS fitting
+    weights = _calculate_nnls_weights(t, stim_times, isi_guess, weight_mode, weight_tau_s)
 
     def obj_for(tau_r, tau_d_vec):
         X = np.column_stack([_KERNEL_FUN(t - st, tau_r, td) for st, td in zip(stim_times, tau_d_vec)])
-        a = np.maximum(0.0, nnls(X[zmask, :], y_avg[zmask])[0]) if X.size else np.zeros(len(stim_times))
+        if X.size == 0:
+            a = np.zeros(len(stim_times))
+        else:
+            # Use weighted NNLS
+            a = _nnls_weighted(X[zmask, :], y_avg[zmask], weights[zmask])
         r = y_avg - X @ a
         return float(np.dot(r[zmask], r[zmask]) / max(1, zmask.sum()))
 
@@ -821,6 +930,20 @@ def extract_metrics(
 
     # No auto model selection: honor explicit event_model; otherwise use default.
 
+    # Process NNLS weight configuration
+    weight_mode = str(cfg.get('nnls_weight_mode', 'uniform')).strip().lower()
+    weight_tau_s = cfg.get('nnls_weight_tau_s', None)
+    if weight_tau_s is not None:
+        weight_tau_s = float(weight_tau_s)
+    elif weight_mode == 'linear':
+        weight_tau_s = float(isi)  # Default linear decay uses ISI
+    elif weight_mode == 'exponential':
+        if cfg.get('fit_source', 'global') == 'global':
+            # Will be set later from tau_d when available
+            weight_tau_s = 0.010  # Default 10ms until tau_d is estimated
+        else:
+            weight_tau_s = 0.010  # Default 10ms for other modes
+
     # Average trace and kinetics
     y_avg = np.nanmean(Yd, axis=1)
     # Optional: store recut snippets for plotting/diagnostics
@@ -988,7 +1111,8 @@ def extract_metrics(
                 tr_b, td0_b, slope, tau_d_vec0 = estimate_kinetics_from_average(
                     t, y_avg, stim_times,
                     taur_grid_ms=cfg['kin_taur_grid_ms'], taud0_grid_ms=cfg['kin_taud0_grid_ms'],
-                    slope_grid_ms=cfg['kin_slope_grid_ms'], pre_zoom_s=cfg['pre_zoom_s'], post_zoom_s=cfg['post_zoom_s']
+                    slope_grid_ms=cfg['kin_slope_grid_ms'], pre_zoom_s=cfg['pre_zoom_s'], post_zoom_s=cfg['post_zoom_s'],
+                    isi=isi, weight_mode=cfg['nnls_weight_mode'], weight_tau_s=weight_tau_s
                 )
             tau_r = float(tr_b); tau_d0 = float(td0_b)
             t_avg_evt = (t - float(train_start)) * 1000.0
@@ -1041,7 +1165,8 @@ def extract_metrics(
                 trj, td0j, slopej, tdvecj = estimate_kinetics_from_average(
                     t, Yd[:, j], stim_times,
                     taur_grid_ms=cfg['kin_taur_grid_ms'], taud0_grid_ms=cfg['kin_taud0_grid_ms'],
-                    slope_grid_ms=cfg['kin_slope_grid_ms'], pre_zoom_s=cfg['pre_zoom_s'], post_zoom_s=cfg['post_zoom_s']
+                    slope_grid_ms=cfg['kin_slope_grid_ms'], pre_zoom_s=cfg['pre_zoom_s'], post_zoom_s=cfg['post_zoom_s'],
+                    isi=isi, weight_mode=weight_mode, weight_tau_s=weight_tau_s
                 )
                 tau_rs.append(trj)
                 tau_d_mat.append(tdvecj)
@@ -1060,7 +1185,8 @@ def extract_metrics(
         tau_r, tau_d0, slope, tau_d_vec0 = estimate_kinetics_from_average(
             t, y_avg, stim_times,
             taur_grid_ms=cfg['kin_taur_grid_ms'], taud0_grid_ms=cfg['kin_taud0_grid_ms'],
-            slope_grid_ms=cfg['kin_slope_grid_ms'], pre_zoom_s=cfg['pre_zoom_s'], post_zoom_s=cfg['post_zoom_s']
+            slope_grid_ms=cfg['kin_slope_grid_ms'], pre_zoom_s=cfg['pre_zoom_s'], post_zoom_s=cfg['post_zoom_s'],
+            isi=isi, weight_mode=weight_mode, weight_tau_s=weight_tau_s
         )
         # For linear/monotonic, also anchor to the last event using the average trace
         if dec_mode in ('linear','free_monotonic'):
@@ -1070,6 +1196,11 @@ def extract_metrics(
         tau_r, tau_d_vec = _apply_progression(tau_r, tau_d_vec0, tau_d_vec0[0])
         if is_varying_model:
             progress_print(f"[fit] source=average | τd0={tau_d_vec[0]*1000:.2f}ms → τdN={tau_d_vec[-1]*1000:.2f}ms | mode={dec_mode}")
+
+    # Update exponential weight tau if using global fit_source and auto tau
+    if (weight_mode == 'exponential' and cfg.get('nnls_weight_tau_s', None) is None 
+        and cfg.get('fit_source', 'global') == 'global'):
+        weight_tau_s = float(tau_d_vec[0])  # Use estimated tau_d
 
     # Print the τd vector to be used for constrained refitting
     try:
@@ -1408,6 +1539,40 @@ def extract_metrics(
                     figures_trials.append(fig_r)
                 except Exception:
                     pass
+
+    # Optional: weight visualization
+    if cfg.get('nnls_show_weights', False) and want_plot:
+        try:
+            # Calculate weights for visualization
+            weights = _calculate_nnls_weights(t, stim_times, isi, weight_mode, weight_tau_s)
+            
+            # Create weight plot
+            plt.figure(figsize=(10, 4))
+            plt.plot(t, weights, 'b-', linewidth=2, label=f'Weights ({weight_mode})')
+            
+            # Mark stimulus times
+            for i, st in enumerate(stim_times):
+                plt.axvline(st, color='red', linestyle='--', alpha=0.7, label='Stimuli' if i == 0 else "")
+            
+            plt.xlabel('Time (s)')
+            plt.ylabel('Weight')
+            plt.title(f'NNLS Weight Pattern: {weight_mode.capitalize()}')
+            if weight_tau_s is not None:
+                plt.title(f'NNLS Weight Pattern: {weight_mode.capitalize()} (τ={weight_tau_s*1000:.1f}ms)')
+            plt.legend()
+            plt.grid(True, alpha=0.3)
+            
+            # Zoom to train region
+            train_duration = (stim_times[-1] - stim_times[0]) * 1.5
+            plt.xlim(stim_times[0] - train_duration * 0.2, stim_times[-1] + train_duration * 0.5)
+            
+            plt.tight_layout()
+            try:
+                plt.show(block=False); plt.pause(0.05)
+            except Exception:
+                pass
+        except Exception as e:
+            print(f"[warning] Failed to plot weights: {e}")
 
     # Optional: average plot with a left event-fit panel (0–30 ms) + right main plot
     figure = None

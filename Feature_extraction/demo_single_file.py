@@ -22,11 +22,23 @@ Kinetics fit source (options['fit_source']):
  - 'average'    : fit kinetics on the multi-trial average trace
  - 'individual' : fit kinetics per trial then aggregate (median)
 
+NNLS weight control (options['nnls_weight_mode']):
+ - 'uniform'     : all timepoints have equal weight (default)
+ - 'linear'      : weights decrease linearly from 1 to 0 between each stim and next
+ - 'exponential' : exponential decay weights for each event
+
+NNLS weight time constant (options['nnls_weight_tau_s']):
+ - None (auto)   : uses ISI for linear, tau_d for exponential in global mode
+ - float         : explicit time constant in seconds
+
 Examples (usage):
         options = {
                 'event_model': 'cooperative',
                 'decay_progression_mode': 'free_monotonic',
                 'fit_source': 'global',
+                'nnls_weight_mode': 'exponential',
+                'nnls_weight_tau_s': 0.015,  # 15ms decay
+                'nnls_show_weights': True,
                 'event_model_settings': {'n_coop': 2.0},
         }
 
@@ -40,7 +52,7 @@ if REPO_ROOT not in sys.path:
 from Feature_extraction.extract_metrics import extract_metrics
 
 xlsx_path = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Theo_4Ca\20211125_linescan1_20Hz_10pulses_4mMCa_bouton1_traces_converted.xlsx"
-xlsx_path = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Theo_1_5Ca\20220726_linescan3_20Hz_10pulses_1.5mMCa_bouton3_traces_converted.xlsx"
+#xlsx_path = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Theo_1_5Ca\20220726_linescan3_20Hz_10pulses_1.5mMCa_bouton3_traces_converted.xlsx"
 
 
 out_dir = r"C:\Users\Antoine.Valera\Desktop\Testout"
@@ -64,20 +76,22 @@ res = extract_metrics(
         # Kinetics source and progression
         'fit_source': 'global',
         'decay_progression_mode': 'linear',
-        'model': 'two_component',  # backwards-compatible alias
+        'model': 'double_exp',  # backwards-compatible alias
         'recut_projection': 'robust_mean',  # 'mean'|'median'|'std'
-        'recut_oversample': 20,     # integer >=1
-        'recut_peak_recenter': 3,   # integer >=0; 0=none, else window in ms
+        'recut_oversample': 5,     # integer >=1
+        'recut_peak_recenter': 0,   # integer >=0; 0=none, else window in ms
         'recut_snippets': True,
+        # NNLS weight control options
+        'nnls_weight_mode': 'exponential',  # 'uniform', 'linear', 'exponential'
+        'nnls_weight_tau_s': 0.008,  # Auto: uses ISI for linear, tau_d for exponential in global mode
+        'nnls_show_weights': True,  # Display weight pattern
         'plot': {
             'enabled': True,
             'traces': ['raw','savgol','nnls'],  # show all average overlays
             'show_decay': True,
             'trials': True,
             'baseline': True,
-            'residuals': False,
-            
-
+            'residuals': False,         
         }
     }
 )
@@ -171,6 +185,7 @@ try:
                 else:
                     fig2.savefig(outpath, dpi=150)
                     saved_fig = fig2
+                print('[demo] saved overlay to', outpath)
                 # Ensure the displayed figure is updated (refresh canvas)
                 try:
                     if saved_fig is not None:
@@ -178,13 +193,13 @@ try:
                         plt.pause(0.001)
                 except Exception:
                     pass
-            except Exception:
-                pass
+            except Exception as e:
+                print('[demo] failed saving overlay:', e)
             try:
                 plt.show()
             except Exception:
                 pass
-        except Exception:
-            pass
+        except Exception as e:
+            print('[demo] error building overlay:', e)
 except Exception:
     pass
