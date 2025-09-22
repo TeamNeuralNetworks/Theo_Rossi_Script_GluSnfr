@@ -10,6 +10,25 @@ It combines three complementary pieces:
 
 See `PROCESSING_README.md` for end‑to‑end recipes using existing demo scripts and copied code snippets.
 
+## Model suitability for biphasic (fast + slow) waveforms
+
+Models that are explicitly multi-component or have two clear decay terms will fit a fast + slow (double-exponential) waveform well; single-timescale / single-shape models will struggle.
+
+- Good choices (can capture a fast component + slower decay):
+  - `double_exp` — explicit two-exponential form (best match)
+  - `two_component` / `two_component_shared_rise` — explicit fast + slow amplitude/tau
+  - `double_cooperative` / cooperative variants — two-component cooperative forms
+  - `diffusion_clearance` — has two clearance taus + fraction (can produce biphasic decay)
+  - `binding_kinetics` — can show multi-timescale behaviour depending on kon/koff/tau_clear
+
+- Models that will struggle (poor fit for a true double exponential):
+  - `single_exp` — single tau_decay only
+  - `alpha` — single timescale (alpha-function shape)
+  - `gamma` — single dominant time constant (shape parameter controls onset)
+  - `cooperative` (coop) — nonlinear amplitude but single tau_decay
+  - `bilinear` — piecewise linear rise/decay, won't reproduce exponential tails accurately
+  - `coop_plus_linear` / `desensitization` — add other dynamics but not two independent exponential decay terms
+
 ## Repository Layout
 
 - Feature extraction:

@@ -4,48 +4,9 @@ import matplotlib.pyplot as plt
 """
 Compact model & options reference (from `Model_Calibration/event_models.py`)
 
-Canonical models (accepted aliases) and their fit parameter names:
- - 'double_exp'  (aliases: 'double','double-exponential','biexp')
-     params: ['amp', 'tau_rise', 'tau_decay', 't_peak']
-
- - 'cooperative' (aliases: 'coop','cooperative_binding')
-     params: ['amp', 'tau_rise', 'tau_decay', 'n_coop', 't_peak']
-
- - 'single_exp'  (aliases: 'single','single-exponential')
-     params: ['amp', 'tau_decay', 't_peak']
-
- - 'alpha'
-     params: ['amp', 'tau', 't_peak']
-
- - 'gamma'
-     params: ['amp', 'n', 'tau', 't_peak']
-
- - 'bilinear'
-     params: ['amp', 't_rise', 't_decay', 't_peak']
-
- - 'binding_kinetics' (alias: 'binding')
-     params: ['amp', 'kon', 'koff', 'tau_clear', 't_peak']
-
- - 'two_component' (aliases: 'two-component','two_component_shared_rise')
-     params: ['amp_fast', 'tau_rise', 'tau_fast', 'amp_slow', 'tau_slow', 't_peak']
-
- - 'desensitization' (aliases: 'desens')
-     params: ['amp', 'tau_rise', 'tau_decay', 'tau_recovery', 'desens_factor', 't_peak']
-
- - 'coop_plus_linear' (alias: 'cooperative_plus_linear')
-     params: ['amp_coop', 'tau_rise_coop', 'tau_decay_coop', 'n_coop', 'amp_linear', 'tau_decay_linear', 't_peak']
-
- - 'diffusion_clearance' (alias: 'diffusion')
-     params: ['amp', 'tau_diff', 'tau_clear1', 'tau_clear2', 'frac_clear1', 't_peak']
-
- - 'double_cooperative' (alias: 'double_coop')
-     params: ['amp', 'tau_rise1', 'tau_decay1', 'n1', 'tau_rise2', 'tau_decay2', 'n2', 't_peak']
-
- - 'hetero_coop' (alias: 'heterogeneous_cooperative')
-     params: ['amp', 'tau_rise1', 'tau_decay1', 'n1', 'frac1', 'tau_rise2', 'tau_decay2', 'n2', 't_peak']
-
- - 'two_comp_coop' (alias: 'two_component_cooperative')
-     params: ['amp_fast', 'tau_rise_fast', 'tau_decay_fast', 'n_fast', 'amp_slow', 'tau_rise_slow', 'tau_decay_slow', 'n_slow', 't_peak']
+For a full list of canonical models, aliases, and parameter names see
+`Model_Calibration/event_models.py`. Common models include `double_exp`,
+`two_component`, `binding_kinetics`, `cooperative`, and `single_exp`.
 
 Notes:
  - Use `event_model` (preferred) or `model` (backwards-compatible alias) in the `options` dict.
@@ -91,7 +52,7 @@ trials = _trials[valid, :]
 
 res = extract_metrics(
     time, trials,
-    train_start=0.5-0.001,   # seconds
+    train_start=0.5,   # seconds
     isi=0.05,          # seconds
     n_pulses=10,
     options={
