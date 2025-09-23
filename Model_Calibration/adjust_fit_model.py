@@ -11,7 +11,7 @@ For each dataset, the script:
 - Runs the streamlined pipeline (`extract_metrics`) to get the average trace
   and its fitted model (`yhat_avg`)
 - Re-cuts windows around all or a subset of events (with optional peak
-  alignment)
+  realignment)
 - Averages the recut segments (median across selected events)
 - Overlays the current fitted model (recut in the same way) on top of the
   averaged waveform
@@ -120,6 +120,77 @@ def _parse_events_spec(spec: Optional[str], n_pulses: int) -> List[int]:
     return out
 
 
+DEFAULT_PEAK_RECENTER = 5
+
+
+def _normalize_peak_recenter(value):
+    """Coerce peak recenter options to an int or (pre, post) tuple."""
+    if value is None:
+        return 0
+    if isinstance(value, bool):
+        return DEFAULT_PEAK_RECENTER if value else 0
+    if isinstance(value, (tuple, list)):
+        if len(value) != 2:
+            raise ValueError('peak_recenter tuple/list must have length 2')
+        lo, hi = value
+        try:
+            lo_i = int(float(lo))
+            hi_i = int(float(hi))
+        except (TypeError, ValueError) as exc:
+            raise ValueError('peak_recenter limits must be numeric') from exc
+        if lo_i < 0 or hi_i < 0:
+            raise ValueError('peak_recenter limits must be non-negative')
+        return (lo_i, hi_i)
+    if isinstance(value, str):
+        s = value.strip().lower()
+        if s in {'', '0', 'none', 'false', 'off'}:
+            return 0
+        if ',' in s:
+            parts = [p.strip() for p in s.split(',', 1)]
+            if len(parts) != 2 or not parts[0] or not parts[1]:
+                raise ValueError('peak_recenter string must be "pre,post"')
+            try:
+                lo_i = int(float(parts[0]))
+                hi_i = int(float(parts[1]))
+            except ValueError as exc:
+                raise ValueError('peak_recenter components must be numeric') from exc
+            if lo_i < 0 or hi_i < 0:
+                raise ValueError('peak_recenter limits must be non-negative')
+            return (lo_i, hi_i)
+        try:
+            val = int(float(s))
+        except ValueError as exc:
+            raise ValueError('peak_recenter must be an integer or "pre,post"') from exc
+        if val < 0:
+            raise ValueError('peak_recenter must be non-negative')
+        return val
+    try:
+        val = int(float(value))
+    except (TypeError, ValueError) as exc:
+        raise ValueError('peak_recenter must be numeric or tuple') from exc
+    if val < 0:
+        raise ValueError('peak_recenter must be non-negative')
+    return val
+
+
+def _is_peak_recenter_active(value) -> bool:
+    cfg = _normalize_peak_recenter(value)
+    if isinstance(cfg, tuple):
+        return any(v > 0 for v in cfg)
+    return bool(cfg)
+
+
+def _peak_recenter_label(value) -> str:
+    cfg = _normalize_peak_recenter(value)
+    if isinstance(cfg, tuple):
+        if cfg[0] == 0 and cfg[1] == 0:
+            return 'stim-aligned'
+        return f'peak recenter [{cfg[0]}, {cfg[1]}]'
+    if cfg:
+        return f'peak recenter +/-{cfg}'
+    return 'stim-aligned'
+
+
 def _recut_median_from_series(
     t: np.ndarray,
     y: np.ndarray,
@@ -128,7 +199,7 @@ def _recut_median_from_series(
     *,
     pre_ms: float,
     post_ms: float,
-    align_by_peak: bool,
+    peak_recenter: bool,
     peak_win_ms: float = 25.0,
     peak_search_pre_ms: float = 2.0,
 ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
@@ -140,10 +211,11 @@ def _recut_median_from_series(
     if t is None or y is None or np.size(t) == 0 or np.size(y) == 0:
         return None, None
     stim_sel = np.asarray(stim_times, float)[event_idx]
+    peak_cfg = _normalize_peak_recenter(peak_recenter)
     t_rel, med = build_median_recut_waveform(
         t, np.asarray(y, float)[:, None], stim_sel,
         pre_ms=float(pre_ms), post_ms=float(post_ms),
-        align_by_peak=bool(align_by_peak),
+        peak_recenter=peak_cfg,
         peak_win_ms=float(peak_win_ms), peak_search_pre_ms=float(peak_search_pre_ms),
     )
     return t_rel, med
@@ -157,7 +229,7 @@ def _recut_median_from_trials(
     *,
     pre_ms: float,
     post_ms: float,
-    align_by_peak: bool,
+    peak_recenter: bool,
     peak_win_ms: float = 25.0,
     peak_search_pre_ms: float = 2.0,
 ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
@@ -169,18 +241,19 @@ def _recut_median_from_trials(
     if t is None or Y_all is None or np.size(t) == 0 or np.size(Y_all) == 0:
         return None, None
     stim_sel = np.asarray(stim_times, float)[event_idx]
+    peak_cfg = _normalize_peak_recenter(peak_recenter)
     t_rel, med = build_median_recut_waveform(
         t, np.asarray(Y_all, float), stim_sel,
         pre_ms=float(pre_ms), post_ms=float(post_ms),
-        align_by_peak=bool(align_by_peak),
+        peak_recenter=peak_cfg,
         peak_win_ms=float(peak_win_ms), peak_search_pre_ms=float(peak_search_pre_ms),
     )
     return t_rel, med
 
 
-def _figure_title(base: str, events_spec: str, align_by_peak: bool) -> str:
+def _figure_title(base: str, events_spec: str, peak_recenter) -> str:
     ev = events_spec if events_spec else "all"
-    align = "peak-aligned" if align_by_peak else "stim-aligned"
+    align = _peak_recenter_label(peak_recenter)
     return f"{base} | events: {ev} | {align}"
 
 
@@ -208,7 +281,7 @@ def process_file(
     isi: float,
     n_pulses: int,
     events_spec: Optional[str] = None,
-    align_by_peak: bool = True,
+    peak_recenter=0,
     pre_ms: float = 2.0,
     post_ms: float = 200.0,
     normalize_dff: bool = True,
@@ -232,6 +305,8 @@ def process_file(
     except Exception as e:
         print(f"[skip] Failed to read Excel: {xlsx_path} -> {e}")
         return None
+
+    peak_cfg = _normalize_peak_recenter(peak_recenter)
 
     # Run streamlined pipeline to get average trace and its model
     res = extract_metrics(
@@ -261,16 +336,16 @@ def process_file(
     if use_all_trials:
         t_rel, med = _recut_median_from_trials(
             t, trials, stim_times, idx,
-            pre_ms=pre_ms, post_ms=post_ms_eff, align_by_peak=align_by_peak,
+            pre_ms=pre_ms, post_ms=post_ms_eff, peak_recenter=peak_cfg,
         )
     else:
         t_rel, med = _recut_median_from_series(
             t, y_avg, stim_times, idx,
-            pre_ms=pre_ms, post_ms=post_ms_eff, align_by_peak=align_by_peak,
+            pre_ms=pre_ms, post_ms=post_ms_eff, peak_recenter=peak_cfg,
         )
     _, med_model = _recut_median_from_series(
         t, yhat_avg, stim_times, idx,
-        pre_ms=pre_ms, post_ms=post_ms_eff, align_by_peak=align_by_peak,
+        pre_ms=pre_ms, post_ms=post_ms_eff, peak_recenter=peak_cfg,
     )
 
     if t_rel is None or med is None:
@@ -279,7 +354,7 @@ def process_file(
 
     # Build figure with overlay
     base = os.path.splitext(os.path.basename(xlsx_path))[0]
-    title = _figure_title(base, events_spec or "all", align_by_peak)
+    title = _figure_title(base, events_spec or "all", peak_cfg)
     fig = build_median_recut_figure(t_rel, med, fit_curve=med_model, title=title)
 
     if save and fig is not None:
@@ -312,7 +387,7 @@ def process_folder(
     isi: float,
     n_pulses: int,
     events_spec: Optional[str] = None,
-    align_by_peak: bool = True,
+    peak_recenter=0,
     pre_ms: float = 2.0,
     post_ms: float = 200.0,
     normalize_dff: bool = True,
@@ -329,6 +404,7 @@ def process_folder(
     """Process all .xlsx files in a folder; return list of saved figure paths."""
     in_dir = os.path.abspath(in_dir)
     out_dir = out_dir or in_dir
+    peak_cfg = _normalize_peak_recenter(peak_recenter)
     paths = []
     agg_traces = []
     agg_trel = None
@@ -337,7 +413,7 @@ def process_folder(
             out_path = process_file(
                 xlsx_path,
                 train_start=train_start, isi=isi, n_pulses=n_pulses,
-                events_spec=events_spec, align_by_peak=align_by_peak,
+                events_spec=events_spec, peak_recenter=peak_cfg,
                 pre_ms=pre_ms, post_ms=post_ms,
                 normalize_dff=normalize_dff, bleach=bleach,
                 use_all_trials=use_all_trials,
@@ -363,13 +439,13 @@ def process_folder(
                 t_rel, med = _recut_median_from_trials(
                     t, trials, stim_times, _parse_events_spec(events_spec, int(n_pulses)),
                     pre_ms=pre_ms, post_ms=post_ms if not single_event_window else max(0.0, min(post_ms, isi*1000.0 - guard_ms)),
-                    align_by_peak=align_by_peak,
+                    peak_recenter=peak_cfg,
                 )
             else:
                 t_rel, med = _recut_median_from_series(
                     t, y_avg, stim_times, _parse_events_spec(events_spec, int(n_pulses)),
                     pre_ms=pre_ms, post_ms=post_ms if not single_event_window else max(0.0, min(post_ms, isi*1000.0 - guard_ms)),
-                    align_by_peak=align_by_peak,
+                    peak_recenter=peak_cfg,
                 )
             if t_rel is None or med is None:
                 continue
@@ -400,7 +476,7 @@ def process_folder(
         ax.plot(t_grid * 1000.0, avg_all, color='tab:blue', linewidth=2.0, label='Average')
         ax.axvline(0.0, color='k', linestyle=':', linewidth=1.0)
         ax.set_xlabel('Time (ms)'); ax.set_ylabel('ΔF (median)')
-        ax.set_title(_figure_title(os.path.basename(in_dir), events_spec or 'all', align_by_peak))
+        ax.set_title(_figure_title(os.path.basename(in_dir), events_spec or 'all', peak_cfg))
         ax.legend(loc='best')
 
         # If overlay mode is requested, prefer showing without saving
@@ -428,7 +504,7 @@ def process_inputs(
     isi: float,
     n_pulses: int,
     events_spec: Optional[str] = None,
-    align_by_peak: bool = True,
+    peak_recenter=0,
     pre_ms: float = 2.0,
     post_ms: float = 200.0,
     normalize_dff: bool = True,
@@ -443,6 +519,7 @@ def process_inputs(
     save: bool = True,
 ) -> List[str]:
     """Process a list of inputs (files or folders). Returns saved figure paths."""
+    peak_cfg = _normalize_peak_recenter(peak_recenter)
     saved = []
     if aggregate:
     # Aggregate across all inputs (files and folders)
@@ -465,12 +542,12 @@ def process_inputs(
             if use_all_trials:
                 t_rel, med = _recut_median_from_trials(
                     t, trials, stim_times, _parse_events_spec(events_spec, int(n_pulses)),
-                    pre_ms=pre_ms, post_ms=post_eff, align_by_peak=align_by_peak,
+                    pre_ms=pre_ms, post_ms=post_eff, peak_recenter=peak_cfg,
                 )
             else:
                 t_rel, med = _recut_median_from_series(
                     t, y_avg, stim_times, _parse_events_spec(events_spec, int(n_pulses)),
-                    pre_ms=pre_ms, post_ms=post_eff, align_by_peak=align_by_peak,
+                    pre_ms=pre_ms, post_ms=post_eff, peak_recenter=peak_cfg,
                 )
             if t_rel is None or med is None:
                 return
@@ -506,7 +583,7 @@ def process_inputs(
             ax.plot(t_grid * 1000.0, avg_all, color='tab:blue', linewidth=2.0, label='Average')
             ax.axvline(0.0, color='k', linestyle=':', linewidth=1.0)
             ax.set_xlabel('Time (ms)'); ax.set_ylabel('ΔF (median)')
-            ax.set_title(_figure_title(label, events_spec or 'all', align_by_peak))
+            ax.set_title(_figure_title(label, events_spec or 'all', peak_cfg))
             ax.legend(loc='best')
 
             if aggregate_overlay or not save:
@@ -531,7 +608,7 @@ def process_inputs(
                 process_folder(
                     inp,
                     train_start=train_start, isi=isi, n_pulses=n_pulses,
-                    events_spec=events_spec, align_by_peak=align_by_peak,
+                    events_spec=events_spec, peak_recenter=peak_cfg,
                     pre_ms=pre_ms, post_ms=post_ms,
                     normalize_dff=normalize_dff, bleach=bleach,
                     use_all_trials=use_all_trials,
@@ -543,7 +620,7 @@ def process_inputs(
             out_path = process_file(
                 inp,
                 train_start=train_start, isi=isi, n_pulses=n_pulses,
-                events_spec=events_spec, align_by_peak=align_by_peak,
+                events_spec=events_spec, peak_recenter=peak_cfg,
                 pre_ms=pre_ms, post_ms=post_ms,
                 normalize_dff=normalize_dff, bleach=bleach,
                 use_all_trials=use_all_trials,
@@ -571,7 +648,9 @@ def _build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--isi", type=float, default=0.05, help="Inter-stimulus interval (s)")
     p.add_argument("--n-pulses", type=int, default=10, help="Number of pulses in the train")
     p.add_argument("--events", type=str, default="all", help="Events to include, e.g. '1-5,7'")
-    p.add_argument("--align-by-peak", action="store_true", help="Align by peak within window instead of by stimulus time")
+    p.add_argument("--peak-recenter", type=str, default='0',
+                   help="Peak realignment window in samples (int or 'pre,post'); 0 disables.")
+    p.add_argument("--align-by-peak", action="store_true", dest="_legacy_align", help=argparse.SUPPRESS)
     p.add_argument("--pre-ms", type=float, default=2.0, help="Pre-stimulus window (ms)")
     p.add_argument("--post-ms", type=float, default=200.0, help="Post-stimulus window (ms)")
     p.add_argument("--no-dff", action="store_true", help="Disable ΔF/F0 normalization")
@@ -593,6 +672,9 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     normalize_dff = not args.no_dff
     bleach = not args.no_bleach
+    peak_cfg = _normalize_peak_recenter(args.peak_recenter)
+    if getattr(args, '_legacy_align', False) and not _is_peak_recenter_active(peak_cfg):
+        peak_cfg = DEFAULT_PEAK_RECENTER
 
     saved = process_inputs(
         args.inputs,
@@ -600,7 +682,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         isi=args.isi,
         n_pulses=args.n_pulses,
         events_spec=args.events,
-        align_by_peak=args.align_by_peak,
+        peak_recenter=peak_cfg,
         pre_ms=args.pre_ms,
         post_ms=args.post_ms,
         normalize_dff=normalize_dff,

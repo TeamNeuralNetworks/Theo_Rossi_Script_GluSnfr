@@ -359,7 +359,7 @@ def fit_models_to_average(time_analysis, traces_array, which_models=("cooperativ
     for model_name, model_info in models_to_test.items():
         try:
             res = fit_average_event(t_sec, traces_array.T, model_name, stim_times,
-                                   align_by_peak=False)
+                                   peak_recenter=0)
             if res is None:
                 raise RuntimeError('curve_fit failed')
             params, t_ms, y_avg = res

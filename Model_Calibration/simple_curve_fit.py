@@ -22,7 +22,6 @@ def fit_average_event(
     maxfev: int = 3000,
     pre_ms: float = 5.0,
     post_ms: float = 50.0,
-    align_by_peak: bool = False,
     oversample: int = 1,
     projection: str = 'mean',
     peak_recenter=0,
@@ -33,34 +32,34 @@ def fit_average_event(
     Parameters
     ----------
     time : array-like
-        Time vector (seconds if ``stim_times_s`` provided, otherwise milliseconds).
+        Time vector (seconds if `stim_times_s` provided, otherwise milliseconds).
     data : array-like
-        If ``stim_times_s`` is provided, shape should be ``(T, N)`` for ``T`` time
-        points and ``N`` trials. Otherwise, ``data`` is the already averaged
-        waveform aligned to ``time``.
+        If `stim_times_s` is provided, shape should be `(T, N)` for `T` time
+        points and `N` trials. Otherwise, `data` is the already averaged
+        waveform aligned to `time`.
     model_name : str
-        Name of the event model defined in :mod:`event_models`.
+        Name of the event model defined in module event_models.
     stim_times_s : sequence, optional
-        Stimulus times in seconds. When given, ``time`` is interpreted in seconds
+        Stimulus times in seconds. When given, `time` is interpreted in seconds
         and trials are recut around each stimulus before averaging (mean across
         all recut snippets).
     window_ms : tuple, optional
         (start, end) window in milliseconds used for fitting, by default
         (0, 50).
     maxfev : int, optional
-        Maximum function evaluations passed to ``curve_fit``.
+        Maximum function evaluations passed to `curve_fit`.
     pre_ms, post_ms : float, optional
         Window around each stimulus used when recutting trials.
-    align_by_peak : bool, optional
-        If True, align each recut snippet by its local peak before averaging.
-        Defaults to ``False`` so that time zero corresponds to the stimulus.
+    peak_recenter : int | tuple | None, optional
+        Maximum number of samples permitted when shifting snippet peaks prior to
+        averaging; pass 0/None to keep stimulus-aligned windows.
 
     Returns
     -------
     tuple | None
-        ``(params, t_ms, y_avg)`` where ``params`` is a mapping of parameter
-        names to fitted values and ``t_ms``/``y_avg`` are the averaged waveform.
-        ``None`` if fitting fails.
+        `(params, t_ms, y_avg)` where `params` is a mapping of parameter
+        names to fitted values and `t_ms`/`y_avg` are the averaged waveform.
+        `None` if fitting fails.
     """
     try:
         if stim_times_s is not None:
@@ -78,10 +77,9 @@ def fit_average_event(
                 stim_times_s,
                 pre_ms=pre_ms,
                 post_ms=post_ms,
-                align_by_peak=align_by_peak,
                 peak_win_ms=25.0,
                 peak_search_pre_ms=0.0,
-                stat="mean",
+                stat='mean',
                 oversample=int(oversample),
                 projection=str(projection).lower(),
                 peak_recenter=peak_recenter,

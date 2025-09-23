@@ -76,15 +76,16 @@ res = extract_metrics(
         # Kinetics source and progression
         'fit_source': 'global',
         'decay_progression_mode': 'linear',
-        'model': 'double_exp',  # backwards-compatible alias
+        'model': 'single_exp',  # backwards-compatible alias
         'recut_projection': 'robust_mean',  # 'mean'|'median'|'std'
         'recut_oversample': 5,     # integer >=1
-        'recut_peak_recenter': 0,   # integer >=0; 0=none, else window in ms
+        'peak_recenter': 5,   # samples to shift (int or tuple); 0 disables
         'recut_snippets': True,
         # NNLS weight control options
         'nnls_weight_mode': 'exponential',  # 'uniform', 'linear', 'exponential'
         'nnls_weight_tau_s': 0.008,  # Auto: uses ISI for linear, tau_d for exponential in global mode
         'nnls_show_weights': True,  # Display weight pattern
+        'event_model_settings': {'tau_decay': 0.008},  # 8ms decay time constant
         'plot': {
             'enabled': True,
             'traces': ['raw','savgol','nnls'],  # show all average overlays

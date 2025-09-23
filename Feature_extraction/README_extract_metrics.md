@@ -273,7 +273,7 @@ from adjust_fit_model import process_file, process_folder, process_inputs
 process_file(
     r"C:\\data\\fiber.xlsx",
     train_start=0.5, isi=0.05, n_pulses=10,
-    events_spec="1-5,7", align_by_peak=True,
+    events_spec="1-5,7", peak_recenter=5,
     pre_ms=2.0, post_ms=200.0, out_dir=r"C:\\out", save=True
 )
 
@@ -281,7 +281,7 @@ process_file(
 process_folder(
     r"C:\\data\\groupA",
     train_start=1.0, isi=0.05, n_pulses=10,
-    events_spec="all", align_by_peak=False,
+    events_spec="all", peak_recenter=0,
     pre_ms=2.0, post_ms=200.0, out_dir=r"C:\\out", save=True
 )
 ```

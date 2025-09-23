@@ -112,8 +112,6 @@ DEFAULTS = {
     'fail_method': None,
     # Toggle per-pulse micro-shifts during fitting and null sampling
     'allow_shift': True,
-    # Align recut snippets by their local peak before averaging
-    'align_by_peak': False,
     # Kinetics source and progression controls
     #  - fit_source: 'global' | 'average' | 'individual'
     #    * global: fit a single event template from all trials (recut median)
@@ -696,8 +694,9 @@ def extract_metrics(
         threshold computed from pulse 1; pulses 2/3 amplitudes subtract residual
         pre‑stim currents before comparison
       - allow_shift: bool (default True) — enable per‑pulse micro‑shifts
-      - align_by_peak: bool (default False) — align recut snippets by their
-        local peak before averaging
+      - recut_peak_recenter: int | tuple | None (default 0) — number of samples
+        permitted for peak realignment before averaging; 0/None keeps stimulus
+        alignment
       - event_model: {'double_exp'|'cooperative'} (default 'double_exp') — template used
         for NNLS fitting and residual subtraction; 'cooperative' uses a Hill‑like rise*exp decay
       - coop_n: float (default 2.0) — cooperative exponent for the cooperative model
@@ -738,7 +737,7 @@ def extract_metrics(
     failm = str((cfg.get('fail_method') or meas)).strip().upper()
     thr_mode = str(cfg.get('threshold_mode', 'auto')).strip().lower()
     allow_shift = bool(cfg.get('allow_shift', True))
-    align_by_peak = bool(cfg.get('align_by_peak', False))
+    peak_recenter = cfg.get('recut_peak_recenter', 0)
 
     # Shapes & schedule
     t = np.asarray(time, float).reshape(-1)
@@ -964,23 +963,21 @@ def extract_metrics(
             if need_snips:
                 t_rel, avg, snippets = build_median_recut_waveform(
                     t, Yd, stim_times, pre_ms=5.0, post_ms=50.0,
-                    align_by_peak=align_by_peak,
                     peak_win_ms=25.0, peak_search_pre_ms=0.0,
                     oversample=int(cfg.get('recut_oversample', 1)),
                     projection=str(cfg.get('recut_projection', cfg.get('stat', 'mean'))).lower(),
                     stat="mean",
-                    peak_recenter=cfg.get('recut_peak_recenter', 0),
+                    peak_recenter=peak_recenter,
                     return_snippets=True,
                 )
             else:
                 t_rel, avg = build_median_recut_waveform(
                     t, Yd, stim_times, pre_ms=5.0, post_ms=50.0,
-                    align_by_peak=align_by_peak,
                     peak_win_ms=25.0, peak_search_pre_ms=0.0,
                     oversample=int(cfg.get('recut_oversample', 1)),
                     projection=str(cfg.get('recut_projection', cfg.get('stat', 'mean'))).lower(),
                     stat="mean",
-                    peak_recenter=cfg.get('recut_peak_recenter', 0),
+                    peak_recenter=peak_recenter,
                 )
             if t_rel is None or avg is None:
                 raise ValueError('recut_average unavailable')
@@ -1099,9 +1096,9 @@ def extract_metrics(
         )
         res = fit_average_event(
             t, Yd, event_model, stim_times,
-            align_by_peak=align_by_peak,
             oversample=int(cfg.get('recut_oversample', 1)),
             projection=str(cfg.get('recut_projection', 'mean')).lower(),
+            peak_recenter=peak_recenter,
             return_snippets=need_snips,
         )
         if res is None:

@@ -423,7 +423,6 @@ def build_median_recut_waveform(
     stim_times,
     pre_ms=2.0,
     post_ms=200.0,
-    align_by_peak=True,
     peak_win_ms=25.0,
     peak_search_pre_ms=2.0,
     stat="median",
@@ -436,18 +435,49 @@ def build_median_recut_waveform(
     """Aggregate waveform across all events after recutting around each stimulus.
 
     Enhancements:
-      - `oversample`: integer >0. If >1, constructs a finer time grid (dt/oversample)
+      - oversample: integer >0. If >1, constructs a finer time grid (dt/oversample)
         and projects/interpolates each snippet onto that grid before reducing.
-      - `projection`: one of {'mean','median','std','max','robust_mean'} specifying
+      - projection: one of {'mean','median','std','max','robust_mean'} specifying
         how to reduce the stack of snippets along the event axis. For backward
-        compatibility, the `stat` parameter is still accepted and maps to the
+        compatibility, the stat parameter is still accepted and maps to the
         same behavior.
+      - peak_recenter: None/0 disables realignment. Otherwise specifies the maximum
+        number of samples each snippet may shift so its peak matches the
+        non-realigned median peak location. Provide an integer for a symmetric
+        window or a 2-tuple for asymmetric (pre, post) limits.
     """
+    time = np.asarray(time, float)
+    if time.size < 2:
+        return (None, None, None) if return_snippets else (None, None)
+
     dt = float(np.median(np.diff(time)))
+    if not np.isfinite(dt) or dt <= 0:
+        return (None, None, None) if return_snippets else (None, None)
+
     pre_s = float(pre_ms) / 1000.0
     post_s = float(post_ms) / 1000.0
 
-    # Resolve projection mode with backward-compatible `stat` argument
+    def _parse_recenter(value):
+        if value is None or value == 0:
+            return None
+        if isinstance(value, (list, tuple)):
+            if len(value) != 2:
+                raise ValueError("peak_recenter tuple must have length 2")
+            lo, hi = value
+        else:
+            lo = hi = value
+        try:
+            lo_i = int(lo)
+            hi_i = int(hi)
+        except Exception as exc:
+            raise ValueError("peak_recenter values must be integers") from exc
+        if lo_i < 0 or hi_i < 0:
+            raise ValueError("peak_recenter values must be non-negative")
+        return lo_i, hi_i
+
+    recenter_limits = _parse_recenter(peak_recenter)
+
+    # Resolve projection mode with backward-compatible stat argument
     proj = (projection or '').strip().lower()
     if not proj:
         proj = (stat or 'median').strip().lower()
@@ -459,37 +489,119 @@ def build_median_recut_waveform(
     os_factor = max(1, int(oversample))
     dt_os = dt / float(os_factor)
     t_rel = np.arange(-pre_s, post_s + 1e-12, dt_os)
+    zero_idx = int(np.argmin(np.abs(t_rel)))
+    n_rel = t_rel.size
 
     Y_all = np.atleast_2d(Y_all)
-    snippets = []
-    for st in np.atleast_1d(stim_times):
+    stim_arr = np.atleast_1d(stim_times)
+
+    def _extract_snippet(center_s, y_series):
+        t_win = center_s + t_rel
+        snippet = np.full_like(t_rel, np.nan, dtype=float)
+        mask = (t_win >= time[0]) & (t_win <= time[-1])
+        if np.any(mask):
+            snippet[mask] = np.interp(t_win[mask], time, y_series)
+        return snippet
+
+    raw_snippets = []
+    peak_indices = []
+    for st in stim_arr:
         for j in range(Y_all.shape[1]):
             y = np.asarray(Y_all[:, j], float)
-            center = st
-            if align_by_peak:
+            raw_snippets.append(_extract_snippet(st, y))
+            peak_idx = None
+            if recenter_limits is not None:
                 try:
-                    tp, _ = pick_peak_on_series(
+                    t_peak, _ = pick_peak_on_series(
                         time, y, st, peak_win_ms, peak_search_pre_ms
                     )
-                    center = tp
                 except Exception:
-                    pass
-            t_win = center + t_rel
-            y_win = np.full_like(t_win, np.nan, dtype=float)
-            # Only interpolate points that lie within the original recording time
-            m = (t_win >= time[0]) & (t_win <= time[-1])
-            if np.any(m):
-                # Project values onto the oversampled grid via interpolation
-                y_win[m] = np.interp(t_win[m], time, y)
-            snippets.append(y_win)
+                    t_peak = np.nan
+                if np.isfinite(t_peak):
+                    if t_peak <= st:
+                        peak_idx = zero_idx
+                    else:
+                        rel = ((t_peak - st) + pre_s) / dt_os
+                        try:
+                            peak_idx = int(round(rel))
+                        except Exception:
+                            peak_idx = None
+                        if peak_idx is not None:
+                            if peak_idx < 0:
+                                peak_idx = 0
+                            elif peak_idx >= n_rel:
+                                peak_idx = n_rel - 1
+            peak_indices.append(peak_idx)
 
-    if not snippets:
-        return (None, None, None) if return_snippets else (None, None)
-    S = np.vstack(snippets)
-    if S.size == 0:
+    if not raw_snippets:
         return (None, None, None) if return_snippets else (None, None)
 
-    # Reduce across snippets using requested projection
+    S_raw = np.array(raw_snippets, dtype=float)
+    if S_raw.size == 0:
+        return (None, None, None) if return_snippets else (None, None)
+
+    def _shift_snippet(snippet, shift):
+        s = np.array(snippet, float, copy=True)
+        n = s.size
+        if shift > 0:
+            if shift >= n:
+                return np.full_like(s, np.nan)
+            s[:-shift] = s[shift:]
+            s[-shift:] = np.nan
+        elif shift < 0:
+            shift = -shift
+            if shift >= n:
+                return np.full_like(s, np.nan)
+            s[shift:] = s[:-shift]
+            s[:shift] = np.nan
+        return s
+
+    if recenter_limits is not None and np.any(np.isfinite(S_raw)):
+        try:
+            neg_lim, pos_lim = recenter_limits
+            progress_print(f"[recut] Peak recenter enabled (limits: -{neg_lim}/+{pos_lim} samples)")
+        except Exception:
+            pass
+        base_wave = np.nanmedian(S_raw, axis=0)
+        if np.any(np.isfinite(base_wave)):
+            ref_idx = int(np.nanargmax(base_wave))
+            ref_idx = max(ref_idx, zero_idx)
+        else:
+            ref_idx = zero_idx
+        neg_lim, pos_lim = recenter_limits
+        recentered = []
+        for idx_snip, snippet in enumerate(S_raw):
+            if not np.any(np.isfinite(snippet)):
+                recentered.append(snippet)
+                continue
+            peak_idx = peak_indices[idx_snip] if idx_snip < len(peak_indices) else None
+            if peak_idx is None:
+                try:
+                    peak_idx = int(np.nanargmax(snippet))
+                except ValueError:
+                    recentered.append(snippet)
+                    continue
+            delta = peak_idx - ref_idx
+            shift = 0
+            if delta > 0:
+                shift = min(delta, pos_lim)
+            elif delta < 0:
+                shift = -min(-delta, neg_lim)
+            aligned = _shift_snippet(snippet, shift)
+            if np.any(np.isfinite(aligned)):
+                try:
+                    peak_idx_new = int(np.nanargmax(aligned))
+                except ValueError:
+                    peak_idx_new = None
+                if peak_idx_new is not None and peak_idx_new < zero_idx:
+                    adjust = zero_idx - peak_idx_new
+                    aligned = _shift_snippet(aligned, -adjust)
+            recentered.append(aligned)
+        S_use = np.array(recentered, dtype=float)
+    else:
+        S_use = S_raw
+
+    S = S_use
     if proj == 'mean':
         wave = np.nanmean(S, axis=0)
     elif proj == 'std':
@@ -497,7 +609,6 @@ def build_median_recut_waveform(
     elif proj == 'max':
         wave = np.nanmax(S, axis=0)
     elif proj == 'robust_mean':
-        # Trim extremes per time point (default 10% trim each side)
         def trimmed_mean(arr, trim_frac=0.1):
             a = np.asarray(arr)
             a = a[np.isfinite(a)]
@@ -512,14 +623,13 @@ def build_median_recut_waveform(
             a_sorted = np.sort(a)
             a_trim = a_sorted[lo:hi]
             return float(np.nanmean(a_trim))
-
         wave = np.array([trimmed_mean(S[:, i], trim_frac=0.1) for i in range(S.shape[1])])
     else:
         wave = np.nanmedian(S, axis=0)
+
     if return_snippets:
         return t_rel, wave, S
     return t_rel, wave
-
 
 def fit_template_decay(
     t_rel,

@@ -124,7 +124,7 @@ def _file_to_resampled_trace(xlsx_path: str, t_grid: np.ndarray):
             res['time_s'], processed_trials, np.asarray(stim_selected),
             pre_ms=PRE_MS, 
             post_ms=POST_MS, 
-            align_by_peak=False
+            peak_recenter=0
         )
 
         if t_rel is None or med is None:
