@@ -65,12 +65,9 @@ valid = np.isfinite(_time)
 time = _time[valid]
 trials = _trials[valid, :]
 
-res = extract_metrics(
-    time, trials,
-    train_start=0.5,   # seconds
-    isi=0.05,          # seconds
-    n_pulses=10,
-    options={
+# Define option presets
+options_presets = {
+    'double_exp_default': {
         'normalize_dff': True,
         'bleach': True,
         # Kinetics source and progression
@@ -83,19 +80,58 @@ res = extract_metrics(
         'recut_snippets': True,
         # NNLS weight control options
         'nnls_weight_mode': 'exponential',  # 'uniform', 'linear', 'exponential'
-        'nnls_weight_tau_s': 0.008,  # Auto: uses ISI for linear, tau_d for exponential in global mode
+        'nnls_weight_tau_s': 0.008,  # if None: auto (uses ISI or fitted tau)
         'nnls_show_weights': True,  # Display weight pattern
-        'event_model_settings': {'tau_decay': 0.008},  # 8ms decay time constant
+
+
         'plot': {
             'enabled': True,
             'traces': ['raw','savgol','nnls'],  # show all average overlays
             'show_decay': True,
             'trials': True,
             'baseline': True,
-            'residuals': False,         
+            'residuals': False,
         }
-    }
+    },
+
+    # Example alternative preset (single-exp with fixed tau)
+    'single_exp_fixed_8ms': {
+        'normalize_dff': True,
+        'bleach': True,
+        'fit_source': 'global',
+        'decay_progression_mode': 'fixed',
+        'event_model': 'single_exp',
+        'recut_projection': 'robust_mean',
+        'recut_oversample': 5,
+        'peak_recenter': 5,
+        'recut_snippets': True,
+        'nnls_weight_mode': 'exponential',
+        'nnls_weight_tau_s': 0.008,
+        'nnls_show_weights': True,
+        'event_model_settings': {'tau_decay': 0.008},  # valid for single_exp
+        'plot': {
+            'enabled': True,
+            'traces': ['raw','savgol','nnls'],
+            'show_decay': True,
+            'trials': True,
+            'baseline': True,
+            'residuals': False,
+        }
+    },
+}
+
+# Choose which preset to use
+preset_name = 'double_exp_default'
+options = options_presets[preset_name]
+
+res = extract_metrics(
+    time, trials,
+    train_start=0.5,   # seconds
+    isi=0.05,          # seconds
+    n_pulses=10,
+    options=options
 )
+
 
 # Inspect results
 print("Averages (NNLS):", res['average']['amp_nnls'])
