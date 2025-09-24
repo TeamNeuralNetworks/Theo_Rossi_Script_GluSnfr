@@ -79,7 +79,6 @@ def fit_average_event(
                 post_ms=post_ms,
                 peak_win_ms=25.0,
                 peak_search_pre_ms=0.0,
-                stat='mean',
                 oversample=int(oversample),
                 projection=str(projection).lower(),
                 peak_recenter=peak_recenter,

@@ -425,7 +425,6 @@ def build_median_recut_waveform(
     post_ms=200.0,
     peak_win_ms=25.0,
     peak_search_pre_ms=2.0,
-    stat="median",
     *,
     oversample: int = 1,
     projection: str = "median",
@@ -438,9 +437,7 @@ def build_median_recut_waveform(
       - oversample: integer >0. If >1, constructs a finer time grid (dt/oversample)
         and projects/interpolates each snippet onto that grid before reducing.
       - projection: one of {'mean','median','std','max','robust_mean'} specifying
-        how to reduce the stack of snippets along the event axis. For backward
-        compatibility, the stat parameter is still accepted and maps to the
-        same behavior.
+        how to reduce the stack of snippets along the event axis.
       - peak_recenter: None/0 disables realignment. Otherwise specifies the maximum
         number of samples each snippet may shift so its peak matches the
         non-realigned median peak location. Provide an integer for a symmetric
@@ -477,10 +474,7 @@ def build_median_recut_waveform(
 
     recenter_limits = _parse_recenter(peak_recenter)
 
-    # Resolve projection mode with backward-compatible stat argument
-    proj = (projection or '').strip().lower()
-    if not proj:
-        proj = (stat or 'median').strip().lower()
+    proj = (projection or 'median').strip().lower()
     allowed = {'mean', 'median', 'std', 'max', 'robust_mean'}
     if proj not in allowed:
         proj = 'median'

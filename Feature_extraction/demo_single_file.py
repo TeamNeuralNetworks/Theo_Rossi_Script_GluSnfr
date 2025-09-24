@@ -9,7 +9,7 @@ For a full list of canonical models, aliases, and parameter names see
 `two_component`, `binding_kinetics`, `cooperative`, and `single_exp`.
 
 Notes:
- - Use `event_model` (preferred) or `model` (backwards-compatible alias) in the `options` dict.
+ - Use `event_model` in the `options` dict.
  - Some models accept extra model-specific settings (e.g. `n_coop` for cooperative models).
 
 Decay progression modes (options['decay_progression_mode']):
@@ -76,7 +76,7 @@ res = extract_metrics(
         # Kinetics source and progression
         'fit_source': 'global',
         'decay_progression_mode': 'fixed',  # 'fixed'|'free_monotonic'|'linear'
-        'model': 'double_exp',  # backwards-compatible alias
+        'event_model': 'double_exp',
         'recut_projection': 'robust_mean',  # 'mean'|'median'|'std'|'robust_mean'
         'recut_oversample': 5,     # integer >=1
         'peak_recenter': 5,   # samples to shift (int or tuple); 0 disables

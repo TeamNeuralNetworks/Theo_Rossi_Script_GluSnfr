@@ -8,7 +8,7 @@ For a full list of canonical models, aliases, and parameter names see
 `two_component`, `binding_kinetics`, `cooperative`, and `single_exp`.
 
 Notes:
- - Use `event_model` (preferred) or `model` (backwards-compatible alias) in the `options` dict.
+ - Use `event_model` in the `options` dict.
  - Some models accept extra model-specific settings (e.g. `n_coop` for cooperative models).
 
 Decay progression modes (options['decay_progression_mode']):
@@ -114,7 +114,7 @@ for in_dir in folders:
                 'bleach': True,
                 'fit_source': 'global',
                 'decay_progression_mode': 'free_monotonic',
-                'model': 'double_exp',
+                'event_model': 'double_exp',
                 'plot': {
                     'enabled': True,
                     'traces': ['raw', 'nnls'],

@@ -69,7 +69,7 @@ def auto_select_event_model_settings(
     -------
     dict with keys:
       - event_model: 'cooperative' | 'double_exp'
-      - coop_n: float (only for cooperative)
+      - event_model_settings: dict of parameter overrides (e.g. {'n_coop': 2.0})
       - metrics: per-model metrics dict
       - fit_params: per-model parameter arrays
       - options: suggested options dict for extract_metrics
@@ -135,9 +135,13 @@ def auto_select_event_model_settings(
         except Exception:
             coop_n = 2.0
 
+    event_model_settings: Dict[str, float] = {}
+    if best_name == 'cooperative':
+        event_model_settings['n_coop'] = float(coop_n) if coop_n is not None else 2.0
+
     options = {
         'event_model': best_name,
-        'coop_n': float(coop_n) if coop_n is not None else 2.0,
+        'event_model_settings': dict(event_model_settings),
         'measurement': 'NNLS',
         'fail_method': 'NNLS',
         'threshold_mode': 'auto',
@@ -146,7 +150,7 @@ def auto_select_event_model_settings(
 
     return {
         'event_model': best_name,
-        'coop_n': float(coop_n) if coop_n is not None else None,
+        'event_model_settings': dict(event_model_settings),
         'metrics': metrics,
         'fit_params': params_map,
         'options': options,

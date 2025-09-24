@@ -9,7 +9,7 @@ noise without systematic peak-time bias.
 Steps performed:
     1. Load the time vector (last column) and trial traces (all other columns)
        from an Excel sheet.
-    2. For each model alias listed in ``MODEL_CANDIDATES`` run
+    2. For each event model listed in ``MODEL_CANDIDATES`` run
        ``extract_metrics`` with identical preprocessing options.
     3. Compute residual diagnostics on the average trace:
          • Jarque–Bera statistic, skewness, and excess kurtosis
@@ -49,8 +49,8 @@ XLSX_PATH = r"C:\\Users\\Antoine.Valera\\Desktop\\PPR_DATA_FINAL\\Theo_4Ca\\2021
 OUT_DIR = r"C:\\Users\\Antoine.Valera\\Desktop\\Testout"
 
 # Event models to compare. Add or remove entries as needed. Each tuple contains
-# the model alias accepted by ``extract_metrics`` and optional keyword overrides
-# (e.g. cooperative exponent).
+# the event model name accepted by ``extract_metrics`` and optional keyword
+# overrides (e.g. cooperative exponent).
 MODEL_CANDIDATES: List[Tuple[str, Dict]] = [
     ("double_exp", {}),
     ("single_exp", {}),

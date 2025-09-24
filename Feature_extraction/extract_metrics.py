@@ -98,8 +98,6 @@ DEFAULTS = {
     # Supported (varying): 'double_exp' (rise+decay), 'cooperative', 'bilinear'
     # Default is a rise+decay kernel (difference of exponentials)
     'event_model': 'double_exp',
-    # Cooperative exponent n
-    'coop_n': 2.0,
     # Measurement and thresholds
     # measurement: which amplitude series to use for p-values/classification
     #   'NNLS' | 'SAVGOL' | 'RAW'
@@ -699,7 +697,6 @@ def extract_metrics(
         alignment
       - event_model: {'double_exp'|'cooperative'} (default 'double_exp') — template used
         for NNLS fitting and residual subtraction; 'cooperative' uses a Hill‑like rise*exp decay
-      - coop_n: float (default 2.0) — cooperative exponent for the cooperative model
       - plot: dict with keys
           - enabled: bool (default False)
           - traces: list of {'raw','savgol','nnls'} (default ['nnls'])
@@ -734,9 +731,6 @@ def extract_metrics(
         cfg['event_model_settings'] = dict(cfg_em_settings)
     else:
         cfg['event_model_settings'] = {}
-    # Backward-compat: allow 'model' as alias for 'event_model'
-    if 'model' in opts:
-        cfg['event_model'] = opts['model']
     # Optional auto-calibration of event model from multi-trial data (run after preprocessing)
     do_bleach = bool(cfg.get('bleach', True))
     use_dff = bool(cfg.get('normalize_dff', True))
@@ -800,12 +794,10 @@ def extract_metrics(
     # Configure kernel function for the chosen event model (τ‑varying or fixed template)
     # Default must match DEFAULTS['event_model'] for consistency
     event_model = str(cfg.get('event_model', DEFAULTS.get('event_model', 'double_exp'))).strip().lower()
-    coop_n_default = float(cfg.get('coop_n', 2.0))
-    em_settings = cfg.get('event_model_settings', {})
-    if em_settings is None:
-        em_settings = {}
+    em_settings = cfg.get('event_model_settings', {}) or {}
     if not isinstance(em_settings, dict):
         raise ValueError("event_model_settings must be a dict of parameter overrides")
+    coop_n_default = float(em_settings.get('n_coop', 2.0))
 
     def _build_kernel_from_library(name: str):
         """Return (kernel_fun, spec) using Model_Calibration.event_models."""
@@ -861,60 +853,33 @@ def extract_metrics(
                 evm = _lib
         if evm in varying_supported:
             spec, _, make_var = _build_kernel_from_library(evm if evm != 'double_exp' else 'double_exp')
+            if evm == 'cooperative':
+                extra_keys = set(em_settings.keys()) - {'n_coop'}
+                if extra_keys:
+                    raise ValueError(f"Unsupported event_model_settings for cooperative: {sorted(extra_keys)}")
+                coop_n_default = float(em_settings.get('n_coop', coop_n_default))
+                def _map(tau_r, tau_d):
+                    return [1.0, float(tau_r), float(tau_d), float(coop_n_default), 0.0]
+                _KERNEL_FUN = make_var(_map)
+                progress_print(f"[model] Using event model 'cooperative' (τ‑varying), n_coop={coop_n_default}")
+                event_model = evm
+                return evm, coop_n_default
             if em_settings:
-                if evm == 'cooperative':
-                    extra_keys = set(em_settings.keys()) - {'n_coop'}
-                    if extra_keys:
-                        raise ValueError(f"Unsupported event_model_settings for cooperative: {sorted(extra_keys)}")
-                    n_coop = float(em_settings.get('n_coop', coop_n_default))
-                    def _map(tau_r, tau_d):
-                        return [1.0, float(tau_r), float(tau_d), float(n_coop), 0.0]
-                    _KERNEL_FUN = make_var(_map)
-                    progress_print(f"[model] Using event model 'cooperative' (τ‑varying), n_coop={n_coop}")
-                    event_model = evm
-                    return evm, n_coop
-                elif evm == 'double_exp':
-                    if em_settings:
-                        raise ValueError("double_exp in τ‑varying mode does not accept event_model_settings")
-                    def _map(tau_r, tau_d):
-                        return [1.0, float(tau_r), float(tau_d), 0.0]
-                    _KERNEL_FUN = make_var(_map)
-                    progress_print("[model] Using event model 'double_exp' (τ‑varying)")
-                    event_model = evm
-                    return evm, None
-                else:  # bilinear
-                    if em_settings:
-                        raise ValueError("bilinear in τ‑varying mode does not accept event_model_settings")
-                    def _map(tau_r, tau_d):
-                        return [1.0, float(tau_r) * 1000.0, float(tau_d) * 1000.0, 0.0]
-                    _KERNEL_FUN = make_var(_map)
-                    progress_print("[model] Using event model 'bilinear' (τ‑varying)")
-                    event_model = evm
-                    return evm, None
-            else:
-                if evm == 'cooperative':
-                    # Use coop_n from cfg if provided
-                    coop_n_default = float(cfg.get('coop_n', coop_n_default))
-                    def _map(tau_r, tau_d):
-                        return [1.0, float(tau_r), float(tau_d), float(coop_n_default), 0.0]
-                    _KERNEL_FUN = make_var(_map)
-                    progress_print(f"[model] Using event model 'cooperative' (τ‑varying), n_coop={coop_n_default}")
-                    event_model = evm
-                    return evm, coop_n_default
-                elif evm == 'double_exp':
-                    def _map(tau_r, tau_d):
-                        return [1.0, float(tau_r), float(tau_d), 0.0]
-                    _KERNEL_FUN = make_var(_map)
-                    progress_print("[model] Using event model 'double_exp' (τ‑varying)")
-                    event_model = evm
-                    return evm, None
-                else:  # bilinear
-                    def _map(tau_r, tau_d):
-                        return [1.0, float(tau_r) * 1000.0, float(tau_d) * 1000.0, 0.0]
-                    _KERNEL_FUN = make_var(_map)
-                    progress_print("[model] Using event model 'bilinear' (τ‑varying)")
-                    event_model = evm
-                    return evm, None
+                raise ValueError(f"{evm} in τ‑varying mode does not accept event_model_settings")
+            if evm == 'double_exp':
+                def _map(tau_r, tau_d):
+                    return [1.0, float(tau_r), float(tau_d), 0.0]
+                _KERNEL_FUN = make_var(_map)
+                progress_print("[model] Using event model 'double_exp' (τ‑varying)")
+                event_model = evm
+                return evm, None
+            # bilinear
+            def _map(tau_r, tau_d):
+                return [1.0, float(tau_r) * 1000.0, float(tau_d) * 1000.0, 0.0]
+            _KERNEL_FUN = make_var(_map)
+            progress_print("[model] Using event model 'bilinear' (τ‑varying)")
+            event_model = evm
+            return evm, None
         else:
             # Fixed template
             lib_name = evm
@@ -963,20 +928,17 @@ def extract_metrics(
     # Helper: estimate base kinetics from recut average of all trials/events
     def _estimate_from_recut_average():
         try:
-            # Honor explicit top-level option 'recut_snippets' (preferred) and
-            # also accept legacy 'return_snippets' for backward compatibility.
+            # Honor explicit top-level option 'recut_snippets'.
             need_snips = bool(
                 cfg.get('plot', {}).get('enabled', False)
                 or cfg.get('recut_snippets', False)
-                or cfg.get('return_snippets', False)
             )
             if need_snips:
                 t_rel, avg, snippets = build_median_recut_waveform(
                     t, Yd, stim_times, pre_ms=5.0, post_ms=50.0,
                     peak_win_ms=25.0, peak_search_pre_ms=0.0,
                     oversample=int(cfg.get('recut_oversample', 1)),
-                    projection=str(cfg.get('recut_projection', cfg.get('stat', 'mean'))).lower(),
-                    stat="mean",
+                    projection=str(cfg.get('recut_projection', 'median')).lower(),
                     peak_recenter=peak_recenter,
                     return_snippets=True,
                 )
@@ -985,8 +947,7 @@ def extract_metrics(
                     t, Yd, stim_times, pre_ms=5.0, post_ms=50.0,
                     peak_win_ms=25.0, peak_search_pre_ms=0.0,
                     oversample=int(cfg.get('recut_oversample', 1)),
-                    projection=str(cfg.get('recut_projection', cfg.get('stat', 'mean'))).lower(),
-                    stat="mean",
+                    projection=str(cfg.get('recut_projection', 'median')).lower(),
                     peak_recenter=peak_recenter,
                 )
             if t_rel is None or avg is None:
@@ -1003,7 +964,7 @@ def extract_metrics(
             best = (np.inf, 0.002, 0.015)
             dt = float(np.median(np.diff(t_rel)))
             dt_s = dt
-            # Use _KERNEL_FUN for current model (cooperative uses coop_n)
+            # Use _KERNEL_FUN for current model (cooperative uses n_coop)
             for tr in tau_r_grid:
                 for td in tau_d0_grid:
                     k = _KERNEL_FUN(t_rel, tr, td)
@@ -1102,12 +1063,11 @@ def extract_metrics(
         need_snips = bool(
             cfg.get('plot', {}).get('enabled', False)
             or cfg.get('recut_snippets', False)
-            or cfg.get('return_snippets', False)
         )
         res = fit_average_event(
             t, Yd, event_model, stim_times,
             oversample=int(cfg.get('recut_oversample', 1)),
-            projection=str(cfg.get('recut_projection', 'mean')).lower(),
+            projection=str(cfg.get('recut_projection', 'median')).lower(),
             peak_recenter=peak_recenter,
             return_snippets=need_snips,
         )
@@ -1638,7 +1598,8 @@ def extract_metrics(
                         # [amp, tau_rise(s), tau_decay(s), t_peak(ms)]
                         pars = [1.0, float(tau_r), float(tau_d0), t_peak_ms]
                     elif _name == 'cooperative':
-                        n_used = float(cfg.get('event_model_settings', {}).get('n_coop', cfg.get('coop_n', 2.0)))
+                        ems = cfg.get('event_model_settings', {}) or {}
+                        n_used = float(ems.get('n_coop', 2.0))
                         # [amp, tau_rise(s), tau_decay(s), n_coop, t_peak(ms)]
                         pars = [1.0, float(tau_r), float(tau_d0), n_used, t_peak_ms]
                     else:  # bilinear expects ms values for rise/decay durations
@@ -1821,7 +1782,10 @@ def extract_metrics(
         'tau_r_s': float(tau_r),
         'tau_d_s': np.asarray(tau_d_vec, float),
         'stim_times_s': np.asarray(stim_times, float),
-        'model': {'event_model': ev_model_name, 'n_coop': (float(n_coop_effective) if n_coop_effective is not None else None)},
+        'event_model': {
+            'name': ev_model_name,
+            'n_coop': (float(n_coop_effective) if n_coop_effective is not None else None),
+        },
         'average': {
             'amp_raw': np.asarray(amp_raw_avg, float),
             'amp_savgol': np.asarray(amp_sg_avg, float),
