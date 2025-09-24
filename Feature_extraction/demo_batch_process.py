@@ -61,13 +61,13 @@ folders = [
 ]
 root_out = r"C:\\Users\\Antoine.Valera\\Desktop\\Testout"; os.makedirs(root_out, exist_ok=True)
 
-# Per-folder train_start (seconds). Default 1.0; override last two to 0.5
+# Per-folder train_start (seconds). Default 1.0; override last two to 0.498
 train_start_by_folder = {
-    folders[2]: 0.499,
-    folders[3]: 0.499,
-    folders[4]: 0.499,
-    folders[5]: 0.499,
-    folders[6]: 0.499,
+    folders[2]: 0.498,
+    folders[3]: 0.498,
+    folders[4]: 0.498,
+    folders[5]: 0.498,
+    folders[6]: 0.498,
 }
 
 summaries = {}
@@ -106,23 +106,48 @@ for in_dir in folders:
         time = t_raw[ok]
         trials = X[ok, :]
 
-        res = extract_metrics(
-            time, trials,
-            train_start=train_start, isi=isi, n_pulses=n_pulses,
-            options={
+        # Define option presets
+        options_presets = {
+            'double_exp_default': {
                 'normalize_dff': True,
                 'bleach': True,
+                # Kinetics source and progression
                 'fit_source': 'global',
-                'decay_progression_mode': 'free_monotonic',
-                'event_model': 'double_exp',
+                'decay_progression_mode': 'free_monotonic',  # 'fixed'|'free_monotonic'|'linear'
+                'event_model': 'double_cooperative', # 'single_exp'|'double_exp'|'two_component'|'binding_kinetics'|'cooperative'
+                'recut_projection': 'robust_mean',  # 'mean'|'median'|'std'|'robust_mean'
+                'recut_oversample': 5,     # integer >=1
+                'peak_recenter': 5,   # samples to shift (int or tuple); 0 disables
+                'recut_snippets': True,
+                'event_model_settings': {},  # valid for single_exp
+                # NNLS weight control options
+                'nnls_weight_mode': 'exponential',  # 'uniform', 'linear', 'exponential'
+                'nnls_weight_tau_s': 0.005,  # if None: auto (uses ISI or fitted tau)
+                'nnls_show_weights': False,  # Display weight pattern
+
+
                 'plot': {
                     'enabled': True,
-                    'traces': ['raw', 'nnls'],
+                    'traces': ['raw','savgol','nnls'],  # show all average overlays
                     'show_decay': True,
                     'trials': False,
-                    'residuals': True,
-                },
+                    'baseline': False,
+                    'residuals': False,
+                }
             },
+        }
+
+
+        # Choose which preset to use
+        preset_name = 'double_exp_default'
+        options = options_presets[preset_name]
+
+        res = extract_metrics(
+            time, trials,
+            train_start=train_start,   # seconds
+            isi=isi,          # seconds
+            n_pulses=n_pulses,
+            options=options
         )
 
         base = os.path.splitext(os.path.basename(xlsx_path))[0]

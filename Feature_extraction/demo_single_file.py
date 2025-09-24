@@ -51,8 +51,8 @@ if REPO_ROOT not in sys.path:
 
 from Feature_extraction.extract_metrics import extract_metrics
 
-xlsx_path = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Theo_4Ca\20211125_linescan1_20Hz_10pulses_4mMCa_bouton1_traces_converted.xlsx"
-#xlsx_path = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Theo_1_5Ca\20220726_linescan3_20Hz_10pulses_1.5mMCa_bouton3_traces_converted.xlsx"
+# xlsx_path = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Theo_4Ca\20211125_linescan1_20Hz_10pulses_4mMCa_bouton1_traces_converted.xlsx"
+xlsx_path = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Theo_1_5Ca\20220726_linescan3_20Hz_10pulses_1.5mMCa_bouton3_traces_converted.xlsx"
 
 
 out_dir = r"C:\Users\Antoine.Valera\Desktop\Testout"
@@ -73,14 +73,15 @@ options_presets = {
         # Kinetics source and progression
         'fit_source': 'global',
         'decay_progression_mode': 'fixed',  # 'fixed'|'free_monotonic'|'linear'
-        'event_model': 'double_exp',
+        'event_model': 'double_cooperative', # 'single_exp'|'double_exp'|'two_component'|'binding_kinetics'|'cooperative'
         'recut_projection': 'robust_mean',  # 'mean'|'median'|'std'|'robust_mean'
         'recut_oversample': 5,     # integer >=1
         'peak_recenter': 5,   # samples to shift (int or tuple); 0 disables
         'recut_snippets': True,
+        'event_model_settings': {},  # valid for single_exp
         # NNLS weight control options
         'nnls_weight_mode': 'exponential',  # 'uniform', 'linear', 'exponential'
-        'nnls_weight_tau_s': 0.008,  # if None: auto (uses ISI or fitted tau)
+        'nnls_weight_tau_s': 0.003,  # if None: auto (uses ISI or fitted tau)
         'nnls_show_weights': True,  # Display weight pattern
 
 
@@ -106,7 +107,7 @@ options_presets = {
         'peak_recenter': 5,
         'recut_snippets': True,
         'nnls_weight_mode': 'exponential',
-        'nnls_weight_tau_s': 0.008,
+        'nnls_weight_tau_s': 0.003,
         'nnls_show_weights': True,
         'event_model_settings': {'tau_decay': 0.008},  # valid for single_exp
         'plot': {
@@ -115,13 +116,14 @@ options_presets = {
             'show_decay': True,
             'trials': True,
             'baseline': True,
-            'residuals': False,
+            'residuals': True,
         }
     },
 }
 
 # Choose which preset to use
-preset_name = 'double_exp_default'
+# Choose which preset to use (set to the one you want to visualize)
+preset_name = 'double_exp_default'  # e.g., 'single_exp_fixed_8ms'
 options = options_presets[preset_name]
 
 res = extract_metrics(
@@ -183,7 +185,7 @@ df_rows.to_excel(xl_out, index=False)
 if per_trial_rows:
     pd.DataFrame(per_trial_rows).to_excel(os.path.splitext(xl_out)[0] + "_trials.xlsx", index=False)
 
-# Save plot if enabled
+# Save/show average plot if enabled
 fig = res.get('figure')
 if fig is not None:
     # If the recutter returned snippets, ensure overlay is enabled in the figure
@@ -191,6 +193,21 @@ if fig is not None:
         fig.savefig(r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\fiber_plot.png", dpi=150)
     except Exception:
         pass
+    try:
+        plt.show()
+    except Exception:
+        pass
+
+# Save/show per-trial figures (including residual/baseline panels when enabled)
+figs_trials = res.get('figures_trials') or []
+if figs_trials:
+    for i, ftri in enumerate(figs_trials, 1):
+        try:
+            outp = os.path.join(out_dir, f"{base}_trialfig_{i:02d}.png")
+            ftri.tight_layout()
+            ftri.savefig(outp, dpi=120)
+        except Exception:
+            pass
     try:
         plt.show()
     except Exception:
