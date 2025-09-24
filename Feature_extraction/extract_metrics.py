@@ -724,6 +724,16 @@ def extract_metrics(
     if baseline_figs:
         plot_trials = True  # baseline panel requires per-trial figures
     cfg = {**DEFAULTS, **{k: v for k, v in opts.items() if k != 'plot'}}
+    explicit_em_settings = {}
+    if isinstance(opts.get('event_model_settings'), dict):
+        # Preserve user-provided overrides so later auto-fits do not clobber them
+        explicit_em_settings = dict(opts['event_model_settings'])
+    cfg_em_settings = cfg.get('event_model_settings')
+    if isinstance(cfg_em_settings, dict):
+        # Use a shallow copy to avoid mutating the caller's dict in-place
+        cfg['event_model_settings'] = dict(cfg_em_settings)
+    else:
+        cfg['event_model_settings'] = {}
     # Backward-compat: allow 'model' as alias for 'event_model'
     if 'model' in opts:
         cfg['event_model'] = opts['model']
@@ -1135,11 +1145,21 @@ def extract_metrics(
                 tau_d0 = 0.010
             cfg.setdefault('event_model_settings', {})
             if event_model == 'cooperative' and ('n_coop' in fitted):
-                cfg['event_model_settings']['n_coop'] = float(fitted['n_coop'])
+                if 'n_coop' not in explicit_em_settings:
+                    cfg['event_model_settings']['n_coop'] = float(fitted['n_coop'])
             elif event_model not in varying_supported_names:
                 for k, v in fitted.items():
                     if k not in ('amp', 't_peak') and np.isfinite(v):
-                        cfg['event_model_settings'][k] = float(v)
+                        if k not in explicit_em_settings:
+                            cfg['event_model_settings'][k] = float(v)
+            tau_decay_override = cfg['event_model_settings'].get('tau_decay')
+            if tau_decay_override is not None:
+                try:
+                    tau_decay_override = float(tau_decay_override)
+                except Exception:
+                    tau_decay_override = None
+            if tau_decay_override is not None and np.isfinite(tau_decay_override):
+                tau_d0 = float(tau_decay_override)
             ev_model_name, n_coop_effective = _apply_event_model_from_cfg()
             is_varying_model = ev_model_name in varying_supported_names
             progress_print(
@@ -1630,13 +1650,46 @@ def extract_metrics(
                     popt = pars
                     yhat_ev = spec['func'](tf, *popt)
                 else:
-                    # For fixed-template models, do a local fit for display
-                    p0 = spec['p0_func'](yf, tf)
+                    # For fixed-template models, DO NOT refit here: honor
+                    # the effective event_model_settings that were applied to
+                    # the kernel earlier. Build the parameter vector in the
+                    # order expected by the spec and only solve a linear LS
+                    # for amplitude so the overlay matches scale.
+                    params = []
+                    t_peak_ms = 0.0
                     try:
-                        from scipy.optimize import curve_fit as _cf
-                        popt, _ = _cf(spec['func'], tf, yf, p0=p0, bounds=spec['bounds'], maxfev=3000)
+                        if 'fitted' in locals() and fitted is not None:
+                            t_peak_ms = float(fitted.get('t_peak', 0.0))
                     except Exception:
-                        popt = p0
+                        t_peak_ms = 0.0
+                    ems = cfg.get('event_model_settings', {}) or {}
+                    for name in spec['params']:
+                        if name == 'amp':
+                            params.append(1.0)
+                        elif name == 't_peak':
+                            params.append(t_peak_ms)
+                        else:
+                            # Prefer explicit user override; otherwise, if the
+                            # earlier global fit populated a value into
+                            # event_model_settings, use that. As a last
+                            # fallback, use tau_r/tau_d0 where meaningful.
+                            if name in ems and np.isfinite(ems.get(name, np.nan)):
+                                params.append(float(ems[name]))
+                            elif name == 'tau_decay':
+                                params.append(float(tau_d0))  # seconds
+                            elif name == 'tau_rise':
+                                params.append(float(tau_r))
+                            else:
+                                # If unknown, fall back to p0 for stability
+                                p0 = spec['p0_func'](yf, tf)
+                                idx = spec['params'].index(name)
+                                params.append(float(p0[idx]))
+                    # Compute LS amplitude against the fixed shape
+                    yshape = spec['func'](tf, *params)
+                    denom = float(np.sum(yshape**2)) if np.isfinite(yshape).any() else 0.0
+                    amp_ls = float(np.sum(yf * yshape)) / denom if denom > 0 else 1.0
+                    params[0] = amp_ls
+                    popt = params
                     yhat_ev = spec['func'](tf, *popt)
                 axL.plot(tf, yhat_ev, color='crimson', ls='--', lw=1.8, label=_name)
                 try:

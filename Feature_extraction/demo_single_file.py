@@ -75,9 +75,9 @@ res = extract_metrics(
         'bleach': True,
         # Kinetics source and progression
         'fit_source': 'global',
-        'decay_progression_mode': 'linear',
-        'model': 'single_exp',  # backwards-compatible alias
-        'recut_projection': 'robust_mean',  # 'mean'|'median'|'std'
+        'decay_progression_mode': 'fixed',  # 'fixed'|'free_monotonic'|'linear'
+        'model': 'double_exp',  # backwards-compatible alias
+        'recut_projection': 'robust_mean',  # 'mean'|'median'|'std'|'robust_mean'
         'recut_oversample': 5,     # integer >=1
         'peak_recenter': 5,   # samples to shift (int or tuple); 0 disables
         'recut_snippets': True,
