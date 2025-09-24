@@ -121,7 +121,7 @@ for in_dir in folders:
                 'recut_snippets': True,
                 'event_model_settings': {},  # valid for single_exp
                 # NNLS weight control options
-                'nnls_weight_mode': 'exponential',  # 'uniform', 'linear', 'exponential'
+                'nnls_weight_mode': 'exponential',  # 'uniform', 'linear', 'exponential', 'savgol'
                 'nnls_weight_tau_s': 0.005,  # if None: auto (uses ISI or fitted tau)
                 'nnls_show_weights': False,  # Display weight pattern
 

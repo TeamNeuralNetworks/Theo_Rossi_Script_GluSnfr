@@ -286,22 +286,25 @@ The NNLS (Non-Negative Least Squares) fitter supports configurable weighting pat
 1. **Uniform** (default): All timepoints have equal weight.
 2. **Linear**: Weights decrease linearly from 1 to 0 between each stimulus and the next (sawtooth pattern).
 3. **Exponential**: Exponential decay weights for each event.
+4. **Savgol**: Data-driven weights derived from the Savitzky–Golay smoothed trace.
 
 ### Options
 
-- `nnls_weight_mode` (string, default `'uniform'`): choose `'uniform'`, `'linear'`, or `'exponential'`.
+- `nnls_weight_mode` (string, default `'uniform'`): choose `'uniform'`, `'linear'`, `'exponential'`, or `'savgol'`.
 - `nnls_weight_tau_s` (float or `None`, default `None`): time constant for weight decay in seconds.
   - Linear: controls the decay slope (default ISI) and is clipped at 0.
   - Exponential: controls the exponential decay time constant.
     - `fit_source='global'`: uses estimated tau_d from kinetics fitting (default 10 ms if unavailable).
     - Other fit sources: default 10 ms.
 - `nnls_show_weights` (bool, default `False`): when `True`, displays a plot showing the weight pattern for the train.
+  - When `'savgol'` is selected the smoothing trace is computed automatically if not already requested.
 
 ### Weight Pattern Behavior
 
 - **Uniform**: `weight = 1.0` for all timepoints.
 - **Linear**: creates a sawtooth pattern across the stimulus train.
 - **Exponential**: `weight = exp(-time_since_stimulus / tau)` per event.
+- **Savgol**: normalized |ΔF| from the Savitzky–Golay average (0.1–1.0 range).
 
 ### Usage Examples
 
@@ -325,13 +328,19 @@ options = {
     'nnls_weight_tau_s': 0.015,  # 15 ms decay
     'nnls_show_weights': True,
 }
+
+# Savgol weighting driven by the smoothed trace
+options = {
+    'nnls_weight_mode': 'savgol',
+    'nnls_show_weights': True,
+}
 ```
 
 ### Implementation Notes
 
-- `_calculate_nnls_weights()` computes weight patterns for the supported modes.
+- `_calculate_nnls_weights()` computes weight patterns for the supported modes (including Savitzky–Golay derived weights).
 - `_nnls_weighted()` performs weighted NNLS solving.
-- `estimate_kinetics_from_average()` accepts weight parameters, and `extract_metrics()` threads them through.
+- `estimate_kinetics_from_average()` accepts weight parameters (including SG window/polynomial for `'savgol'` mode), and `extract_metrics()` threads them through.
 - Weight visualization integrates with the existing plotting system when `nnls_show_weights=True`.
 
 ### Automatic Parameter Selection
@@ -339,6 +348,7 @@ options = {
 - Linear mode: default tau = ISI (inter-stimulus interval).
 - Exponential mode with global fit: default tau = estimated tau_d from kinetics.
 - Exponential mode with other fits: default tau = 10 ms.
+- Savgol mode: no tau parameter; weights follow the normalized smoothed trace.
 
 ### Testing and Compatibility
 

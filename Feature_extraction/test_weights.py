@@ -76,7 +76,7 @@ def test_weight_modes():
         ground_truth,
     ) = create_synthetic_data()
     
-    weight_modes = ['uniform', 'linear', 'exponential']
+    weight_modes = ['uniform', 'linear', 'exponential', 'savgol']
     results = {}
 
     print(
@@ -139,7 +139,7 @@ if __name__ == "__main__":
     print("SUMMARY COMPARISON")
     print("="*60)
     
-    for mode in ['uniform', 'linear', 'exponential']:
+    for mode in weight_modes:
         amps = results[mode]['average']['amp_nnls']
         print(
             f"{mode:12}: {[f'{a:.3f}' for a in amps]}"

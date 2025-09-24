@@ -26,6 +26,7 @@ NNLS weight control (options['nnls_weight_mode']):
  - 'uniform'     : all timepoints have equal weight (default)
  - 'linear'      : weights decrease linearly from 1 to 0 between each stim and next
  - 'exponential' : exponential decay weights for each event
+ - 'savgol'      : normalized |ΔF| from the Savitzky-Golay smoothed trace
 
 NNLS weight time constant (options['nnls_weight_tau_s']):
  - None (auto)   : uses ISI for linear, tau_d for exponential in global mode
@@ -80,7 +81,7 @@ options_presets = {
         'recut_snippets': True,
         'event_model_settings': {},  # valid for single_exp
         # NNLS weight control options
-        'nnls_weight_mode': 'exponential',  # 'uniform', 'linear', 'exponential'
+        'nnls_weight_mode': 'savgol',  # 'uniform', 'linear', 'exponential', 'savgol'
         'nnls_weight_tau_s': 0.003,  # if None: auto (uses ISI or fitted tau)
         'nnls_show_weights': True,  # Display weight pattern
 

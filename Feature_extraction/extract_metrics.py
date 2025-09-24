@@ -122,7 +122,7 @@ DEFAULTS = {
     #  - 'linear': non-negative slope linear regression across pulses
     'decay_progression_mode': 'linear',
     # NNLS weight control
-    'nnls_weight_mode': 'uniform',  # 'uniform', 'linear', 'exponential'
+    'nnls_weight_mode': 'uniform',  # 'uniform', 'linear', 'exponential', 'savgol'
     'nnls_weight_tau_s': None,  # Time constant for exponential or slope for linear (auto if None)
     'nnls_show_weights': False,  # Display weight pattern for the train
 }
@@ -143,11 +143,12 @@ _KERNEL_FUN = iglusnfr_kernel
 # -------------------------
 
 def _calculate_nnls_weights(
-    t: np.ndarray, 
-    stim_times: np.ndarray, 
+    t: np.ndarray,
+    stim_times: np.ndarray,
     isi: float,
     weight_mode: str = 'uniform',
-    weight_tau_s: Optional[float] = None
+    weight_tau_s: Optional[float] = None,
+    y_ref: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """
     Calculate weights for NNLS fitting based on weight_mode.
@@ -156,8 +157,10 @@ def _calculate_nnls_weights(
         t: Time array
         stim_times: Stimulus times array  
         isi: Inter-stimulus interval in seconds
-        weight_mode: 'uniform', 'linear', or 'exponential'
+        weight_mode: 'uniform', 'linear', 'exponential', or 'savgol'
         weight_tau_s: Time constant for exponential decay or linear slope (in seconds)
+        y_ref: Optional reference trace used for Savitzky-Golay weights (must
+            match ``t`` in shape when ``weight_mode`` is ``'savgol'``)
         
     Returns:
         weights: Array same length as t with weights for each timepoint
@@ -208,9 +211,25 @@ def _calculate_nnls_weights(
                 t_rel = t[mask] - stim_t
                 weights[mask] = np.exp(-t_rel / tau)
     
+    elif weight_mode == 'savgol':
+        if y_ref is None:
+            raise ValueError("Savgol weight_mode requires a reference trace (y_ref)")
+        ref = np.asarray(y_ref, float)
+        if ref.shape != t.shape:
+            raise ValueError("Reference trace for savgol weights must match time array shape")
+        ref = np.where(np.isfinite(ref), ref, 0.0)
+        ref = np.abs(ref)
+        ref = ref - np.nanmin(ref)
+        max_ref = np.nanmax(ref)
+        if not np.isfinite(max_ref) or max_ref <= 0:
+            return weights
+        norm = ref / max_ref
+        weights = 0.1 + 0.9 * norm
+        return weights
+
     else:
         raise ValueError(f"Unknown weight_mode: {weight_mode}")
-    
+
     return weights
 
 
@@ -623,6 +642,8 @@ def estimate_kinetics_from_average(
     isi: float = 0.05,
     weight_mode: str = 'uniform',
     weight_tau_s: Optional[float] = None,
+    sg_window: int = DEFAULTS['sg_window'],
+    sg_poly: int = DEFAULTS['sg_poly'],
 ) -> Tuple[float, float, float, np.ndarray]:
     """Grid search τr, τd0, slope on the average trace (zoomed window)."""
     tau_r_grid = np.array(taur_grid_ms, float) / 1000.0
@@ -632,7 +653,18 @@ def estimate_kinetics_from_average(
     zmask, _, _ = time_zoom_mask(t, float(stim_times[0]), isi_guess, len(stim_times), pre_zoom_s, post_zoom_s)
 
     # Calculate weights for NNLS fitting
-    weights = _calculate_nnls_weights(t, stim_times, isi_guess, weight_mode, weight_tau_s)
+    if weight_mode == 'savgol':
+        y_weight_ref = sg_smooth(fill_nans_timewise(y_avg, t), int(sg_window), int(sg_poly))
+    else:
+        y_weight_ref = None
+    weights = _calculate_nnls_weights(
+        t,
+        stim_times,
+        isi_guess,
+        weight_mode,
+        weight_tau_s,
+        y_ref=y_weight_ref,
+    )
 
     def obj_for(tau_r, tau_d_vec):
         X = np.column_stack([_KERNEL_FUN(t - st, tau_r, td) for st, td in zip(stim_times, tau_d_vec)])
@@ -917,6 +949,8 @@ def extract_metrics(
             weight_tau_s = 0.010  # Default 10ms until tau_d is estimated
         else:
             weight_tau_s = 0.010  # Default 10ms for other modes
+    elif weight_mode == 'savgol':
+        weight_tau_s = None
 
     # Average trace and kinetics
     y_avg = np.nanmean(Yd, axis=1)
@@ -1079,7 +1113,8 @@ def extract_metrics(
                     t, y_avg, stim_times,
                     taur_grid_ms=cfg['kin_taur_grid_ms'], taud0_grid_ms=cfg['kin_taud0_grid_ms'],
                     slope_grid_ms=cfg['kin_slope_grid_ms'], pre_zoom_s=cfg['pre_zoom_s'], post_zoom_s=cfg['post_zoom_s'],
-                    isi=isi, weight_mode=cfg['nnls_weight_mode'], weight_tau_s=weight_tau_s
+                    isi=isi, weight_mode=cfg['nnls_weight_mode'], weight_tau_s=weight_tau_s,
+                    sg_window=cfg['sg_window'], sg_poly=cfg['sg_poly']
                 )
             tau_r = float(tr_b); tau_d0 = float(td0_b)
             t_avg_evt = (t - float(train_start)) * 1000.0
@@ -1143,7 +1178,8 @@ def extract_metrics(
                     t, Yd[:, j], stim_times,
                     taur_grid_ms=cfg['kin_taur_grid_ms'], taud0_grid_ms=cfg['kin_taud0_grid_ms'],
                     slope_grid_ms=cfg['kin_slope_grid_ms'], pre_zoom_s=cfg['pre_zoom_s'], post_zoom_s=cfg['post_zoom_s'],
-                    isi=isi, weight_mode=weight_mode, weight_tau_s=weight_tau_s
+                    isi=isi, weight_mode=weight_mode, weight_tau_s=weight_tau_s,
+                    sg_window=cfg['sg_window'], sg_poly=cfg['sg_poly']
                 )
                 tau_rs.append(trj)
                 tau_d_mat.append(tdvecj)
@@ -1163,7 +1199,8 @@ def extract_metrics(
             t, y_avg, stim_times,
             taur_grid_ms=cfg['kin_taur_grid_ms'], taud0_grid_ms=cfg['kin_taud0_grid_ms'],
             slope_grid_ms=cfg['kin_slope_grid_ms'], pre_zoom_s=cfg['pre_zoom_s'], post_zoom_s=cfg['post_zoom_s'],
-            isi=isi, weight_mode=weight_mode, weight_tau_s=weight_tau_s
+            isi=isi, weight_mode=weight_mode, weight_tau_s=weight_tau_s,
+            sg_window=cfg['sg_window'], sg_poly=cfg['sg_poly']
         )
         # For linear/monotonic, also anchor to the last event using the average trace
         if dec_mode in ('linear','free_monotonic'):
@@ -1195,7 +1232,16 @@ def extract_metrics(
         allow_shift=allow_shift, delta_max_s=cfg['delta_max_s'], delta_step_s=cfg['delta_step_s'],
         shift_min_s=cfg['shift_min_s'],
     )
-    y_sg_avg = sg_smooth(y_avg, sgW, sgP) if 'savgol' in traces else None
+    need_avg_sg = (
+        ('savgol' in traces)
+        or (meas == 'SAVGOL')
+        or (failm == 'SAVGOL')
+        or (weight_mode == 'savgol')
+    )
+    if need_avg_sg:
+        y_sg_avg = sg_smooth(fill_nans_timewise(y_avg, t), sgW, sgP)
+    else:
+        y_sg_avg = None
 
     amp_nnls_avg = compute_localmax_corrected_amps(
         t, yhat_avg, stim_times, win_ms, n_avg, pre_ms, d_avg, tau_r, tau_d_vec
@@ -1521,7 +1567,18 @@ def extract_metrics(
     if cfg.get('nnls_show_weights', False) and want_plot:
         try:
             # Calculate weights for visualization
-            weights = _calculate_nnls_weights(t, stim_times, isi, weight_mode, weight_tau_s)
+            if weight_mode == 'savgol' and y_sg_avg is None:
+                y_vis = sg_smooth(fill_nans_timewise(y_avg, t), sgW, sgP)
+            else:
+                y_vis = y_sg_avg
+            weights = _calculate_nnls_weights(
+                t,
+                stim_times,
+                isi,
+                weight_mode,
+                weight_tau_s,
+                y_ref=y_vis,
+            )
             
             # Create weight plot
             plt.figure(figsize=(10, 4))
