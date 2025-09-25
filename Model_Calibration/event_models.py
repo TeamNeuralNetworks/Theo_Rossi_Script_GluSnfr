@@ -7,6 +7,7 @@ across demos and notebooks.
 Available models:
 - 'double_exp' (default): classic double exponential (constrained)
 - 'cooperative': cooperative binding (Hill-like rise, exp decay)
+- 'two_step_binding': biophysically accurate iGluSnFR model (binding + conformational change)
 - 'single_exp': single exponential decay (constrained)
 - 'alpha': alpha function (constrained)
 - 'gamma': gamma function (constrained)
@@ -58,9 +59,9 @@ def _apply_global_bounds(spec: Dict) -> Dict:
         if p == 't_peak':
             lb[i], ub[i] = FIT_LIMITS['t_peak']
         elif 'tau' in p:
-            if any(s in p for s in ('fast', 'rise')) or p.endswith('1'):
+            if any(s in p for s in ('fast', 'rise', 'bind')) or p.endswith('1'):
                 bounds = FIT_LIMITS.get('tau_primary')
-            elif any(s in p for s in ('slow',)) or p.endswith('2') or 'decay' in p:
+            elif any(s in p for s in ('slow', 'conform', 'dissoc')) or p.endswith('2') or 'decay' in p:
                 bounds = FIT_LIMITS.get('tau_secondary')
             else:
                 bounds = FIT_LIMITS.get('tau')
@@ -114,11 +115,55 @@ def model_cooperative_binding(t, amp, tau_rise, tau_decay, n_coop, t_peak):
     return y
 
 
+def model_two_step_binding(t, amp, tau_bind, tau_conform, tau_dissoc, t_peak):
+    """Two-step binding model for iGluSnFR: binding → conformational change → dissociation.
+    
+    This model captures the biophysical mechanism where conformational change is rate-limiting.
+    Uses difference of exponentials to represent sequential binding and conformational change,
+    followed by overall dissociation kinetics.
+    
+    Parameters in seconds; t in milliseconds.
+    More accurate than cooperative model for iGluSnFR biophysics.
+    """
+    t = np.asarray(t)
+    y = np.zeros_like(t, dtype=float)
+    m = t >= t_peak
+    if np.any(m):
+        ts = (t[m] - t_peak) / 1000.0
+        tb = max(tau_bind, 1e-6)      # Fast binding phase
+        tc = max(tau_conform, 1e-6)   # Slower conformational change (rate-limiting)
+        td = max(tau_dissoc, 1e-6)    # Overall dissociation/clearance
+        
+        # Ensure conformational change is slower than binding
+        if tc <= tb:
+            tc = tb * 2.0
+            
+        # Two-step rise: difference of exponentials for sequential process
+        # This represents binding followed by conformational change
+        rise = (np.exp(-ts / tc) - np.exp(-ts / tb)) / (tc - tb) * tc
+        
+        # Overall dissociation
+        dissoc = np.exp(-ts / td)
+        
+        y[m] = amp * rise * dissoc
+    return y
+
+
 # -----------------------------
 # Additional models (from 3B)
 # -----------------------------
 
 def model_single_exp_constrained(t, amp, tau_decay, t_peak):
+    """Single exponential decay: instantaneous rise followed by exponential decay.
+    
+    Biological context: Models processes with instantaneous neurotransmitter release
+    and simple first-order clearance kinetics. Applicable to:
+    - Fast calcium transients in small compartments
+    - Situations where rise time << decay time (e.g., flash photolysis)
+    - Simple clearance-dominated kinetics
+    
+    Parameters in seconds; t in milliseconds.
+    """
     t = np.asarray(t)
     y = np.zeros_like(t, dtype=float)
     m = t >= t_peak
@@ -129,6 +174,18 @@ def model_single_exp_constrained(t, amp, tau_decay, t_peak):
 
 
 def model_alpha_constrained(t, amp, tau, t_peak):
+    """Alpha function: (t/τ) * exp(-t/τ). Classic model for synaptic currents.
+    
+    Biological context: Originally developed to model miniature synaptic currents.
+    Represents processes where:
+    - Rise and decay are governed by the same time constant
+    - Natural for single-pool vesicle fusion kinetics
+    - Used in computational neuroscience for simplified synaptic modeling
+    - Good for EPSC/IPSC waveforms at room temperature
+    
+    Parameters in seconds; t in milliseconds.
+    Normalized so peak amplitude equals 'amp'.
+    """
     t = np.asarray(t)
     y = np.zeros_like(t, dtype=float)
     m = t >= t_peak
@@ -141,6 +198,17 @@ def model_alpha_constrained(t, amp, tau, t_peak):
 
 
 def model_gamma_constrained(t, amp, n, tau, t_peak):
+    """Gamma function: (t/τ)^n * exp(-t/τ). Models multi-step processes.
+    
+    Biological context: Represents cascaded processes with multiple rate-limiting steps:
+    - Vesicle priming through multiple states before fusion
+    - Multi-step enzymatic cascades (e.g., calcium-calmodulin-kinase activation)
+    - Sequential binding events in receptor activation
+    - Calcium release through multiple coupled stores
+    - Higher 'n' values create more delayed, sharper peaks
+    
+    Parameters in seconds (tau) and dimensionless (n); t in milliseconds.
+    """
     t = np.asarray(t)
     y = np.zeros_like(t, dtype=float)
     m = t >= t_peak
@@ -158,6 +226,16 @@ def model_gamma_constrained(t, amp, n, tau, t_peak):
 
 
 def model_bilinear_constrained(t, amp, t_rise, t_decay, t_peak):
+    """Bilinear rise + exponential decay: linear rise to peak, then exponential decay.
+    
+    Biological context: Models processes with rate-limited buildup:
+    - Sustained neurotransmitter release (e.g., during depolarization)
+    - Gradual calcium accumulation in large compartments
+    - Slow sensor saturation followed by clearance
+    - Useful when rise phase is approximately linear rather than exponential
+    
+    t_rise and t_decay in milliseconds; t in milliseconds.
+    """
     t = np.asarray(t)
     y = np.zeros_like(t, dtype=float)
     rise_mask = (t >= t_peak) & (t <= t_peak + t_rise)
@@ -166,13 +244,24 @@ def model_bilinear_constrained(t, amp, t_rise, t_decay, t_peak):
         y[rise_mask] = amp * (t_rel / max(t_rise, 0.1))
     decay_mask = t > (t_peak + t_rise)
     if np.any(decay_mask):
-        ts = (t[decay_mask] - t_peak - t_rise) / 1000.0
-        tau_s = max(t_decay / 1000.0, 1e-6)
+        ts = (t[decay_mask] - t_peak - t_rise) / 1000.0  # Convert to seconds
+        tau_s = max(t_decay / 1000.0, 1e-6)  # t_decay is in ms, convert to seconds
         y[decay_mask] = amp * np.exp(-ts / tau_s)
     return y
 
 
 def model_binding_kinetics(t, amp, kon, koff, tau_clear, t_peak):
+    """Binding kinetics with clearance: models receptor binding and dissociation.
+    
+    Biological context: Explicit modeling of neurotransmitter-receptor interactions:
+    - kon: association rate constant (neurotransmitter binding to receptor)
+    - koff: dissociation rate constant (neurotransmitter unbinding)
+    - tau_clear: additional clearance time constant (uptake, diffusion, metabolism)
+    - Useful for iGluSnFR, calcium indicators binding to Ca2+
+    - Can model competitive binding scenarios
+    
+    kon, koff in s⁻¹; tau_clear in seconds; t in milliseconds.
+    """
     t = np.asarray(t)
     y = np.zeros_like(t, dtype=float)
     m = t >= t_peak
@@ -187,6 +276,17 @@ def model_binding_kinetics(t, amp, kon, koff, tau_clear, t_peak):
 
 
 def model_two_component_shared_rise(t, amp_fast, tau_rise, tau_fast, amp_slow, tau_slow, t_peak):
+    """Two-component decay with shared rise time: models heterogeneous populations.
+    
+    Biological context: Represents mixed populations with different kinetics:
+    - Fast and slow calcium binding sites with same loading kinetics
+    - Mixed receptor populations (e.g., synaptic vs extrasynaptic receptors)
+    - Vesicle populations with different release probabilities
+    - Buffered vs unbuffered calcium dynamics
+    - Different clearance pathways (fast reuptake vs slow diffusion)
+    
+    Parameters in seconds; t in milliseconds.
+    """
     t = np.asarray(t)
     y = np.zeros_like(t, dtype=float)
     m = t >= t_peak
@@ -200,6 +300,17 @@ def model_two_component_shared_rise(t, amp_fast, tau_rise, tau_fast, amp_slow, t
 
 
 def model_desensitization(t, amp, tau_rise, tau_decay, tau_recovery, desens_factor, t_peak):
+    """Desensitization model: activation with progressive reduction due to inactivation.
+    
+    Biological context: Models receptor or channel desensitization:
+    - AMPA/NMDA receptor desensitization during prolonged glutamate exposure
+    - Voltage-gated channel inactivation
+    - Calcium sensor desensitization (e.g., calmodulin saturation)
+    - Progressive reduction in response during sustained stimulation
+    - desens_factor: fraction of response lost to desensitization (0-1)
+    
+    Parameters in seconds; t in milliseconds.
+    """
     t = np.asarray(t)
     y = np.zeros_like(t, dtype=float)
     m = t >= t_peak
@@ -213,6 +324,17 @@ def model_desensitization(t, amp, tau_rise, tau_decay, tau_recovery, desens_fact
 
 
 def model_cooperative_plus_linear(t, amp_coop, tau_rise_coop, tau_decay_coop, n_coop, amp_linear, tau_decay_linear, t_peak):
+    """Cooperative + linear components: combines Hill-like and simple exponential kinetics.
+    
+    Biological context: Models mixed binding mechanisms:
+    - Cooperative component: high-affinity sites with positive cooperativity
+    - Linear component: low-affinity, non-cooperative binding sites  
+    - Useful for calcium indicators with multiple binding modes
+    - Can represent synaptic + extrasynaptic receptor populations
+    - Models situations with both specific and non-specific binding
+    
+    Parameters in seconds; t in milliseconds.
+    """
     t = np.asarray(t)
     y = np.zeros_like(t, dtype=float)
     m = t >= t_peak
@@ -232,6 +354,19 @@ def model_cooperative_plus_linear(t, amp_coop, tau_rise_coop, tau_decay_coop, n_
 
 
 def model_diffusion_clearance(t, amp, tau_diff, tau_clear1, tau_clear2, frac_clear1, t_peak):
+    """Diffusion-limited rise with bi-exponential clearance.
+    
+    Biological context: Models spatially-distributed processes:
+    - tau_diff: diffusion time constant for neurotransmitter spread
+    - Dual clearance pathways (e.g., reuptake + metabolism)
+    - tau_clear1/2: fast reuptake vs slow enzymatic breakdown
+    - frac_clear1: fraction going through fast clearance pathway
+    - Relevant for glutamate spillover, volume transmission
+    - Models situations where diffusion limits signal rise
+    
+    Parameters in seconds; t in milliseconds.
+    Rise follows alpha function (diffusion kinetics).
+    """
     t = np.asarray(t)
     y = np.zeros_like(t, dtype=float)
     m = t >= t_peak
@@ -248,6 +383,18 @@ def model_diffusion_clearance(t, amp, tau_diff, tau_clear1, tau_clear2, frac_cle
 
 
 def model_double_cooperative(t, amp, tau_rise1, tau_decay1, n1, tau_rise2, tau_decay2, n2, t_peak):
+    """Sum of two cooperative binding components with different kinetics.
+    
+    Biological context: Represents multiple cooperative binding sites:
+    - Different calcium sensors with distinct cooperativities
+    - Fast vs slow cooperative gating mechanisms  
+    - High-affinity (slow) vs low-affinity (fast) cooperative sites
+    - Synaptic vs extrasynaptic cooperative receptors
+    - Mixed populations of calcium indicators with different n_coop
+    
+    Equal weighting (50:50) between components.
+    Parameters in seconds; t in milliseconds.
+    """
     t = np.asarray(t)
     y = np.zeros_like(t, dtype=float)
     m = t >= t_peak
@@ -265,6 +412,18 @@ def model_double_cooperative(t, amp, tau_rise1, tau_decay1, n1, tau_rise2, tau_d
 
 
 def model_heterogeneous_cooperative(t, amp, tau_rise1, tau_decay1, n1, frac1, tau_rise2, tau_decay2, n2, t_peak):
+    """Weighted sum of two cooperative components with adjustable fractions.
+    
+    Biological context: Heterogeneous receptor/sensor populations:
+    - frac1: fraction of sites with kinetics 1 vs kinetics 2
+    - Models developmental changes in receptor composition
+    - Activity-dependent shifts between receptor populations
+    - Different splice variants with distinct cooperativities
+    - Cell-type specific receptor expression patterns
+    
+    More flexible than double_cooperative with adjustable weighting.
+    Parameters in seconds; t in milliseconds.
+    """
     t = np.asarray(t)
     y = np.zeros_like(t, dtype=float)
     m = t >= t_peak
@@ -285,6 +444,18 @@ def model_heterogeneous_cooperative(t, amp, tau_rise1, tau_decay1, n1, frac1, ta
 
 def model_two_component_cooperative(t, amp_fast, tau_rise_fast, tau_decay_fast, n_fast,
                                     amp_slow, tau_rise_slow, tau_decay_slow, n_slow, t_peak):
+    """Two cooperative components with independent amplitudes and kinetics.
+    
+    Biological context: Most flexible model for heterogeneous cooperative systems:
+    - Independent amplitude scaling for each component
+    - Different cooperativities for fast vs slow processes
+    - Models distinct functional pools (e.g., RRP vs reserve pool vesicles)
+    - Synaptic vs extrasynaptic receptors with different cooperativities
+    - Useful for calcium indicators in different cellular compartments
+    
+    Most parameters (9) - use only when simpler models inadequate.
+    Parameters in seconds; t in milliseconds.
+    """
     t = np.asarray(t)
     y = np.zeros_like(t, dtype=float)
     m = t >= t_peak
@@ -333,6 +504,15 @@ def get_event_model(name: str) -> Dict:
             'params': ['amp', 'tau_rise', 'tau_decay', 'n_coop', 't_peak'],
             'bounds': ([0, 0.001, 0.005, 0.5, 0], [np.inf, 0.020, 0.200, 5.0, 10]),
             'p0_func': lambda y, t: [float(np.nanmax(y)), 0.005, 0.030, 2.0, float(t[np.nanargmax(y)])],
+            'complexity': 5,
+        })
+    if nm in ('two_step', 'two_step_binding', 'two-step', 'iglusnfr_biophysical'):
+        return _apply_global_bounds({
+            'name': 'two_step_binding',
+            'func': model_two_step_binding,
+            'params': ['amp', 'tau_bind', 'tau_conform', 'tau_dissoc', 't_peak'],
+            'bounds': ([0, 0.0005, 0.002, 0.005, 0], [np.inf, 0.005, 0.050, 0.300, 10]),
+            'p0_func': lambda y, t: [float(np.nanmax(y)), 0.001, 0.008, 0.040, float(t[np.nanargmax(y)])],
             'complexity': 5,
         })
     if nm in ('single', 'single_exp', 'single-exponential'):

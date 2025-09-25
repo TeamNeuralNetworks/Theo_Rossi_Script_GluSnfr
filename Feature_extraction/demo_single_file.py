@@ -74,11 +74,11 @@ options_presets = {
         'bleach': True,
         # Kinetics source and progression
         'fit_source': 'global', # 'global'|'average'|'individual'
-        'decay_progression_mode': 'fixed',  # 'fixed'|'free_monotonic'|'linear'
-        'event_model': 'double_exp', # 'single_exp'|'double_exp'|'two_component'|'binding_kinetics'|'cooperative'
+        'decay_progression_mode': 'free_monotonic',  # 'fixed'|'free_monotonic'|'linear'
+        'event_model': 'two_step_binding', # 'single_exp'|'double_exp'|'two_component'|'binding_kinetics'|'cooperative'
         'recut_projection': 'median',  # 'mean'|'median'|'std'|'robust_mean'
         'recut_oversample': 10,     # integer >=1
-        'peak_recenter': 30,   # samples to shift (int or tuple); 0 disables
+        'peak_recenter': 3,   # samples to shift (int or tuple); 0 disables
         'recut_snippets': True,
         'event_model_settings': {},  # valid for single_exp
         # NNLS weight control options
