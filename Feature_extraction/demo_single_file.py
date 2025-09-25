@@ -93,6 +93,7 @@ options_presets = {
             'trials': True,
             'baseline': True,
             'residuals': False,
+            'plot_peaks_details': True,
         }
     },
 

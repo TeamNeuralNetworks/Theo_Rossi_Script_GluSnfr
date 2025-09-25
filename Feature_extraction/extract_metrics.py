@@ -31,6 +31,7 @@ try:
             iglusnfr_kernel,
             time_zoom_mask,
             windowed_max,
+            pick_peak_on_series,
             compute_no_signal_mask,
             build_median_recut_waveform,
     )
@@ -47,6 +48,7 @@ except Exception:
         iglusnfr_kernel,
         time_zoom_mask,
         windowed_max,
+        pick_peak_on_series,
         compute_no_signal_mask,
         build_median_recut_waveform,
     )
@@ -750,6 +752,7 @@ def extract_metrics(
     plot_trials = bool(plot_opts.get('trials', False))
     baseline_figs = bool(plot_opts.get('baseline', False))
     plot_residuals = bool(plot_opts.get('residuals', False))
+    plot_peaks_details = bool(plot_opts.get('plot_peaks_details', False))
     if baseline_figs:
         plot_trials = True  # baseline panel requires per-trial figures
     cfg = {**DEFAULTS, **{k: v for k, v in opts.items() if k != 'plot'}}
@@ -1411,6 +1414,43 @@ def extract_metrics(
                             linewidth=1.0,
                             alpha=0.6 - p * 0.04,  # Fade with each pulse
                         )
+                # Peak markers and residual-at-peak triangles for this trial
+                if plot_peaks_details:
+                    if meas == 'SAVGOL' and (yj_sg is not None):
+                        y_for_peaks_t = yj_sg
+                    elif meas == 'RAW':
+                        y_for_peaks_t = yj
+                    else:
+                        y_for_peaks_t = yhat_t
+
+                    # Precompute per-pulse cumulative baseline from previous pulses (NNLS comps)
+                    baseline_prev_only_t = []
+                    if comp_t is not None:
+                        cum_t = np.zeros_like(yj)
+                        for pp in range(len(stim_times)):
+                            baseline_prev_only_t.append(cum_t.copy())
+                            if pp < len(comp_t):
+                                cum_t = cum_t + comp_t[pp]
+
+                    peak_ts_t, peak_vals_t, resid_vals_t = [], [], []
+                    for pp, stp in enumerate(stim_times):
+                        tp, vp = pick_peak_on_series(t, y_for_peaks_t, float(stp), win_ms, pre_ms)
+                        peak_ts_t.append(float(tp))
+                        peak_vals_t.append(float(vp))
+                        try:
+                            i0 = int(np.argmin(np.abs(t - tp)))
+                            base_prev = baseline_prev_only_t[pp][i0] if baseline_prev_only_t else 0.0
+                            resid_vals_t.append(float(base_prev))
+                        except Exception:
+                            resid_vals_t.append(np.nan)
+                    try:
+                        ax_train.scatter(peak_ts_t, peak_vals_t, s=60, color='red', edgecolors='white', linewidths=0.9, zorder=6)
+                    except Exception:
+                        pass
+                    try:
+                        ax_train.scatter(peak_ts_t, resid_vals_t, s=55, marker='v', facecolors='white', edgecolors='tab:red', linewidths=1.0, zorder=5)
+                    except Exception:
+                        pass
                 # Failure threshold line (thin red dotted)
                 if np.isfinite(thr1):
                     ax_train.axhline(thr1, color='red', linestyle=':', linewidth=0.8)
@@ -1504,6 +1544,39 @@ def extract_metrics(
                             linewidth=1.0,
                             alpha=0.6 - p * 0.04,
                         )
+                # Peak markers and residual-at-peak triangles on the single-panel trial plot
+                if plot_peaks_details:
+                    if meas == 'SAVGOL' and (yj_sg is not None):
+                        y_for_peaks_tp = yj_sg
+                    elif meas == 'RAW':
+                        y_for_peaks_tp = yj
+                    else:
+                        y_for_peaks_tp = yhat_t
+                    baseline_prev_only_tp = []
+                    if comp_t is not None:
+                        cum_tp = np.zeros_like(yj)
+                        for pp in range(len(stim_times)):
+                            baseline_prev_only_tp.append(cum_tp.copy())
+                            if pp < len(comp_t):
+                                cum_tp = cum_tp + comp_t[pp]
+                    pk_ts, pk_vals, res_vals = [], [], []
+                    for pp, stp in enumerate(stim_times):
+                        tp, vp = pick_peak_on_series(t, y_for_peaks_tp, float(stp), win_ms, pre_ms)
+                        pk_ts.append(float(tp))
+                        pk_vals.append(float(vp))
+                        try:
+                            i0 = int(np.argmin(np.abs(t - tp)))
+                            res_vals.append(float(baseline_prev_only_tp[pp][i0]) if baseline_prev_only_tp else 0.0)
+                        except Exception:
+                            res_vals.append(np.nan)
+                    try:
+                        ax_t.scatter(pk_ts, pk_vals, s=60, color='red', edgecolors='white', linewidths=0.9, zorder=6)
+                    except Exception:
+                        pass
+                    try:
+                        ax_t.scatter(pk_ts, res_vals, s=55, marker='v', facecolors='white', edgecolors='tab:red', linewidths=1.0, zorder=5)
+                    except Exception:
+                        pass
                 if np.isfinite(thr1):
                     ax_t.axhline(thr1, color='red', linestyle=':', linewidth=0.8)
                 ax_t.set_xlim(z0, z1)
@@ -1782,6 +1855,53 @@ def extract_metrics(
                 ax.plot(tz, float(amp_last_display) * k_last, color='crimson', linestyle='--', linewidth=1.4, alpha=0.9, label='last fit (pre-refit)')
         except Exception:
             pass
+
+        # Optional: overlay peak markers and residual-at-peak triangles
+        if plot_peaks_details:
+            # Choose which series defines the "measurement" trace for peak picking
+            if meas == 'SAVGOL' and (y_sg_avg is not None):
+                y_for_peaks = y_sg_avg
+            elif meas == 'RAW':
+                y_for_peaks = y_avg
+            else:
+                y_for_peaks = yhat_avg
+
+            # Build cumulative baseline from previous pulses only using NNLS components
+            # For pulse p, baseline_prev[p, :] = sum_{k < p} comp_avg[k]
+            baseline_prev_only = []
+            if comp_avg is not None:
+                cum = np.zeros_like(y_avg)
+                for p in range(len(stim_times)):
+                    baseline_prev_only.append(cum.copy())
+                    if p < len(comp_avg):
+                        cum = cum + comp_avg[p]
+
+            peak_ts: list = []
+            peak_vals: list = []
+            resid_vals: list = []
+            for p, st in enumerate(stim_times):
+                tp, vp = pick_peak_on_series(t, y_for_peaks, float(st), win_ms, pre_ms)
+                peak_ts.append(float(tp))
+                peak_vals.append(float(vp))
+                # Residual-under-peak = baseline from prior pulses at that time
+                try:
+                    i0 = int(np.argmin(np.abs(t - tp)))
+                    base_prev = baseline_prev_only[p][i0] if baseline_prev_only else 0.0
+                    resid_vals.append(float(base_prev))
+                except Exception:
+                    resid_vals.append(np.nan)
+
+            # Red circles at peaks (on the chosen measurement trace)
+            try:
+                ax.scatter(peak_ts, peak_vals, s=70, color='red', edgecolors='white', linewidths=0.9, zorder=6, label='peaks')
+            except Exception:
+                pass
+            # Down-pointing triangles for residual at peak time
+            try:
+                # Triangles sit on the orange dashed baseline (previous pulses only)
+                ax.scatter(peak_ts, resid_vals, s=60, marker='v', facecolors='white', edgecolors='tab:red', linewidths=1.0, zorder=5, label='residual at peak')
+            except Exception:
+                pass
         ax.set_xlim(z0, z1)
         ax.set_xlabel('Time (s)')
         ax.set_ylabel('ΔF/F0' if use_dff else 'ΔF')
