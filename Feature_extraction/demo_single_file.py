@@ -54,6 +54,7 @@ from Feature_extraction.extract_metrics import extract_metrics
 
 xlsx_path = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Theo_4Ca\20211125_linescan1_20Hz_10pulses_4mMCa_bouton1_traces_converted.xlsx"
 # xlsx_path = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Theo_1_5Ca\20220726_linescan3_20Hz_10pulses_1.5mMCa_bouton3_traces_converted.xlsx"
+xlsx_path = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\WT_Anthime\241212_Fibre2_PortionA_bouton2.xlsx"
 
 
 out_dir = r"C:\Users\Antoine.Valera\Desktop\Testout"
@@ -130,7 +131,7 @@ options = options_presets[preset_name]
 
 res = extract_metrics(
     time, trials,
-    train_start=0.498,   # seconds
+    train_start=0.498 + 0.5,   # seconds
     isi=0.05,          # seconds
     n_pulses=10,
     options=options
@@ -138,14 +139,20 @@ res = extract_metrics(
 
 
 # Inspect results
-print("Averages (NNLS):", res['average']['amp_nnls'])
-print("PPR (NNLS):", res['average']['ppr_nnls'])
+amp_avg = res['average'].get('amp_nnls_corr', res['average']['amp_nnls'])
+ppr_avg = res['average'].get('ppr_nnls_corr')
+if ppr_avg is None:
+    a1 = float(amp_avg[0]) if len(amp_avg) else np.nan
+    ppr_avg = (amp_avg / a1) if np.isfinite(a1) and abs(a1) > 1e-12 else amp_avg * np.nan
+print("Averages (NNLS, peak-baseline):", amp_avg)
+print("PPR (NNLS, peak-baseline):", ppr_avg)
 print("A1 thresholds per trial:", res['threshold_amp1'])
 print("A1 p-values per trial:", res['pval_amp1'])
 
 base = os.path.splitext(os.path.basename(xlsx_path))[0]
 row = {'measurement': 'NNLS', 'ID': base}
-amp = res['average']['amp_nnls']; ppr = res['average']['ppr_nnls']
+amp = amp_avg
+ppr = ppr_avg
 for i, v in enumerate(amp, 1):
     row[f'AMP{i}'] = float(v)
 for i in range(2, len(ppr) + 1):
@@ -153,7 +160,7 @@ for i in range(2, len(ppr) + 1):
 
 per_trial_rows, fail_counts = [], {i: [0, 0] for i in range(1, 4)}
 for idx_trial, rtrial in enumerate(res.get('per_trial', [])):
-    amp_trial = np.asarray(rtrial.get('amp_nnls'), float)
+    amp_trial = np.asarray(rtrial.get('amp_nnls_corr', rtrial.get('amp_nnls')), float)
     thr = float(rtrial.get('thr_shared', np.nan))
     a1 = amp_trial[0] if amp_trial.size else np.nan
     status = 'NA'

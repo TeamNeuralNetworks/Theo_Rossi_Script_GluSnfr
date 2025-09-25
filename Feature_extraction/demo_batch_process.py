@@ -78,7 +78,7 @@ for in_dir in folders:
     os.makedirs(out_dir, exist_ok=True)
 
     # Per-folder timing
-    train_start = train_start_by_folder.get(in_dir, 0.999)
+    train_start = train_start_by_folder.get(in_dir, 0.998)
     isi = 0.05
     n_pulses = 10
 
@@ -121,7 +121,7 @@ for in_dir in folders:
                 'recut_snippets': True,
                 'event_model_settings': {},  # valid for single_exp
                 # NNLS weight control options
-                'nnls_weight_mode': 'exponential',  # 'uniform', 'linear', 'exponential', 'savgol'
+                'nnls_weight_mode': 'savgol',  # 'uniform', 'linear', 'exponential', 'savgol'
                 'nnls_weight_tau_s': 0.005,  # if None: auto (uses ISI or fitted tau)
                 'nnls_show_weights': False,  # Display weight pattern
 
@@ -133,6 +133,7 @@ for in_dir in folders:
                     'trials': False,
                     'baseline': False,
                     'residuals': False,
+                    'plot_peaks_details': True,
                 }
             },
         }
@@ -155,7 +156,11 @@ for in_dir in folders:
             res['figure'].savefig(os.path.join(out_dir, f"{base}.png"), dpi=150)
 
         row = {'measurement': 'NNLS', 'ID': base}
-        amp = res['average']['amp_nnls']; ppr = res['average']['ppr_nnls']
+        amp = res['average'].get('amp_nnls_corr', res['average']['amp_nnls'])
+        ppr = res['average'].get('ppr_nnls_corr')
+        if ppr is None:
+            a1 = float(amp[0]) if len(amp) else np.nan
+            ppr = (amp / a1) if np.isfinite(a1) and abs(a1) > 1e-12 else amp * np.nan
         for i, v in enumerate(amp, 1):
             row[f'AMP{i}'] = float(v)
         for i in range(2, len(ppr) + 1):
@@ -163,7 +168,7 @@ for in_dir in folders:
 
         fail_counts = {i: [0, 0] for i in range(1, 4)}
         for idx_trial, rtrial in enumerate(res.get('per_trial', [])):
-            amp_trial = np.asarray(rtrial.get('amp_nnls'), float)
+            amp_trial = np.asarray(rtrial.get('amp_nnls_corr', rtrial.get('amp_nnls')), float)
             thr = float(rtrial.get('thr_shared', np.nan))
             a1 = amp_trial[0] if amp_trial.size else np.nan
             status = 'NA'

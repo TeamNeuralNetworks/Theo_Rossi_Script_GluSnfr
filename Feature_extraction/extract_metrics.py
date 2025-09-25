@@ -1320,6 +1320,7 @@ def extract_metrics(
         d = a[0] if a.size else np.nan
         return a / d if np.isfinite(d) and abs(d) > 1e-12 else a * np.nan
     ppr_nnls_avg = _norm(amp_nnls_avg)
+    ppr_nnls_corr_avg = _norm(amp_nnls_corr_avg)
     amp_raw_avg = compute_localmax_corrected_amps(t, y_avg, stim_times, win_ms, n_avg, pre_ms, d_avg, tau_r, tau_d_vec)
     amp_raw_corr_avg = compute_peak_corrected_from_components(
         t, y_avg, stim_times, comp_avg, win_ms=win_ms, pre_ms=pre_ms
@@ -2011,6 +2012,7 @@ def extract_metrics(
             'amp_savgol_corr': np.asarray(amp_sg_corr_avg, float),
             'amp_nnls_corr': np.asarray(amp_nnls_corr_avg, float),
             'ppr_nnls': np.asarray(ppr_nnls_avg, float),
+            'ppr_nnls_corr': np.asarray(ppr_nnls_corr_avg, float),
             'y_avg': np.asarray(y_avg, float),
             'yhat_avg': np.asarray(yhat_avg, float),
         },
