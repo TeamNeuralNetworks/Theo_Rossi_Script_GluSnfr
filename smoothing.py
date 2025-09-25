@@ -691,7 +691,7 @@ def build_median_recut_figure(
     overlay_alpha: float = 0.12,
     overlay_max_traces: int = 200,
     ax=None,
-    plot_median_first: bool = False,
+    plot_median_first: bool = True,
 ):
     """Create a figure showing the median recut waveform.
 

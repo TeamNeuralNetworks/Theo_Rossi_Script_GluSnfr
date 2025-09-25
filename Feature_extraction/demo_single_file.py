@@ -52,8 +52,8 @@ if REPO_ROOT not in sys.path:
 
 from Feature_extraction.extract_metrics import extract_metrics
 
-# xlsx_path = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Theo_4Ca\20211125_linescan1_20Hz_10pulses_4mMCa_bouton1_traces_converted.xlsx"
-xlsx_path = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Theo_1_5Ca\20220726_linescan3_20Hz_10pulses_1.5mMCa_bouton3_traces_converted.xlsx"
+xlsx_path = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Theo_4Ca\20211125_linescan1_20Hz_10pulses_4mMCa_bouton1_traces_converted.xlsx"
+# xlsx_path = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Theo_1_5Ca\20220726_linescan3_20Hz_10pulses_1.5mMCa_bouton3_traces_converted.xlsx"
 
 
 out_dir = r"C:\Users\Antoine.Valera\Desktop\Testout"
@@ -72,17 +72,17 @@ options_presets = {
         'normalize_dff': True,
         'bleach': True,
         # Kinetics source and progression
-        'fit_source': 'global',
+        'fit_source': 'global', # 'global'|'average'|'individual'
         'decay_progression_mode': 'fixed',  # 'fixed'|'free_monotonic'|'linear'
-        'event_model': 'double_cooperative', # 'single_exp'|'double_exp'|'two_component'|'binding_kinetics'|'cooperative'
-        'recut_projection': 'robust_mean',  # 'mean'|'median'|'std'|'robust_mean'
-        'recut_oversample': 5,     # integer >=1
-        'peak_recenter': 5,   # samples to shift (int or tuple); 0 disables
+        'event_model': 'double_exp', # 'single_exp'|'double_exp'|'two_component'|'binding_kinetics'|'cooperative'
+        'recut_projection': 'median',  # 'mean'|'median'|'std'|'robust_mean'
+        'recut_oversample': 10,     # integer >=1
+        'peak_recenter': 30,   # samples to shift (int or tuple); 0 disables
         'recut_snippets': True,
         'event_model_settings': {},  # valid for single_exp
         # NNLS weight control options
         'nnls_weight_mode': 'savgol',  # 'uniform', 'linear', 'exponential', 'savgol'
-        'nnls_weight_tau_s': 0.003,  # if None: auto (uses ISI or fitted tau)
+        'nnls_weight_tau_s': 0.008,  # if None: auto (uses ISI or fitted tau)
         'nnls_show_weights': True,  # Display weight pattern
 
 
@@ -92,7 +92,7 @@ options_presets = {
             'show_decay': True,
             'trials': True,
             'baseline': True,
-            'residuals': False,
+            'residuals': True,
             'plot_peaks_details': True,
         }
     },
@@ -130,7 +130,7 @@ options = options_presets[preset_name]
 
 res = extract_metrics(
     time, trials,
-    train_start=0.5,   # seconds
+    train_start=0.498,   # seconds
     isi=0.05,          # seconds
     n_pulses=10,
     options=options
@@ -200,22 +200,7 @@ if fig is not None:
     except Exception:
         pass
 
-# Save/show per-trial figures (including residual/baseline panels when enabled)
-figs_trials = res.get('figures_trials') or []
-if figs_trials:
-    for i, ftri in enumerate(figs_trials, 1):
-        try:
-            outp = os.path.join(out_dir, f"{base}_trialfig_{i:02d}.png")
-            ftri.tight_layout()
-            ftri.savefig(outp, dpi=120)
-        except Exception:
-            pass
-    try:
-        plt.show()
-    except Exception:
-        pass
-
-# If recut snippets were returned, create an overlay figure using the smoothing helper
+# If recut snippets were returned, create and display the average/overlay FIRST
 try:
     snips = res.get('recut_snippets')
     t_rel_rec = res.get('recut_t_rel')
@@ -259,3 +244,18 @@ try:
             print('[demo] error building overlay:', e)
 except Exception:
     pass
+
+# Now save/show per-trial figures (including residual/baseline panels when enabled)
+figs_trials = res.get('figures_trials') or []
+if figs_trials:
+    for i, ftri in enumerate(figs_trials, 1):
+        try:
+            outp = os.path.join(out_dir, f"{base}_trialfig_{i:02d}.png")
+            ftri.tight_layout()
+            ftri.savefig(outp, dpi=120)
+        except Exception:
+            pass
+    try:
+        plt.show()
+    except Exception:
+        pass
