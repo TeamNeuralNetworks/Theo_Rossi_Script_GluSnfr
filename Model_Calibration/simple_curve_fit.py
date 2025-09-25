@@ -108,6 +108,51 @@ def fit_average_event(
         tf = t_ms[mask]
         yf = y_avg[mask]
         p0 = spec['p0_func'](yf, tf)
+        # Robust seeding for two_step_binding: quick coarse grid search
+        # to avoid local minima/stagnation at defaults.
+        try:
+            if spec.get('name', '').lower() == 'two_step_binding':
+                # Unpack current guesses safely
+                amp0, tb0, tc0, td0, tp0 = [float(x) for x in p0]
+                # Build small grids around typical ranges; clip to bounds
+                lb, ub = spec['bounds']
+                def _clip(v, lo, hi):
+                    return float(min(max(v, lo), hi))
+                tb_grid = np.array([
+                    _clip(x, lb[1], ub[1]) for x in (0.0006, 0.0010, 0.0016, 0.0025, 0.0040)
+                ])
+                tc_grid = np.array([
+                    _clip(x, lb[2], ub[2]) for x in (0.004, 0.006, 0.008, 0.012, 0.016)
+                ])
+                td_grid = np.array([
+                    _clip(x, lb[3], ub[3]) for x in (0.020, 0.030, 0.040, 0.060, 0.080)
+                ])
+                tp_grid = np.array([
+                    _clip(x, lb[4], ub[4]) for x in (tp0 - 2.0, tp0 - 1.0, tp0, tp0 + 1.0, tp0 + 2.0)
+                ])
+                best = (np.inf, amp0, tb0, tc0, td0, tp0)
+                for tb in tb_grid:
+                    for tc in tc_grid:
+                        # Enforce sequential regime: tc >= tb
+                        if tc <= tb:
+                            continue
+                        for td in td_grid:
+                            for tp in tp_grid:
+                                pars = [1.0, tb, tc, td, tp]
+                                yshape = spec['func'](tf, *pars)
+                                denom = float(np.sum(yshape ** 2))
+                                if denom <= 0 or not np.isfinite(denom):
+                                    continue
+                                amp = float(np.sum(yf * yshape)) / denom
+                                r = yf - amp * yshape
+                                sse = float(np.dot(r, r))
+                                if sse < best[0]:
+                                    best = (sse, amp, tb, tc, td, tp)
+                _, amp_b, tb_b, tc_b, td_b, tp_b = best
+                p0 = [float(amp_b), float(tb_b), float(tc_b), float(td_b), float(tp_b)]
+        except Exception:
+            # If anything goes wrong, keep original p0
+            pass
         popt, _ = curve_fit(
             spec['func'], tf, yf, p0=p0, bounds=spec['bounds'], maxfev=maxfev
         )

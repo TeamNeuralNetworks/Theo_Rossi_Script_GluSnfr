@@ -75,15 +75,15 @@ options_presets = {
         # Kinetics source and progression
         'fit_source': 'global', # 'global'|'average'|'individual'
         'decay_progression_mode': 'free_monotonic',  # 'fixed'|'free_monotonic'|'linear'
-        'event_model': 'two_step_binding', # 'single_exp'|'double_exp'|'two_component'|'binding_kinetics'|'cooperative'
+        'event_model': 'hetero_coop', # 'single_exp'|'double_exp'|'two_step_binding'|'alpha'|'gamma'|'bilinear'|'binding_kinetics'|'cooperative'|'two_component'|'desensitization'|'coop_plus_linear'|'diffusion_clearance'|'double_cooperative'|'hetero_coop'|'two_comp_coop'
         'recut_projection': 'median',  # 'mean'|'median'|'std'|'robust_mean'
-        'recut_oversample': 10,     # integer >=1
-        'peak_recenter': 3,   # samples to shift (int or tuple); 0 disables
+        'recut_oversample': 50,     # integer >=1
+        'recut_peak_recenter': 0,   # samples to shift (int or tuple); 0 disables
         'recut_snippets': True,
         'event_model_settings': {},  # valid for single_exp
         # NNLS weight control options
         'nnls_weight_mode': 'savgol',  # 'uniform', 'linear', 'exponential', 'savgol'
-        'nnls_weight_tau_s': 0.008,  # if None: auto (uses ISI or fitted tau)
+        'nnls_weight_tau_s': 0.005,  # if None: auto (uses ISI or fitted tau)
         'nnls_show_weights': True,  # Display weight pattern
 
 
@@ -110,7 +110,7 @@ options_presets = {
         'peak_recenter': 5,
         'recut_snippets': True,
         'nnls_weight_mode': 'exponential',
-        'nnls_weight_tau_s': 0.003,
+        'nnls_weight_tau_s': 0.02,
         'nnls_show_weights': True,
         'event_model_settings': {'tau_decay': 0.008},  # valid for single_exp
         'plot': {

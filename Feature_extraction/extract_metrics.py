@@ -1172,7 +1172,11 @@ def extract_metrics(
             return_snippets=need_snips,
         )
         if res is None:
-            # Fallback to recut median or average grid search
+            # Fallback to recut median or average grid search.
+            # Always prefer displaying the recut-median waveform in the left
+            # event panel when the parametric fit fails so the figure still
+            # shows the correct global average event (rather than the
+            # full-trace average around the first stimulus).
             tr_b, td0_b = _estimate_from_recut_average()
             if tr_b is None:
                 tr_b, td0_b, slope, tau_d_vec0 = estimate_kinetics_from_average(
@@ -1183,8 +1187,18 @@ def extract_metrics(
                     sg_window=cfg['sg_window'], sg_poly=cfg['sg_poly']
                 )
             tau_r = float(tr_b); tau_d0 = float(td0_b)
-            t_avg_evt = (t - float(train_start)) * 1000.0
-            y_avg_evt = y_avg
+            # Use the recut average if available; otherwise fall back to the
+            # train-aligned average series.
+            if (recut_t_rel is not None) and (recut_avg is not None):
+                try:
+                    t_avg_evt = np.asarray(recut_t_rel, float) * 1000.0
+                    y_avg_evt = np.asarray(recut_avg, float)
+                except Exception:
+                    t_avg_evt = (t - float(train_start)) * 1000.0
+                    y_avg_evt = y_avg
+            else:
+                t_avg_evt = (t - float(train_start)) * 1000.0
+                y_avg_evt = y_avg
         else:
             fitted, t_avg_evt, y_avg_evt = res
             # If the fit helper attached recut outputs to the params dict, capture them
@@ -1796,11 +1810,12 @@ def extract_metrics(
                         elif name == 't_peak':
                             params.append(t_peak_ms)
                         else:
-                            # Prefer explicit user override; otherwise, if the
-                            # earlier global fit populated a value into
-                            # event_model_settings, use that. As a last
-                            # fallback, use tau_r/tau_d0 where meaningful.
-                            if name in ems and np.isfinite(ems.get(name, np.nan)):
+                            # Prefer values from the recent global fit if available;
+                            # then explicit user overrides in event_model_settings;
+                            # then tau_r/tau_d0 mapping; finally default p0.
+                            if 'fitted' in locals() and isinstance(fitted, dict) and name in fitted and np.isfinite(fitted.get(name, np.nan)):
+                                params.append(float(fitted[name]))
+                            elif name in ems and np.isfinite(ems.get(name, np.nan)):
                                 params.append(float(ems[name]))
                             elif name == 'tau_decay':
                                 params.append(float(tau_d0))  # seconds

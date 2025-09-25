@@ -130,28 +130,26 @@ def model_two_step_binding(t, amp, tau_bind, tau_conform, tau_dissoc, t_peak):
     m = t >= t_peak
     if np.any(m):
         ts = (t[m] - t_peak) / 1000.0
-        tb = max(tau_bind, 1e-6)      # Fast binding phase
-        tc = max(tau_conform, 1e-6)   # Slower conformational change (rate-limiting)
-        td = max(tau_dissoc, 1e-6)    # Overall dissociation/clearance
+        tb = max(tau_bind, 1e-6)      
+        tc = max(tau_conform, 1e-6)   
+        td = max(tau_dissoc, 1e-6)    
         
-        # Ensure conformational change is slower than binding
         if tc <= tb:
             tc = tb * 2.0
             
-        # Two-step rise: difference of exponentials for sequential process
-        # This represents binding followed by conformational change
-        rise = (np.exp(-ts / tc) - np.exp(-ts / tb)) / (tc - tb) * tc
+        # Correct sequential kinetics formula
+        rise = (np.exp(-ts / tb) - np.exp(-ts / tc)) / (tc - tb)
         
-        # Overall dissociation
+        # Optional: normalize so peak amplitude = 1 before applying amp
+        t_peak_rise = tb * tc / (tc - tb) * np.log(tc / tb)
+        if t_peak_rise > 0:
+            rise_max = (np.exp(-t_peak_rise / tb) - np.exp(-t_peak_rise / tc)) / (tc - tb)
+            rise = rise / rise_max
+        
         dissoc = np.exp(-ts / td)
-        
         y[m] = amp * rise * dissoc
     return y
 
-
-# -----------------------------
-# Additional models (from 3B)
-# -----------------------------
 
 def model_single_exp_constrained(t, amp, tau_decay, t_peak):
     """Single exponential decay: instantaneous rise followed by exponential decay.
@@ -507,14 +505,14 @@ def get_event_model(name: str) -> Dict:
             'complexity': 5,
         })
     if nm in ('two_step', 'two_step_binding', 'two-step', 'iglusnfr_biophysical'):
-        return _apply_global_bounds({
-            'name': 'two_step_binding',
-            'func': model_two_step_binding,
-            'params': ['amp', 'tau_bind', 'tau_conform', 'tau_dissoc', 't_peak'],
-            'bounds': ([0, 0.0005, 0.002, 0.005, 0], [np.inf, 0.005, 0.050, 0.300, 10]),
-            'p0_func': lambda y, t: [float(np.nanmax(y)), 0.001, 0.008, 0.040, float(t[np.nanargmax(y)])],
-            'complexity': 5,
-        })
+            return _apply_global_bounds({
+                'name': 'two_step_binding',
+                'func': model_two_step_binding,
+                'params': ['amp', 'tau_bind', 'tau_conform', 'tau_dissoc', 't_peak'],
+                'bounds': ([0, 0.0001, 0.0008, 0.005, 0], [np.inf, 0.002, 0.015, 0.300, 10]),
+                'p0_func': lambda y, t: [float(np.nanmax(y)), 0.0005, 0.003, 0.040, float(t[np.nanargmax(y)])],
+                'complexity': 5,
+            })
     if nm in ('single', 'single_exp', 'single-exponential'):
         return _apply_global_bounds({
             'name': 'single_exp',

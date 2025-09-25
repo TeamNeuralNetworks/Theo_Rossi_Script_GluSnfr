@@ -49,25 +49,25 @@ def _safe_sheet_name(name: str) -> str:
 # Input listed above
 folders = [
     r"C:\\Users\\Antoine.Valera\\Desktop\\PPR_DATA_FINAL\\Stability_Before",
-    #r"C:\\Users\\Antoine.Valera\\Desktop\\PPR_DATA_FINAL\\Stability_After",
-    #r"C:\\Users\\Antoine.Valera\\Desktop\\PPR_DATA_FINAL\\Stability_Before_05",
-    #r"C:\\Users\\Antoine.Valera\\Desktop\\PPR_DATA_FINAL\\Stability_After_05",
-    #r"C:\\Users\\Antoine.Valera\\Desktop\\PPR_DATA_FINAL\\Theo_4Ca",
-    #r"C:\\Users\\Antoine.Valera\\Desktop\\PPR_DATA_FINAL\\Theo_1_5Ca",
-    #r"C:\\Users\\Antoine.Valera\\Desktop\\PPR_DATA_FINAL\\WT_Theo",
-    #r"C:\\Users\\Antoine.Valera\\Desktop\\PPR_DATA_FINAL\\WT_Theo_1scd",
-    #r"C:\\Users\\Antoine.Valera\\Desktop\\PPR_DATA_FINAL\\WT_Anthime",
-    #r"C:\\Users\\Antoine.Valera\\Desktop\\PPR_DATA_FINAL\\SynII",    
+    r"C:\\Users\\Antoine.Valera\\Desktop\\PPR_DATA_FINAL\\Stability_After",
+    r"C:\\Users\\Antoine.Valera\\Desktop\\PPR_DATA_FINAL\\Stability_Before_05",
+    r"C:\\Users\\Antoine.Valera\\Desktop\\PPR_DATA_FINAL\\Stability_After_05",
+    r"C:\\Users\\Antoine.Valera\\Desktop\\PPR_DATA_FINAL\\Theo_4Ca",
+    r"C:\\Users\\Antoine.Valera\\Desktop\\PPR_DATA_FINAL\\Theo_1_5Ca",
+    r"C:\\Users\\Antoine.Valera\\Desktop\\PPR_DATA_FINAL\\WT_Theo",
+    r"C:\\Users\\Antoine.Valera\\Desktop\\PPR_DATA_FINAL\\WT_Theo_1scd",
+    r"C:\\Users\\Antoine.Valera\\Desktop\\PPR_DATA_FINAL\\WT_Anthime",
+    r"C:\\Users\\Antoine.Valera\\Desktop\\PPR_DATA_FINAL\\SynII",    
 ]
 root_out = r"C:\\Users\\Antoine.Valera\\Desktop\\Testout"; os.makedirs(root_out, exist_ok=True)
 
 # Per-folder train_start (seconds). Default 1.0; override last two to 0.498
 train_start_by_folder = {
-    #folders[2]: 0.498,
-    #folders[3]: 0.498,
-    #folders[4]: 0.498,
-    #folders[5]: 0.498,
-    #folders[6]: 0.498,
+    folders[2]: 0.498,
+    folders[3]: 0.498,
+    folders[4]: 0.498,
+    folders[5]: 0.498,
+    folders[6]: 0.498,
 }
 
 summaries = {}
@@ -114,15 +114,15 @@ for in_dir in folders:
                 # Kinetics source and progression
                 'fit_source': 'global',
                 'decay_progression_mode': 'free_monotonic',  # 'fixed'|'free_monotonic'|'linear'
-                'event_model': 'double_cooperative', # 'single_exp'|'double_exp'|'two_component'|'binding_kinetics'|'cooperative'
+                'event_model': 'hetero_coop', # 'single_exp'|'double_exp'|'two_component'|'binding_kinetics'|'cooperative'
                 'recut_projection': 'robust_mean',  # 'mean'|'median'|'std'|'robust_mean'
-                'recut_oversample': 5,     # integer >=1
-                'peak_recenter': 5,   # samples to shift (int or tuple); 0 disables
+                'recut_oversample': 50,     # integer >=1
+                'peak_recenter': 0,   # samples to shift (int or tuple); 0 disables
                 'recut_snippets': True,
                 'event_model_settings': {},  # valid for single_exp
                 # NNLS weight control options
                 'nnls_weight_mode': 'savgol',  # 'uniform', 'linear', 'exponential', 'savgol'
-                'nnls_weight_tau_s': 0.005,  # if None: auto (uses ISI or fitted tau)
+                'nnls_weight_tau_s': 0.008,  # if None: auto (uses ISI or fitted tau)
                 'nnls_show_weights': False,  # Display weight pattern
 
 
