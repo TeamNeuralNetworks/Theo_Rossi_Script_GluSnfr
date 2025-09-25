@@ -437,6 +437,60 @@ def compute_localmax_corrected_amps(
     return np.asarray(amps, float)
 
 
+def compute_peak_corrected_from_components(
+    t: np.ndarray,
+    y_meas: np.ndarray,
+    stim_times: np.ndarray,
+    components: Optional[List[np.ndarray]],
+    *,
+    win_ms: float,
+    pre_ms: float,
+) -> np.ndarray:
+    """Return per‑pulse amplitudes corrected for prior‑pulse residuals.
+
+    For each pulse ``p`` we locate the peak time on the provided measurement
+    series ``y_meas`` and subtract the sum of NNLS component contributions from
+    all earlier pulses evaluated at that peak time. This matches the visual
+    interpretation “red dot minus white triangle”.
+
+    Parameters
+    ----------
+    t : 1D np.ndarray
+        Time vector
+    y_meas : 1D np.ndarray
+        Measurement series used to locate peaks (e.g. yhat, SavGol, or raw)
+    stim_times : 1D np.ndarray
+        Stimulus times in seconds
+    components : list[np.ndarray] | None
+        NNLS per‑pulse components (length = n_pulses). May be None (returns
+        uncorrected peaks in that case).
+    win_ms, pre_ms : float
+        Peak search window and pre‑search lead, in milliseconds
+    """
+    t = np.asarray(t, float)
+    y = np.asarray(y_meas, float)
+    n = int(len(stim_times))
+    if t.size == 0 or y.size == 0 or n == 0:
+        return np.zeros(n, float)
+
+    # Build cumulative baseline of previous pulses only: B_p(t) = sum_{k<p} comp[k](t)
+    baselines = None
+    if isinstance(components, list) and components and all(hasattr(c, "__len__") for c in components):
+        cum = np.zeros_like(y)
+        baselines = []
+        for p in range(n):
+            baselines.append(cum.copy())
+            if p < len(components):
+                cum = cum + np.asarray(components[p], float)
+
+    amps_corr = np.zeros(n, float)
+    for p, st in enumerate(stim_times):
+        tp, vp = pick_peak_on_series(t, y, float(st), win_ms, pre_ms)
+        idx = int(np.argmin(np.abs(t - tp))) if t.size else 0
+        base_prev = float(baselines[p][idx]) if baselines is not None else 0.0
+        amps_corr[p] = float(vp) - base_prev
+    return amps_corr
+
 def sample_null_amplitudes_consistent(
     y: np.ndarray,
     t: np.ndarray,
@@ -1249,12 +1303,18 @@ def extract_metrics(
     amp_nnls_avg = compute_localmax_corrected_amps(
         t, yhat_avg, stim_times, win_ms, n_avg, pre_ms, d_avg, tau_r, tau_d_vec
     )
+    amp_nnls_corr_avg = compute_peak_corrected_from_components(
+        t, yhat_avg, stim_times, comp_avg, win_ms=win_ms, pre_ms=pre_ms
+    )
     def _norm(a):
         a = np.asarray(a, float)
         d = a[0] if a.size else np.nan
         return a / d if np.isfinite(d) and abs(d) > 1e-12 else a * np.nan
     ppr_nnls_avg = _norm(amp_nnls_avg)
     amp_raw_avg = compute_localmax_corrected_amps(t, y_avg, stim_times, win_ms, n_avg, pre_ms, d_avg, tau_r, tau_d_vec)
+    amp_raw_corr_avg = compute_peak_corrected_from_components(
+        t, y_avg, stim_times, comp_avg, win_ms=win_ms, pre_ms=pre_ms
+    )
     amp_sg_avg = compute_localmax_corrected_amps(
         t,
         y_sg_avg if y_sg_avg is not None else y_avg,
@@ -1265,6 +1325,9 @@ def extract_metrics(
         d_avg,
         tau_r,
         tau_d_vec,
+    )
+    amp_sg_corr_avg = compute_peak_corrected_from_components(
+        t, (y_sg_avg if y_sg_avg is not None else y_avg), stim_times, comp_avg, win_ms=win_ms, pre_ms=pre_ms
     )
 
     # Per‑trial metrics and null thresholds (MAD rule) for A1
@@ -1284,11 +1347,20 @@ def extract_metrics(
             shift_min_s=cfg['shift_min_s'],
         )
         amp_raw = compute_localmax_corrected_amps(t, yj, stim_times, win_ms, n_avg, pre_ms, d_t, tau_r, tau_d_vec)
+        amp_raw_corr = compute_peak_corrected_from_components(
+            t, yj, stim_times, comp_t, win_ms=win_ms, pre_ms=pre_ms
+        )
         amp_sg = compute_localmax_corrected_amps(
             t, yj_sg, stim_times, win_ms, n_avg, pre_ms, d_t, tau_r, tau_d_vec
         )
+        amp_sg_corr = compute_peak_corrected_from_components(
+            t, yj_sg, stim_times, comp_t, win_ms=win_ms, pre_ms=pre_ms
+        )
         amp_nn = compute_localmax_corrected_amps(
             t, yhat_t, stim_times, win_ms, n_avg, pre_ms, d_t, tau_r, tau_d_vec
+        )
+        amp_nn_corr = compute_peak_corrected_from_components(
+            t, yhat_t, stim_times, comp_t, win_ms=win_ms, pre_ms=pre_ms
         )
 
         # Choose threshold rule and null amplitude strategy (auto follows fail_method)
@@ -1347,11 +1419,11 @@ def extract_metrics(
 
         # Pick amplitude series for p-values/classification
         if meas == 'SAVGOL':
-            a_for_p = amp_sg
+            a_for_p = amp_sg_corr
         elif meas == 'RAW':
-            a_for_p = amp_raw
+            a_for_p = amp_raw_corr
         else:
-            a_for_p = amp_nn
+            a_for_p = amp_nn_corr
 
         a1 = float(a_for_p[0]) if a_for_p.size else np.nan
         p1 = float(pfun(a1)) if np.isfinite(a1) else np.nan
@@ -1362,11 +1434,17 @@ def extract_metrics(
 
         per_trial.append({
             'amp_raw': amp_raw,
+            'amp_raw_corr': amp_raw_corr,
             'amp_savgol': amp_sg,
+            'amp_savgol_corr': amp_sg_corr,
             'amp_nnls': amp_nn,
+            'amp_nnls_corr': amp_nn_corr,
             'ppr_raw': _norm(amp_raw),
             'ppr_savgol': _norm(amp_sg),
             'ppr_nnls': _norm(amp_nn),
+            'ppr_raw_corr': _norm(amp_raw_corr),
+            'ppr_savgol_corr': _norm(amp_sg_corr),
+            'ppr_nnls_corr': _norm(amp_nn_corr),
             'a_coeff': a_t,
             'delta_s': d_t,
             'y_proc': yj,
@@ -1604,7 +1682,7 @@ def extract_metrics(
                     if tb.size:
                         ax_r1.plot(tb, yj[base_mask], color='0.5', lw=1.0, label='baseline (pre-train)')
                     # Use the same zoom window for residual display
-                    ax_r1.plot(tz, resid_t[zmask_t], color='tab:purple', lw=1.2, label='residual (trial − model)')
+                    ax_r1.plot(tz, resid_t[zmask_t], color='tab:purple', lw=1.2, label='residual (trial - model)')
                     ax_r1.axvline(float(train_start), color='k', ls=':', lw=0.8, alpha=0.6)
                     ax_r1.set_xlabel('Time (s)')
                     ax_r1.set_ylabel('ΔF/F0' if use_dff else 'ΔF')
@@ -1681,7 +1759,7 @@ def extract_metrics(
         except Exception as e:
             print(f"[warning] Failed to plot weights: {e}")
 
-    # Optional: average plot with a left event-fit panel (0–30 ms) + right main plot
+    # Optional: average plot with a left event-fit panel (0-30 ms) + right main plot
     figure = None
     if want_plot:
         # If residual diagnostics requested, allocate an extra bottom row
@@ -1967,6 +2045,9 @@ def extract_metrics(
             'amp_raw': np.asarray(amp_raw_avg, float),
             'amp_savgol': np.asarray(amp_sg_avg, float),
             'amp_nnls': np.asarray(amp_nnls_avg, float),
+            'amp_raw_corr': np.asarray(amp_raw_corr_avg, float),
+            'amp_savgol_corr': np.asarray(amp_sg_corr_avg, float),
+            'amp_nnls_corr': np.asarray(amp_nnls_corr_avg, float),
             'ppr_nnls': np.asarray(ppr_nnls_avg, float),
             'y_avg': np.asarray(y_avg, float),
             'yhat_avg': np.asarray(yhat_avg, float),
@@ -2039,13 +2120,13 @@ def export_folders_to_excel(paths,
 
                     res = extract_metrics(t, trials, train_start=train_start, isi=isi, n_pulses=n_pulses, options=cfg)
 
-                    # Choose amplitude series per measurement
+                    # Choose corrected amplitude series per measurement when available
                     if meas == 'SAVGOL':
-                        amp_avg = res['average']['amp_savgol']
+                        amp_avg = res['average'].get('amp_savgol_corr', res['average']['amp_savgol'])
                     elif meas == 'RAW':
-                        amp_avg = res['average']['amp_raw']
+                        amp_avg = res['average'].get('amp_raw_corr', res['average']['amp_raw'])
                     else:
-                        amp_avg = res['average']['amp_nnls']
+                        amp_avg = res['average'].get('amp_nnls_corr', res['average']['amp_nnls'])
 
                     # Build row
                     base = os.path.splitext(os.path.basename(fp))[0]
@@ -2067,11 +2148,11 @@ def export_folders_to_excel(paths,
                         return vals
 
                     if failm == 'SAVGOL':
-                        per_amp = _amp_vec_per_trial('amp_savgol')
+                        per_amp = _amp_vec_per_trial('amp_savgol_corr')
                     elif failm == 'RAW':
-                        per_amp = _amp_vec_per_trial('amp_raw')
+                        per_amp = _amp_vec_per_trial('amp_raw_corr')
                     else:
-                        per_amp = _amp_vec_per_trial('amp_nnls')
+                        per_amp = _amp_vec_per_trial('amp_nnls_corr')
 
                     # Use per-trial shared threshold and compare first 3 pulses
                     n_fail = [0, 0, 0]
