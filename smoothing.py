@@ -470,7 +470,10 @@ def build_median_recut_waveform(
             raise ValueError("peak_recenter values must be integers") from exc
         if lo_i < 0 or hi_i < 0:
             raise ValueError("peak_recenter values must be non-negative")
-        return lo_i, hi_i
+        # Interpret limits in ORIGINAL sample units; scale to oversampled grid
+        # so a value of 3 at oversample=10 becomes 30 oversampled steps.
+        os = max(1, int(oversample))
+        return lo_i * os, hi_i * os
 
     recenter_limits = _parse_recenter(peak_recenter)
 
@@ -553,7 +556,7 @@ def build_median_recut_waveform(
     if recenter_limits is not None and np.any(np.isfinite(S_raw)):
         try:
             neg_lim, pos_lim = recenter_limits
-            progress_print(f"[recut] Peak recenter enabled (limits: -{neg_lim}/+{pos_lim} samples)")
+            progress_print(f"[recut] Peak recenter enabled (limits on oversampled grid: -{neg_lim}/+{pos_lim} samples)")
         except Exception:
             pass
         base_wave = np.nanmedian(S_raw, axis=0)
