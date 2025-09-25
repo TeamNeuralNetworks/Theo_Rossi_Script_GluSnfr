@@ -235,6 +235,15 @@ def _calculate_nnls_weights(
     return weights
 
 
+def _trim_spines(ax):
+    """Hide top/right spines for a cleaner look (safe no-op on failure)."""
+    try:
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+    except Exception:
+        pass
+
+
 def _nnls_irls_singlecol(y: np.ndarray, k: np.ndarray, *, robust: bool, huber_delta: float, iters: int) -> float:
     """Single‑column NNLS with optional Huber IRLS (amplitude ≥ 0)."""
     a = max(0.0, nnls(k[:, None], y)[0][0])
@@ -1463,82 +1472,133 @@ def extract_metrics(
             )
             tz = t[zmask_t]
 
-            if baseline_figs:
-                # Two-panel figure: (1) train window; (2) baseline window + null fits + histogram
-                fig_t, (ax_train, ax_base) = plt.subplots(2, 1, figsize=(11, 7), gridspec_kw={'height_ratios': [2.2, 1.6]})
-                # Train panel
-                for st in stim_times:
-                    ax_train.axvline(st, color='k', linestyle=':', linewidth=0.8, alpha=0.6)
-                if 'raw' in traces:
-                    ax_train.plot(tz, yj[zmask_t], label='raw', color='0.6')
-                if 'savgol' in traces and yj_sg is not None:
-                    ax_train.plot(tz, yj_sg[zmask_t], label='savgol', color='tab:green')
-                if 'nnls' in traces:
-                    ax_train.plot(tz, yhat_t[zmask_t], label='nnls model', color='tab:blue')
-                if show_decay and 'nnls' in traces and comp_t is not None:
-                    cumulative_t = np.zeros_like(yj)
-                    for p in range(len(stim_times)):
-                        if p >= len(comp_t):
-                            continue
-                        # Add this component to the cumulative sum
-                        cumulative_t = cumulative_t + comp_t[p]
-                        
-                        # Plot the cumulative reconstruction up to this point
-                        ax_train.plot(
-                            tz,
-                            cumulative_t[zmask_t],
-                            color='tab:orange',
-                            linestyle='--',
-                            linewidth=1.0,
-                            alpha=0.6 - p * 0.04,  # Fade with each pulse
-                        )
-                # Peak markers and residual-at-peak triangles for this trial
-                if plot_peaks_details:
-                    if meas == 'SAVGOL' and (yj_sg is not None):
-                        y_for_peaks_t = yj_sg
-                    elif meas == 'RAW':
-                        y_for_peaks_t = yj
-                    else:
-                        y_for_peaks_t = yhat_t
+            # Layout: main train panel on top; optional residuals directly
+            # underneath; optional baseline at the bottom. Residuals share the
+            # time axis with the train; baseline is not time-aligned.
+            want_resid_row = bool(plot_residuals)
+            want_base_row = bool(baseline_figs)
+            if want_resid_row or want_base_row:
+                n_rows = 1 + int(want_resid_row) + int(want_base_row)
+                if n_rows == 3:
+                    ratios = [2.4, 1.3, 1.6]
+                elif want_resid_row and not want_base_row:
+                    ratios = [2.4, 1.3]
+                else:
+                    ratios = [2.4, 1.6]
+                fig_t = plt.figure(figsize=(11, 9.0))
+                gs_t = fig_t.add_gridspec(n_rows, 1, height_ratios=ratios, hspace=0.25)
+                ax_train = fig_t.add_subplot(gs_t[0, 0])
+                row = 1
+                ax_resid = None
+                ax_base = None
+                if want_resid_row:
+                    ax_resid = fig_t.add_subplot(gs_t[row, 0], sharex=ax_train)
+                    row += 1
+                if want_base_row:
+                    ax_base = fig_t.add_subplot(gs_t[row, 0])  # no sharex (not time-aligned)
+            else:
+                fig_t, ax_train = plt.subplots(figsize=(10, 4.8))
+                ax_resid = None
+                ax_base = None
 
-                    # Precompute per-pulse cumulative baseline from previous pulses (NNLS comps)
-                    baseline_prev_only_t = []
-                    if comp_t is not None:
-                        cum_t = np.zeros_like(yj)
-                        for pp in range(len(stim_times)):
-                            baseline_prev_only_t.append(cum_t.copy())
-                            if pp < len(comp_t):
-                                cum_t = cum_t + comp_t[pp]
+            # Train panel
+            for st in stim_times:
+                ax_train.axvline(st, color='k', linestyle=':', linewidth=0.8, alpha=0.6)
+            if 'raw' in traces:
+                ax_train.plot(tz, yj[zmask_t], label='raw', color='0.6')
+            if 'savgol' in traces and yj_sg is not None:
+                ax_train.plot(tz, yj_sg[zmask_t], label='savgol', color='tab:green')
+            if 'nnls' in traces:
+                ax_train.plot(tz, yhat_t[zmask_t], label='nnls model', color='tab:blue')
+            if show_decay and 'nnls' in traces and comp_t is not None:
+                cumulative_t = np.zeros_like(yj)
+                for p in range(len(stim_times)):
+                    if p >= len(comp_t):
+                        continue
+                    cumulative_t = cumulative_t + comp_t[p]
+                    ax_train.plot(
+                        tz,
+                        cumulative_t[zmask_t],
+                        color='tab:orange',
+                        linestyle='--',
+                        linewidth=1.0,
+                        alpha=0.6 - p * 0.04,
+                    )
+            # Peak markers and residual-at-peak triangles for this trial
+            if plot_peaks_details:
+                if meas == 'SAVGOL' and (yj_sg is not None):
+                    y_for_peaks_t = yj_sg
+                elif meas == 'RAW':
+                    y_for_peaks_t = yj
+                else:
+                    y_for_peaks_t = yhat_t
 
-                    peak_ts_t, peak_vals_t, resid_vals_t = [], [], []
-                    for pp, stp in enumerate(stim_times):
-                        tp, vp = pick_peak_on_series(t, y_for_peaks_t, float(stp), win_ms, pre_ms)
-                        peak_ts_t.append(float(tp))
-                        peak_vals_t.append(float(vp))
-                        try:
-                            i0 = int(np.argmin(np.abs(t - tp)))
-                            base_prev = baseline_prev_only_t[pp][i0] if baseline_prev_only_t else 0.0
-                            resid_vals_t.append(float(base_prev))
-                        except Exception:
-                            resid_vals_t.append(np.nan)
+                # Precompute per-pulse cumulative baseline from previous pulses (NNLS comps)
+                baseline_prev_only_t = []
+                if comp_t is not None:
+                    cum_t = np.zeros_like(yj)
+                    for pp in range(len(stim_times)):
+                        baseline_prev_only_t.append(cum_t.copy())
+                        if pp < len(comp_t):
+                            cum_t = cum_t + comp_t[pp]
+
+                peak_ts_t, peak_vals_t, resid_vals_t = [], [], []
+                for pp, stp in enumerate(stim_times):
+                    tp, vp = pick_peak_on_series(t, y_for_peaks_t, float(stp), win_ms, pre_ms)
+                    peak_ts_t.append(float(tp))
+                    peak_vals_t.append(float(vp))
                     try:
-                        ax_train.scatter(peak_ts_t, peak_vals_t, s=60, color='red', edgecolors='white', linewidths=0.9, zorder=6)
+                        i0 = int(np.argmin(np.abs(t - tp)))
+                        base_prev = baseline_prev_only_t[pp][i0] if baseline_prev_only_t else 0.0
+                        resid_vals_t.append(float(base_prev))
+                    except Exception:
+                        resid_vals_t.append(np.nan)
+                try:
+                    ax_train.scatter(peak_ts_t, peak_vals_t, s=60, color='red', edgecolors='white', linewidths=0.9, zorder=6)
+                except Exception:
+                    pass
+                try:
+                    ax_train.scatter(peak_ts_t, resid_vals_t, s=55, marker='v', facecolors='white', edgecolors='tab:red', linewidths=1.0, zorder=5)
+                except Exception:
+                    pass
+            # Failure threshold line (thin red dotted)
+            if np.isfinite(thr1):
+                ax_train.axhline(thr1, color='red', linestyle=':', linewidth=0.8)
+            ax_train.set_xlim(z0, z1)
+            ax_train.set_xlabel('Time (s)')
+            ax_train.set_ylabel('ΔF/F0' if use_dff else 'ΔF')
+            ax_train.legend(loc='upper right', frameon=False)
+            ax_train.set_title(f'Trial {j+1}: train window')
+            _trim_spines(ax_train)
+
+            # Residuals panel directly underneath the main panel
+            if ax_resid is not None:
+                try:
+                    model_t = (yj_sg if (meas == 'SAVGOL' and yj_sg is not None) else yhat_t)
+                    resid_t = yj - model_t
+                    ax_resid.plot(tz, resid_t[zmask_t], color='tab:purple', lw=1.2, label='residual (trial − model)')
+                    ax_resid.axvline(float(train_start), color='k', ls=':', lw=0.8, alpha=0.6)
+                    ax_resid.set_xlim(z0, z1)
+                    ax_resid.set_ylabel('ΔF/F0' if use_dff else 'ΔF')
+                    ax_resid.set_title('Residuals in train window')
+                    ax_resid.legend(loc='upper right', frameon=False, fontsize=8)
+                    # Inset histogram of residuals (zoom window) similar to baseline inset
+                    try:
+                        ax_in_r = ax_resid.inset_axes([0.65, 0.55, 0.33, 0.4])
+                        rdata = np.asarray(resid_t[zmask_t], float)
+                        rdata = rdata[np.isfinite(rdata)]
+                        if rdata.size:
+                            ax_in_r.hist(rdata, bins='fd', color='#d8c7e8', edgecolor='#6b4fa3')
+                        ax_in_r.set_title('residual', fontsize=8)
+                        ax_in_r.tick_params(labelsize=7)
                     except Exception:
                         pass
-                    try:
-                        ax_train.scatter(peak_ts_t, resid_vals_t, s=55, marker='v', facecolors='white', edgecolors='tab:red', linewidths=1.0, zorder=5)
-                    except Exception:
-                        pass
-                # Failure threshold line (thin red dotted)
-                if np.isfinite(thr1):
-                    ax_train.axhline(thr1, color='red', linestyle=':', linewidth=0.8)
-                ax_train.set_xlim(z0, z1)
-                ax_train.set_xlabel('Time (s)')
-                ax_train.set_ylabel('ΔF/F0' if use_dff else 'ΔF')
-                ax_train.legend(loc='upper right', frameon=False)
-                ax_train.set_title(f'Trial {j+1}: train window')
+                except Exception:
+                    pass
+                _trim_spines(ax_resid)
 
-                # Baseline panel (pre-train)
+            # Baseline panel (pre-train) at the bottom (if requested)
+            if ax_base is not None:
                 base_mask = (t < float(train_start))
                 tb = t[base_mask]
                 if tb.size:
@@ -1553,7 +1613,6 @@ def extract_metrics(
                     cand_mask = (t >= st_min) & (t <= st_max)
                     starts_full = t[cand_mask]
                     if starts_full.size:
-                        # Evaluate amplitudes for all candidates, then draw the strongest few for visibility
                         events = []  # (amp, start, shift)
                         for stcand in starts_full:
                             avail_post = min(cfg['post_zoom_s'], float(train_start) - stcand - 1e-6, null_end - stcand)
@@ -1588,131 +1647,26 @@ def extract_metrics(
                 ax_base.set_xlabel('Time (s)')
                 ax_base.set_ylabel('ΔF/F0' if use_dff else 'ΔF')
                 ax_base.set_title('Baseline window + null-fit events')
+                _trim_spines(ax_base)
 
-                # Match Y limits across panels for direct visual comparison
-                try:
-                    ymin = min(ax_train.get_ylim()[0], ax_base.get_ylim()[0])
-                    ymax = max(ax_train.get_ylim()[1], ax_base.get_ylim()[1])
-                    ax_train.set_ylim(ymin, ymax)
+            # Match Y limits across comparable panels (exclude residuals)
+            try:
+                ylims = [ax_train.get_ylim()]
+                if ax_base is not None:
+                    ylims.append(ax_base.get_ylim())
+                ymin = min([y[0] for y in ylims])
+                ymax = max([y[1] for y in ylims])
+                ax_train.set_ylim(ymin, ymax)
+                if ax_base is not None:
                     ax_base.set_ylim(ymin, ymax)
-                except Exception:
-                    pass
-            else:
-                # Single-panel per-trial figure (train window only)
-                fig_t, ax_t = plt.subplots(figsize=(10, 4))
-                for st in stim_times:
-                    ax_t.axvline(st, color='k', linestyle=':', linewidth=0.8, alpha=0.6)
-                if 'raw' in traces:
-                    ax_t.plot(tz, yj[zmask_t], label='raw', color='0.6')
-                if 'savgol' in traces and yj_sg is not None:
-                    ax_t.plot(tz, yj_sg[zmask_t], label='savgol', color='tab:green')
-                if 'nnls' in traces:
-                    ax_t.plot(tz, yhat_t[zmask_t], label='nnls model', color='tab:blue')
-                if show_decay and 'nnls' in traces and comp_t is not None:
-                    cumulative_t = np.zeros_like(yj)
-                    for p in range(len(stim_times)):
-                        if p >= len(comp_t):
-                            continue
-                        cumulative_t = cumulative_t + comp_t[p]
-                        ax_t.plot(
-                            tz,
-                            cumulative_t[zmask_t],
-                            color='tab:orange',
-                            linestyle='--',
-                            linewidth=1.0,
-                            alpha=0.6 - p * 0.04,
-                        )
-                # Peak markers and residual-at-peak triangles on the single-panel trial plot
-                if plot_peaks_details:
-                    if meas == 'SAVGOL' and (yj_sg is not None):
-                        y_for_peaks_tp = yj_sg
-                    elif meas == 'RAW':
-                        y_for_peaks_tp = yj
-                    else:
-                        y_for_peaks_tp = yhat_t
-                    baseline_prev_only_tp = []
-                    if comp_t is not None:
-                        cum_tp = np.zeros_like(yj)
-                        for pp in range(len(stim_times)):
-                            baseline_prev_only_tp.append(cum_tp.copy())
-                            if pp < len(comp_t):
-                                cum_tp = cum_tp + comp_t[pp]
-                    pk_ts, pk_vals, res_vals = [], [], []
-                    for pp, stp in enumerate(stim_times):
-                        tp, vp = pick_peak_on_series(t, y_for_peaks_tp, float(stp), win_ms, pre_ms)
-                        pk_ts.append(float(tp))
-                        pk_vals.append(float(vp))
-                        try:
-                            i0 = int(np.argmin(np.abs(t - tp)))
-                            res_vals.append(float(baseline_prev_only_tp[pp][i0]) if baseline_prev_only_tp else 0.0)
-                        except Exception:
-                            res_vals.append(np.nan)
-                    try:
-                        ax_t.scatter(pk_ts, pk_vals, s=60, color='red', edgecolors='white', linewidths=0.9, zorder=6)
-                    except Exception:
-                        pass
-                    try:
-                        ax_t.scatter(pk_ts, res_vals, s=55, marker='v', facecolors='white', edgecolors='tab:red', linewidths=1.0, zorder=5)
-                    except Exception:
-                        pass
-                if np.isfinite(thr1):
-                    ax_t.axhline(thr1, color='red', linestyle=':', linewidth=0.8)
-                ax_t.set_xlim(z0, z1)
-                ax_t.set_xlabel('Time (s)')
-                ax_t.set_ylabel('ΔF/F0' if use_dff else 'ΔF')
-                ax_t.legend(loc='upper right', frameon=False)
-                ax_t.set_title(f'Trial {j+1} (selected overlays)')
+            except Exception:
+                pass
 
             try:
                 plt.show(block=False); plt.pause(0.01)
             except Exception:
                 pass
             figures_trials.append(fig_t)
-
-            # Optional residuals figure per trial
-            if plot_residuals:
-                try:
-                    # Select the model used for subtraction based on measurement
-                    model_t = (yj_sg if (meas == 'SAVGOL' and yj_sg is not None) else yhat_t)
-                    resid_t = yj - model_t
-                    fig_r, (ax_r1, ax_r2) = plt.subplots(1, 2, figsize=(11, 3.6))
-                    # Residual vs baseline traces
-                    base_mask = (t < float(train_start))
-                    tb = t[base_mask]
-                    if tb.size:
-                        ax_r1.plot(tb, yj[base_mask], color='0.5', lw=1.0, label='baseline (pre-train)')
-                    # Use the same zoom window for residual display
-                    ax_r1.plot(tz, resid_t[zmask_t], color='tab:purple', lw=1.2, label='residual (trial - model)')
-                    ax_r1.axvline(float(train_start), color='k', ls=':', lw=0.8, alpha=0.6)
-                    ax_r1.set_xlabel('Time (s)')
-                    ax_r1.set_ylabel('ΔF/F0' if use_dff else 'ΔF')
-                    ax_r1.set_title(f'Trial {j+1}: residual vs baseline')
-                    ax_r1.legend(loc='upper right', frameon=False, fontsize=8)
-                    # Distribution overlay
-                    base_vals_t = yj[base_mask]
-                    resid_vals_t = resid_t[zmask_t]
-                    vals_t = np.concatenate([
-                        base_vals_t[np.isfinite(base_vals_t)],
-                        resid_vals_t[np.isfinite(resid_vals_t)]
-                    ]) if (np.isfinite(base_vals_t).any() or np.isfinite(resid_vals_t).any()) else np.array([])
-                    if vals_t.size:
-                        lo_t, hi_t = np.nanpercentile(vals_t, [1, 99])
-                        bins_t = np.linspace(lo_t, hi_t, 30)
-                    else:
-                        bins_t = 30
-                    ax_r2.hist(base_vals_t, bins=bins_t, color='0.5', alpha=0.5, density=True, label='baseline')
-                    ax_r2.hist(resid_vals_t, bins=bins_t, color='tab:purple', alpha=0.5, density=True, label='residual')
-                    ax_r2.set_xlabel('Value')
-                    ax_r2.set_ylabel('Density')
-                    ax_r2.set_title(f'Trial {j+1}: distributions')
-                    ax_r2.legend(frameon=False, fontsize=8)
-                    try:
-                        plt.show(block=False); plt.pause(0.01)
-                    except Exception:
-                        pass
-                    figures_trials.append(fig_r)
-                except Exception:
-                    pass
 
     # Optional: weight visualization
     if cfg.get('nnls_show_weights', False) and want_plot:
@@ -1759,24 +1713,25 @@ def extract_metrics(
         except Exception as e:
             print(f"[warning] Failed to plot weights: {e}")
 
-    # Optional: average plot with a left event-fit panel (0-30 ms) + right main plot
+    # Optional: average plot with a left event-fit panel (0-50 ms) + right main plot
     figure = None
     if want_plot:
         # If residual diagnostics requested, allocate an extra bottom row
         if plot_residuals:
-            figure = plt.figure(figsize=(12, 8))
-            gs = figure.add_gridspec(2, 2, height_ratios=[2.0, 1.2], width_ratios=[1.5, 4], wspace=0.15, hspace=0.28)
+            figure = plt.figure(figsize=(12, 9.2))
+            gs = figure.add_gridspec(2, 2, height_ratios=[2.4, 1.4], width_ratios=[1.5, 4], wspace=0.15, hspace=0.28)
         else:
             figure = plt.figure(figsize=(12, 5))
             gs = figure.add_gridspec(1, 2, width_ratios=[1.5, 4], wspace=0.15)
         # Left: aggregated event + model fit (−3..next stim)
         axL = figure.add_subplot(gs[0, 0])
+        _trim_spines(axL)
         try:
             t_ms_evt = t_avg_evt if 't_avg_evt' in locals() else (t - float(train_start)) * 1000.0
             y_evt = y_avg_evt if 'y_avg_evt' in locals() else y_avg
             isi_ms = float(isi) * 1000.0
             min_x = -3.0
-            max_x = min(isi_ms, 30.0)
+            max_x = min(isi_ms, 50.0)
             m0 = (t_ms_evt >= min_x) & (t_ms_evt < max_x)
             axL.plot(t_ms_evt[m0], y_evt[m0], color='k', lw=1.5, label='Average')
             # Overlay best-fit library model matching current kernel choice
@@ -1889,12 +1844,13 @@ def extract_metrics(
                 pass
             axL.set_xlabel('Time (ms)')
             axL.set_ylabel('ΔF/F0' if use_dff else 'ΔF')
-            axL.set_title('Event fit (−3..30 ms)', fontsize=10)
+            axL.set_title('Event fit (−3.0-50.0 ms)', fontsize=10)
         except Exception:
             pass
 
         # Right: main average plot
         ax = figure.add_subplot(gs[0, 1])
+        _trim_spines(ax)
         zmask, z0, z1 = time_zoom_mask(t, float(train_start), float(isi), int(n_pulses), cfg['pre_zoom_s'], cfg['post_zoom_s'])
         tz = t[zmask]
         for st in stim_times:
@@ -1990,7 +1946,8 @@ def extract_metrics(
         except Exception:
             pass
 
-        # Residual diagnostics panel (average): overlay baseline and residual trace + distributions
+        # Residual diagnostics panel (average): place directly under the main
+        # average panel and show a small inset histogram (no separate figure).
         if plot_residuals:
             try:
                 # Choose model per requested measurement series
@@ -1999,37 +1956,37 @@ def extract_metrics(
                 else:
                     model_avg = yhat_avg
                 resid_avg = (y_avg - model_avg)
-                # Left-bottom: baseline vs residual traces (residual shown in zoom window)
-                axR = figure.add_subplot(gs[1, 0])
-                # Baseline (pre-train)
-                mbase = (t < float(train_start))
-                if np.any(mbase):
-                    axR.plot(t[mbase], y_avg[mbase], color='0.5', lw=1.0, label='baseline (pre-train)')
-                # Residual in zoom window
+
+                # Bottom-right: residual trace aligned with the top-right panel
+                axR = figure.add_subplot(gs[1, 1], sharex=ax)
                 axR.plot(tz, resid_avg[zmask], color='tab:purple', lw=1.2, label='residual (avg − model)')
                 axR.axvline(float(train_start), color='k', ls=':', lw=0.8, alpha=0.6)
+                axR.set_xlim(z0, z1)
                 axR.set_xlabel('Time (s)')
                 axR.set_ylabel('ΔF/F0' if use_dff else 'ΔF')
-                axR.set_title('Residual vs baseline (average)')
+                axR.set_title('Residuals (average)')
                 axR.legend(loc='upper right', frameon=False, fontsize=8)
+                _trim_spines(axR)
 
-                # Right-bottom: distribution overlay of baseline noise vs residuals
-                axH = figure.add_subplot(gs[1, 1])
-                base_vals = y_avg[mbase]
-                resid_vals = resid_avg[zmask]
-                # Use common bins centered on zero
-                vals = np.concatenate([base_vals[np.isfinite(base_vals)], resid_vals[np.isfinite(resid_vals)]])
-                if vals.size:
-                    lo, hi = np.nanpercentile(vals, [1, 99])
-                    bins = np.linspace(lo, hi, 40)
-                else:
-                    bins = 30
-                axH.hist(base_vals, bins=bins, color='0.5', alpha=0.5, density=True, label='baseline')
-                axH.hist(resid_vals, bins=bins, color='tab:purple', alpha=0.5, density=True, label='residual')
-                axH.set_xlabel('Value')
-                axH.set_ylabel('Density')
-                axH.set_title('Distributions: baseline vs residual')
-                axH.legend(frameon=False, fontsize=8)
+                # Inset histogram of residuals in the zoom window
+                try:
+                    ax_in = axR.inset_axes([0.70, 0.55, 0.28, 0.4])
+                    rv = np.asarray(resid_avg[zmask], float)
+                    rv = rv[np.isfinite(rv)]
+                    if rv.size:
+                        ax_in.hist(rv, bins='fd', color='#d8c7e8', edgecolor='#6b4fa3')
+                    ax_in.set_title('residual', fontsize=8)
+                    ax_in.tick_params(labelsize=7)
+                except Exception:
+                    pass
+
+                # Add an empty placeholder under the left event-fit panel to
+                # keep the grid balanced.
+                try:
+                    ax_placeholder = figure.add_subplot(gs[1, 0])
+                    ax_placeholder.axis('off')
+                except Exception:
+                    pass
             except Exception:
                 pass
 
