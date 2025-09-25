@@ -1723,15 +1723,17 @@ def extract_metrics(
         else:
             figure = plt.figure(figsize=(12, 5))
             gs = figure.add_gridspec(1, 2, width_ratios=[1.5, 4], wspace=0.15)
-        # Left: aggregated event + model fit (−3..next stim)
+        # Left: aggregated event + model fit (−3..next stim−guard)
         axL = figure.add_subplot(gs[0, 0])
         _trim_spines(axL)
         try:
             t_ms_evt = t_avg_evt if 't_avg_evt' in locals() else (t - float(train_start)) * 1000.0
             y_evt = y_avg_evt if 'y_avg_evt' in locals() else y_avg
             isi_ms = float(isi) * 1000.0
+            # Display window: from -3 ms before stim to just before next stim
+            # Use a 3 ms guard before the next stimulus to avoid overlap
             min_x = -3.0
-            max_x = min(isi_ms, 50.0)
+            max_x = max(isi_ms - 3.0, 0.0)
             m0 = (t_ms_evt >= min_x) & (t_ms_evt < max_x)
             axL.plot(t_ms_evt[m0], y_evt[m0], color='k', lw=1.5, label='Average')
             # Overlay best-fit library model matching current kernel choice
@@ -1844,7 +1846,10 @@ def extract_metrics(
                 pass
             axL.set_xlabel('Time (ms)')
             axL.set_ylabel('ΔF/F0' if use_dff else 'ΔF')
-            axL.set_title('Event fit (−3.0-50.0 ms)', fontsize=10)
+            try:
+                axL.set_title(f'Event fit (−3.0–{max_x:.1f} ms)', fontsize=10)
+            except Exception:
+                axL.set_title('Event fit', fontsize=10)
         except Exception:
             pass
 
