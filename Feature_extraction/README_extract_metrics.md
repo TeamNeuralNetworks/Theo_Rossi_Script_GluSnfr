@@ -364,6 +364,23 @@ All defaults live in a single dictionary inside `extract_metrics.py` named `DEFA
 - Smoothing: `sg_window`, `sg_poly`
 - Fit/plot window: `pre_zoom_s`, `post_zoom_s`
 - Peak window: `peak_window_ms`, `peak_avg_points`, `pre_peak_ms`
+- Peak window controls determine how stimulus-locked maxima are located and
+  quantified:
+  - `peak_window_ms` bounds how far after each stimulus `windowed_max`
+    searches for the response (`[stimulus − pre_peak_ms, stimulus +
+    peak_window_ms]`). Larger values permit slower peaks but can pull in
+    unrelated fluctuations; smaller values tighten detection around rapid
+    responses. The same window is used for null-sample amplitudes and bleach
+    masking, so it shapes both detection sensitivity and thresholds.
+  - `pre_peak_ms` extends the window before the stimulus, ensuring early-rising
+    responses remain measurable. Increasing it can shorten the "quiet" segment
+    reserved for bleach correction because the algorithm assumes anything in
+    the window may belong to the evoked peak.
+  - `peak_avg_points` sets the symmetric sample count averaged around each
+    detected maximum (±⌊N/2⌋). Higher values dampen noise and stabilize the
+    reported amplitude, while lower values preserve temporal precision but are
+    more sensitive to single-sample spikes. This averaging is applied to both
+    real and null peaks so statistical thresholds stay consistent.
 - Baseline/null: `f0_window_s`, `null_sim_max_points`, `null_min_post_zoom_s`, `null_N`
 - Kinetics grids (ms): `kin_taur_grid_ms`, `kin_taud0_grid_ms`, `kin_slope_grid_ms`
 - Robust NNLS + shifts: `huber_delta`, `irls_iters`, `delta_max_s`, `delta_step_s`, `shift_min_s`
