@@ -474,6 +474,48 @@ def model_two_component_cooperative(t, amp_fast, tau_rise_fast, tau_decay_fast, 
         y[m] = comp_f + comp_s
     return y
 
+def model_iglusnfr(t, amp, tau_rise, tau_decay_fast, tau_decay_slow, frac_fast, t_peak):
+    """Optimized iGluSnFR S72A model with single rise and bi-exponential decay.
+    
+    Biophysical basis:
+    - Single effective rise time constant (combines binding + conformational change)
+    - Bi-exponential decay captures heterogeneous unbinding kinetics:
+        * Fast component: sensors in partially bound/accessible states
+        * Slow component: sensors in fully closed/stable fluorescent states
+    
+    This formulation is more flexible for fitting both very fast (τ_rise < 2ms) 
+    and slower (τ_rise ~ 5-10ms) transients while maintaining interpretability.
+    
+    Parameters in seconds; t in milliseconds.
+    """
+    t = np.asarray(t)
+    y = np.zeros_like(t, dtype=float)
+    m = t >= t_peak
+    
+    if np.any(m):
+        ts = (t[m] - t_peak) / 1000.0
+        
+        # Ensure valid time constants
+        tr = max(tau_rise, 1e-6)
+        tdf = max(tau_decay_fast, 1e-6)
+        tds = max(tau_decay_slow, 1e-6)
+        
+        # Ensure decay ordering
+        if tdf >= tds:
+            tdf = tds * 0.5
+        
+        # Clamp fraction
+        f_fast = np.clip(frac_fast, 0.0, 1.0)
+        
+        # Single exponential rise (fast rise for S72A)
+        rise = 1.0 - np.exp(-ts / tr)
+        
+        # Bi-exponential decay
+        decay = f_fast * np.exp(-ts / tdf) + (1 - f_fast) * np.exp(-ts / tds)
+        
+        y[m] = amp * rise * decay
+    
+    return y
 
 def get_event_model(name: str) -> Dict:
     """Return a model spec dict for the given name.
@@ -513,6 +555,30 @@ def get_event_model(name: str) -> Dict:
                 'p0_func': lambda y, t: [float(np.nanmax(y)), 0.0005, 0.003, 0.040, float(t[np.nanargmax(y)])],
                 'complexity': 5,
             })
+    if nm in ('iglusnfr', 'iglusnfr_s72a', 'markov_4state'):
+        return _apply_global_bounds({
+            'name': 'iglusnfr',
+            'func': model_iglusnfr,
+            'params': ['amp', 'tau_rise', 'tau_decay_fast', 'tau_decay_slow', 'frac_fast', 't_peak'],
+            # Widened bounds to capture full range of S72A kinetics
+            # tau_rise: 0.1-15 ms (very fast to moderate)
+            # tau_decay_fast: 2-30 ms (fast unbinding)
+            # tau_decay_slow: 8-150 ms (slow dissociation)
+            # frac_fast: 0.1-0.9 (flexible weighting)
+            'bounds': (
+                [0,      0.0001, 0.002,  0.008,  0.1,   0],      # lower bounds
+                [np.inf, 0.015,  0.030,  0.150,  0.9,   10]      # upper bounds
+            ),
+            'p0_func': lambda y, t: [
+                float(np.nanmax(y)),                    # amp
+                0.003,                                   # tau_rise: 3 ms
+                0.008,                                   # tau_decay_fast: 8 ms
+                0.035,                                   # tau_decay_slow: 35 ms
+                0.6,                                     # frac_fast: 60%
+                float(t[np.nanargmax(y)])               # t_peak
+            ],
+            'complexity': 6,
+        })
     if nm in ('single', 'single_exp', 'single-exponential'):
         return _apply_global_bounds({
             'name': 'single_exp',
