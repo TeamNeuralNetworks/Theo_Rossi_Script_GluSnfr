@@ -17,6 +17,21 @@ Run the simplified extractor API (update paths to your dataset):
 python Feature_extraction/demo_single_file.py
 ```
 
+## Data Considerations for Synaptic iGluSnFR / GCaMP Experiments
+
+- **Acquisition modality**: The scripts assume fiber photometry–style readouts from synaptic reporters (iGluSnFR, GCaMP) where ΔF/F traces have already been exported to Excel. For somatic calcium imaging, ensure each trial column is a uniformly sampled vector matching the stimulation timestamps.
+- **Stimulation metadata**: Set `train_start`, `isi`, and `n_pulses` to the timing of your optical or electrical stimulus train. Synaptic paradigms with rapid pulses (<50 ms ISI) benefit from pre-smoothing (e.g., `savgol`) before NNLS fitting.
+- **Baseline handling**: If recordings show photobleaching or slow drift, keep `options['bleach'] = True` so the extractor fits a single-exponential baseline per trial. For stable GCaMP recordings you can disable bleaching to preserve low-frequency components.
+- **Normalization**: `normalize_dff=True` rescales each trial by its pre-train baseline window, improving comparability between boutons or fields of view. For already normalized GCaMP data, disable this step to retain absolute amplitudes.
+- **Quality control**: Review the automatically saved figures (or enable `plot['trials']=True`) to confirm that kinetics grids and NNLS fits capture the fast synaptic rise and slower decay expected from glutamate or calcium reporters.
+
+### Impact of kinetics grid tuning on extracted measurements
+
+- **Rise-time grid (`kin_taur_grid_ms`)**: Selecting smaller τ<sub>r</sub> values narrows the event kernel so NNLS will attribute more of the early transient to the first pulse, increasing the fitted A1 amplitude and lowering apparent paired-pulse facilitation. Larger τ<sub>r</sub> spreads the response across later timepoints, which suppresses the first-pulse estimate and inflates facilitation/depression ratios when rise and decay phases overlap.
+- **Initial decay grid (`kin_taud0_grid_ms`)**: Pushing τ<sub>d0</sub> higher assumes a slower first-pulse recovery, so residual fluorescence is carried into subsequent pulses. This elevates later amplitudes (because the solver explains less of the signal with decay) and can mask depression. A shorter τ<sub>d0</sub> forces the model to drain between pulses; if set too low it leaves positive residuals that the NNLS amplitudes interpret as sustained responses, biasing baseline and null statistics upward.
+- **Decay slope grid (`kin_slope_grid_ms`)**: Positive slopes let τ<sub>d</sub> lengthen across the train, matching vesicle depletion or calcium buffering. Too aggressive a slope keeps fluorescence elevated, boosting late-pulse amplitudes and lowering failure calls. A slope near zero demands stable τ<sub>d</sub>; if the biology truly slows, the solver compensates by shrinking late amplitudes, which exaggerates depression metrics (e.g., PPR, ΔA/A<sub>1</sub>).
+- **Practical tuning**: Start with the defaults, then adjust grids only when residual plots show systematic over- or under-shoot between pulses. Re-running `estimate_kinetics_from_average` with tighter grids around the observed kinetics stabilizes amplitude-derived metrics (A1, PPR, depletion ratios) and the MAD-based null thresholds used for failure detection.
+
 Batch across folders and export Excel/plots using default directories defined in the script:
 
 ```
@@ -249,6 +264,17 @@ All main settings live at the top of `batch_measure_complex.py` and are grouped 
 - Train start overrides: `TRAIN_START_OVERRIDE_MAP` for folder-specific `train_start` values; CLI `--train-start` overrides for single-file runs
 
 Tip: runtime flags (`--no-show`, `--save-plots`, `--no-save`, `--plot-mode`) take precedence over the booleans in the file for that run only.
+
+### Bleach Correction Settings
+
+Photobleaching causes the baseline fluorescence to drift downward even without neural activity. These settings govern how the code estimates and subtracts that slow decay before it measures pulse amplitudes. The notes below translate each option into what you will see in the traces:
+
+- `ENABLE_BLEACH_CORRECTION`: turn this on when your recordings fade over time. With it enabled the script fits a smooth decay curve and removes it; with it off you get raw ΔF/F traces that may still slope downward.
+- `BLEACH_TAU_GRID_FACTORS`: defines how wide a range of decay speeds the fitter will test around the nominal bleaching time constant. Large ranges (e.g., `[0.25, 4.0]`) let the algorithm handle both very slow and rapid bleaching but can also chase noise; narrow the range when you already know the bleaching kinetics for your prep.
+- `BLEACH_N_TAU`: number of trial decay constants sampled inside that range. More samples give a more precise baseline estimate, which is helpful when the bleaching curve is subtle, but each extra sample adds computation.
+- `BLEACH_HUBER_DELTA`: sets how tolerant the fit is to stimulus-evoked spikes that stick up from the bleaching trend. Smaller values hug the baseline tightly but can be pulled by transients; larger values treat tall peaks as outliers so the bleach curve follows the quiet portions between stimuli.
+- `BLEACH_MAX_ITER`: limits how many times the algorithm reweights the data to refine the fit. Increasing it can squeeze out a better baseline on noisy recordings, but high values may overfit if the drift is poorly defined.
+- `SHOW_BLEACH_PLOTS`: when `True`, produces diagnostic plots of the raw trace, fitted bleaching curve, and corrected signal so you can visually confirm the subtraction before trusting the downstream metrics.
 
 ### Baseline-only vs Full Analysis
 
