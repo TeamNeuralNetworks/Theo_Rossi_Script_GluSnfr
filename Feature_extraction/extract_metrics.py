@@ -1713,26 +1713,52 @@ def extract_metrics(
                             if hi <= lo:
                                 hi = lo + bin_w
                             edges = np.arange(lo, hi + bin_w, bin_w)
-                            # Draw histogram
-                            ax_in.hist(data, bins=edges, color='#c9d4e8', edgecolor='#4f6aa3')
+                            # Draw histogram and capture bin counts
+                            n_hist, bins_hist, _ = ax_in.hist(
+                                data, bins=edges, color='#c9d4e8', edgecolor='#4f6aa3'
+                            )
                             # Choose noise model overlay based on baseline measurement method:
                             #   - NNLS => half‑normal (cut Gaussian, non‑negative)
                             #   - RAW/SAVGOL => Gaussian
                             if failm == 'NNLS':
-                                # MLE for half‑normal sigma: sqrt(mean(x^2)) on x >= 0
+                                # Zero‑inflated half‑normal: mass at 0 for the clipped negative side
+                                # plus a continuous half‑normal on x>0.
+                                N = data.size
+                                zero_tol = max(1e-12, 0.5 * bin_w)
+                                is_zero = data <= zero_tol
+                                n_zero = int(np.sum(is_zero))
+                                p0 = float(n_zero) / float(N) if N else 0.0
+                                pos = data[~is_zero]
+                                # MLE for half‑normal sigma on strictly positive samples
                                 try:
-                                    sigma = float(np.sqrt(np.mean(np.square(np.clip(data, 0.0, None)))))
+                                    sigma = float(np.sqrt(np.mean(np.square(np.clip(pos, 0.0, None))))) if pos.size else float('nan')
                                 except Exception:
                                     sigma = float('nan')
+                                x0, x1 = ax_in.get_xlim()
+                                x = np.linspace(x0, x1, 400)
                                 if np.isfinite(sigma) and sigma > 0:
-                                    x0, x1 = ax_in.get_xlim()
-                                    x = np.linspace(x0, x1, 400)
                                     x_clip = np.clip(x, 0.0, None)
                                     pdf = (np.sqrt(2.0) / (sigma * np.sqrt(np.pi))) * np.exp(-(x_clip**2) / (2.0 * sigma * sigma))
                                     pdf = np.where(x >= 0.0, pdf, 0.0)
-                                    N = data.size
-                                    y = N * bin_w * pdf  # scale pdf to expected counts per bin
+                                    y = (N * (1.0 - p0) * bin_w) * pdf  # scale continuous part
                                     ax_in.plot(x, y, color='#26457a', linewidth=1.4, label='fit')
+                                # Axis scaling: ignore the 0-bin height; use next highest bin
+                                try:
+                                    max_other = float(np.nanmax(n_hist[1:])) if n_hist.size > 1 else 0.0
+                                except Exception:
+                                    max_other = 0.0
+                                ymax = max(1.0, max_other * 1.15)
+                                ax_in.set_ylim(0.0, ymax)
+                                # Annotate the zero-bin count instead of scaling to it
+                                if n_zero > 0:
+                                    ax_in.text(
+                                        0.02 * (x1 - x0) + x0,
+                                        ymax * 0.92,
+                                        f"0-bin: {n_zero}",
+                                        fontsize=7,
+                                        ha='left', va='top', color='#26457a',
+                                        bbox=dict(boxstyle='round,pad=0.12', facecolor='white', alpha=0.7, lw=0)
+                                    )
                             else:
                                 # Gaussian fit
                                 try:
