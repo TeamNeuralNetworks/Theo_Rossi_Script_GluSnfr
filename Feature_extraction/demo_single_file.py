@@ -54,8 +54,9 @@ from Feature_extraction.extract_metrics import extract_metrics
 
 xlsx_path = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Theo_4Ca\20211125_linescan1_20Hz_10pulses_4mMCa_bouton1_traces_converted.xlsx"
 # xlsx_path = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Theo_1_5Ca\20220726_linescan3_20Hz_10pulses_1.5mMCa_bouton3_traces_converted.xlsx"
-xlsx_path = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\WT_Anthime\241212_Fibre2_PortionA_bouton2.xlsx"
+# xlsx_path = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\WT_Anthime\241212_Fibre2_PortionA_bouton2.xlsx"
 
+START = 0.498
 
 out_dir = r"C:\Users\Antoine.Valera\Desktop\Testout"
 os.makedirs(out_dir, exist_ok=True)
@@ -96,15 +97,15 @@ options_presets = {
         'nnls_show_weights': True,  # bool (default: False) - visualize weight pattern
         'allow_shift': True,  # bool (default: True) - enable per-pulse micro-shifts
         'huber_delta': 5.5,  # float (default: 5.5) - robust fitting threshold
-        'irls_iters': 6,  # int (default: 6) - IRLS iterations
+        'irls_iters': 20,  # int (default: 6) - IRLS iterations
         'delta_max_s': 0.002,  # float (default: 0.002) - max shift in seconds
         'delta_step_s': 0.00025,  # float (default: 0.00025) - shift step size in seconds
         'shift_min_s': 0.00005,  # float (default: 0.00005) - minimum shift in seconds
         
         # === Time Windows ===
-        'pre_zoom_s': 0.15,  # float (default: 0.15) - pre-train window
-        'post_zoom_s': 0.60,  # float (default: 0.60) - post-train window
-        'f0_window_s': 0.4,  # float (default: 0.4) - baseline window
+        'pre_zoom_s': 0.20,  # float (default: 0.15) - pre-train window
+        'post_zoom_s': 0.20,  # float (default: 0.60) - post-train window
+        'f0_window_s': 1.0,  # float (default: 0.4) - baseline window
         
         # === Peak Detection ===
         'peak_window_ms': 25.0,  # float (default: 25.0) - peak search window
@@ -113,7 +114,7 @@ options_presets = {
         
         # === Thresholding ===
         'measurement': 'NNLS',  # (default: 'NNLS') 'NNLS'|'SAVGOL'|'RAW' - series for p-values
-        'fail_method': None,  # (default: None) 'NNLS'|'SAVGOL'|'RAW'|None - failure classification (None=use measurement)
+        'fail_method': 'NNLS',  # (default: None) 'NNLS'|'SAVGOL'|'RAW'|None - failure classification (None=use measurement)
         'threshold_mode': 'auto',  # (default: 'auto') 'auto'|'mad'|'sd' - threshold rule (auto=MAD for NNLS, SD for SAVGOL)
         'null_N': 3.0,  # float (default: 3.0) - threshold multiplier
         'null_sim_max_points': 1000,  # int (default: 1000) - max null samples
@@ -132,7 +133,7 @@ options_presets = {
         # === Plotting ===
         'plot': {
             'enabled': True,  # bool (default: False) - create plots
-            'traces': ['raw', 'savgol', 'nnls'],  # list[str] (default: ['nnls']) - traces to show
+            'traces': ['raw', 'nnls'],  # list[str] (default: ['nnls']) - traces to show
             'show_decay': True,  # bool (default: True) - show decay components
             'trials': True,  # bool (default: False) - plot individual trials
             'baseline': True,  # bool (default: False) - show baseline diagnostics
@@ -142,10 +143,7 @@ options_presets = {
     },
     
     # Minimal preset showing only changed values (others use defaults)
-    'minimal_example': {
-        'fit_source': 'average',  # changed from default 'global'
-        'event_model': 'double_exp',  # same as default, shown for clarity
-        'decay_progression_mode': 'fixed',  # changed from default 'linear'
+    'default_example': {
         'plot': {'enabled': True}  # changed from default False
     },
 
@@ -182,7 +180,7 @@ options = options_presets[preset_name]
 
 res = extract_metrics(
     time, trials,
-    train_start=0.498 + 0.5,   # seconds
+    train_start=START,   # seconds
     isi=0.05,          # seconds
     n_pulses=10,
     options=options

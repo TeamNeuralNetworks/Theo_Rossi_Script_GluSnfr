@@ -538,8 +538,10 @@ def sample_null_amplitudes_consistent(
     baseline_end = t[idx[-1]]
     null_start = max(baseline_start, train_start - f0_window_s)
     null_end = min(baseline_end, train_start)
-    st_min = null_start + pre_zoom_s
-    st_max = null_end - null_min_post_zoom_s
+    # Cover the entire f0 window; exclude starts whose peak window would
+    # overlap the train onset.
+    st_min = null_start
+    st_max = null_end - (peak_window_ms / 1000.0)
     if st_max <= st_min:
         return np.array([])
     cand_mask = (t >= st_min) & (t <= st_max)
@@ -1399,8 +1401,10 @@ def extract_metrics(
                 baseline_start = t[idx[0]]; baseline_end = t[idx[-1]]
                 null_start = max(baseline_start, float(train_start) - cfg['f0_window_s'])
                 null_end = min(baseline_end, float(train_start))
-                st_min = null_start + cfg['pre_zoom_s']
-                st_max = null_end - cfg['null_min_post_zoom_s']
+                # Candidate starts cover the full f0 window and exclude any
+                # start whose measurement window would touch the train.
+                st_min = null_start
+                st_max = null_end - (cfg['peak_window_ms'] / 1000.0)
                 cand = (t >= st_min) & (t <= st_max)
                 starts = t[cand]
                 if starts.size > int(cfg['null_sim_max_points']):
@@ -1416,8 +1420,8 @@ def extract_metrics(
                 baseline_start = t[idx[0]]; baseline_end = t[idx[-1]]
                 null_start = max(baseline_start, float(train_start) - cfg['f0_window_s'])
                 null_end = min(baseline_end, float(train_start))
-                st_min = null_start + cfg['pre_zoom_s']
-                st_max = null_end - cfg['null_min_post_zoom_s']
+                st_min = null_start
+                st_max = null_end - (cfg['peak_window_ms'] / 1000.0)
                 cand = (t >= st_min) & (t <= st_max)
                 starts = t[cand]
                 if starts.size > int(cfg['null_sim_max_points']):
@@ -1639,6 +1643,19 @@ def extract_metrics(
                 tb = t[base_mask]
                 use_savgol_baseline = False
                 if tb.size:
+                    # Highlight the f0 baseline window used for null sampling
+                    try:
+                        baseline_start = tb[0]
+                        baseline_end = tb[-1]
+                        null_start = max(baseline_start, float(train_start) - cfg['f0_window_s'])
+                        # Shade from null_start up to first stimulus time
+                        ax_base.axvspan(null_start, float(train_start), facecolor='#ffd500', alpha=0.18, zorder=0.1)
+                        # Vertical dotted line at first stimulus time
+                        ax_base.axvline(float(train_start), color='k', ls=':', lw=0.8, alpha=0.6)
+                        # Ensure the x-range reaches the dotted line
+                        ax_base.set_xlim(baseline_start, float(train_start))
+                    except Exception:
+                        pass
                     use_savgol_baseline = (
                         (meas == 'NNLS')
                         and (failm != meas)
@@ -1698,22 +1715,38 @@ def extract_metrics(
                             edges = np.arange(lo, hi + bin_w, bin_w)
                             # Draw histogram
                             ax_in.hist(data, bins=edges, color='#c9d4e8', edgecolor='#4f6aa3')
-                            # Overlay fitted half‑normal model scaled to counts
-                            # MLE for half‑normal sigma: sqrt(mean(x^2)) on x >= 0
-                            try:
-                                sigma = float(np.sqrt(np.mean(np.square(np.clip(data, 0.0, None)))))
-                            except Exception:
-                                sigma = float('nan')
-                            if np.isfinite(sigma) and sigma > 0:
-                                x0, x1 = ax_in.get_xlim()
-                                x = np.linspace(x0, x1, 400)
-                                # half‑normal pdf
-                                x_clip = np.clip(x, 0.0, None)
-                                pdf = (np.sqrt(2.0) / (sigma * np.sqrt(np.pi))) * np.exp(-(x_clip**2) / (2.0 * sigma * sigma))
-                                pdf = np.where(x >= 0.0, pdf, 0.0)
-                                N = data.size
-                                y = N * bin_w * pdf  # scale pdf to expected counts per bin
-                                ax_in.plot(x, y, color='#26457a', linewidth=1.4, label='fit')
+                            # Choose noise model overlay based on baseline measurement method:
+                            #   - NNLS => half‑normal (cut Gaussian, non‑negative)
+                            #   - RAW/SAVGOL => Gaussian
+                            if failm == 'NNLS':
+                                # MLE for half‑normal sigma: sqrt(mean(x^2)) on x >= 0
+                                try:
+                                    sigma = float(np.sqrt(np.mean(np.square(np.clip(data, 0.0, None)))))
+                                except Exception:
+                                    sigma = float('nan')
+                                if np.isfinite(sigma) and sigma > 0:
+                                    x0, x1 = ax_in.get_xlim()
+                                    x = np.linspace(x0, x1, 400)
+                                    x_clip = np.clip(x, 0.0, None)
+                                    pdf = (np.sqrt(2.0) / (sigma * np.sqrt(np.pi))) * np.exp(-(x_clip**2) / (2.0 * sigma * sigma))
+                                    pdf = np.where(x >= 0.0, pdf, 0.0)
+                                    N = data.size
+                                    y = N * bin_w * pdf  # scale pdf to expected counts per bin
+                                    ax_in.plot(x, y, color='#26457a', linewidth=1.4, label='fit')
+                            else:
+                                # Gaussian fit
+                                try:
+                                    mu = float(np.nanmean(data))
+                                    sig = float(np.nanstd(data))
+                                except Exception:
+                                    mu, sig = float('nan'), float('nan')
+                                if np.isfinite(sig) and sig > 0:
+                                    x0, x1 = ax_in.get_xlim()
+                                    x = np.linspace(x0, x1, 400)
+                                    pdf = (1.0 / (np.sqrt(2.0 * np.pi) * sig)) * np.exp(-0.5 * ((x - mu) / sig) ** 2)
+                                    N = data.size
+                                    y = N * bin_w * pdf
+                                    ax_in.plot(x, y, color='#26457a', linewidth=1.4, label='fit')
                             if np.isfinite(thr1):
                                 ax_in.axvline(thr1, color='red', linestyle='--', linewidth=0.9)
                         ax_in.set_title('noise', fontsize=8)
