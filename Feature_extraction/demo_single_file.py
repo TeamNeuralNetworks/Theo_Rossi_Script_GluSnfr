@@ -39,7 +39,7 @@ Examples (usage):
                 'fit_source': 'global',
                 'nnls_weight_mode': 'exponential',
                 'nnls_weight_tau_s': 0.015,  # 15ms decay
-                'nnls_show_weights': True,
+                'fit_diagnostic_plot': True,
                 'event_model_settings': {'n_coop': 2.0},
         }
 
@@ -94,7 +94,7 @@ options_presets = {
         # === NNLS Fitting ===
         'nnls_weight_mode': 'savgol',  # (default: 'uniform') 'uniform'|'linear'|'exponential'|'savgol'
         'nnls_weight_tau_s': None,  # float|None (default: None=auto) - time constant (for linear or exponential modes)
-        'nnls_show_weights': True,  # bool (default: False) - visualize weight pattern
+        'fit_diagnostic_plot': True,  # bool (default: False) - weight + τd diagnostics
         'allow_shift': True,  # bool (default: True) - enable per-pulse micro-shifts
         'huber_delta': 5.5,  # float (default: 5.5) - robust fitting threshold
         'irls_iters': 20,  # int (default: 6) - IRLS iterations
@@ -114,7 +114,7 @@ options_presets = {
         
         # === Thresholding ===
         'measurement': 'NNLS',  # (default: 'NNLS') 'NNLS'|'SAVGOL'|'RAW' - series for p-values
-        'fail_method': 'NNLS',  # (default: None) 'NNLS'|'SAVGOL'|'RAW'|None - failure classification (None=use measurement)
+        'fail_method': 'SAVGOL',  # (default: None) 'NNLS'|'SAVGOL'|'RAW'|None - failure classification (None=use measurement)
         'threshold_mode': 'auto',  # (default: 'auto') 'auto'|'mad'|'sd' - threshold rule (auto=MAD for NNLS, SD for SAVGOL)
         'null_N': 3.0,  # float (default: 3.0) - threshold multiplier
         'null_sim_max_points': 1000,  # int (default: 1000) - max null samples
@@ -160,7 +160,7 @@ options_presets = {
         'recut_snippets': True,
         'nnls_weight_mode': 'exponential',
         'nnls_weight_tau_s': 0.02,
-        'nnls_show_weights': True,
+        'fit_diagnostic_plot': True,
         'event_model_settings': {'tau_decay': 0.008},  # valid for single_exp
         'plot': {
             'enabled': True,

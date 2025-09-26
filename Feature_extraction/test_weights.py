@@ -109,7 +109,7 @@ def test_weight_modes():
                 'event_model': 'double_exp',
                 'nnls_weight_mode': mode,
                 'nnls_weight_tau_s': 0.008 if mode == 'exponential' else None,  # 8ms
-                'nnls_show_weights': True,
+                'fit_diagnostic_plot': True,
                 'plot': {
                     'enabled': True,
                     'traces': ['nnls'],
@@ -147,7 +147,7 @@ if __name__ == "__main__":
         )
     
     print("\nWeight mode testing completed!")
-    print("Check the plots to see the different weight patterns.")
+    print("Check the fit diagnostic plots to inspect weight kernels and τd progression.")
     
     # Keep plots open
     try:

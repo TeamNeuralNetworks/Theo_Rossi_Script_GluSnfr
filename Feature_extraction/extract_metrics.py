@@ -126,7 +126,7 @@ DEFAULTS = {
     # NNLS weight control
     'nnls_weight_mode': 'uniform',  # 'uniform', 'linear', 'exponential', 'savgol'
     'nnls_weight_tau_s': None,  # Time constant for exponential or slope for linear (auto if None)
-    'nnls_show_weights': False,  # Display weight pattern for the train
+    'fit_diagnostic_plot': False,  # Display weight and decay progression diagnostics
 }
 
 # Recut options: oversample factor and projection ('mean'|'median'|'std')
@@ -821,6 +821,11 @@ def extract_metrics(
     if baseline_figs:
         plot_trials = True  # baseline panel requires per-trial figures
     cfg = {**DEFAULTS, **{k: v for k, v in opts.items() if k != 'plot'}}
+    if 'nnls_show_weights' in opts and 'fit_diagnostic_plot' not in opts:
+        try:
+            cfg['fit_diagnostic_plot'] = bool(opts.get('nnls_show_weights', False))
+        except Exception:
+            cfg['fit_diagnostic_plot'] = bool(cfg.get('fit_diagnostic_plot', False))
     explicit_em_settings = {}
     if isinstance(opts.get('event_model_settings'), dict):
         # Preserve user-provided overrides so later auto-fits do not clobber them
@@ -1158,6 +1163,7 @@ def extract_metrics(
     # Variables for optional display overlays and logging
     tau_last_display = None
     amp_last_display = None
+    tau_d_vec_raw = None
 
     if fit_source == 'global':
         # Match the demo: recut + average all events then fit via curve_fit
@@ -1248,6 +1254,7 @@ def extract_metrics(
             tau_d_vec0 = np.linspace(float(tau_d0), float(tau_last), n_pulses)
         else:
             tau_d_vec0 = np.full(n_pulses, float(tau_d0))
+        tau_d_vec_raw = np.asarray(tau_d_vec0, float)
         tau_r, tau_d_vec = _apply_progression(tau_r, tau_d_vec0, tau_d0)
         if is_varying_model:
             progress_print(f"[fit] source=global | τd0={tau_d_vec[0]*1000:.2f}ms → τdN={tau_d_vec[-1]*1000:.2f}ms | mode={dec_mode}")
@@ -1273,6 +1280,7 @@ def extract_metrics(
         else:
             tau_d_vec0 = np.full(n_pulses, 0.010)
         tau_d0 = float(tau_d_vec0[0])
+        tau_d_vec_raw = np.asarray(tau_d_vec0, float)
         tau_r, tau_d_vec = _apply_progression(tau_r, tau_d_vec0, tau_d0)
         if is_varying_model:
             progress_print(f"[fit] source=individual | τd0={tau_d_vec[0]*1000:.2f}ms → τdN={tau_d_vec[-1]*1000:.2f}ms | mode={dec_mode}")
@@ -1289,6 +1297,7 @@ def extract_metrics(
             tau_last, amp_last = _estimate_last_tau(tau_r, tau_d_vec0[0])
             tau_last_display, amp_last_display = float(tau_last), float(amp_last)
             tau_d_vec0 = np.linspace(float(tau_d_vec0[0]), float(tau_last), n_pulses)
+        tau_d_vec_raw = np.asarray(tau_d_vec0, float)
         tau_r, tau_d_vec = _apply_progression(tau_r, tau_d_vec0, tau_d_vec0[0])
         if is_varying_model:
             progress_print(f"[fit] source=average | τd0={tau_d_vec[0]*1000:.2f}ms → τdN={tau_d_vec[-1]*1000:.2f}ms | mode={dec_mode}")
@@ -1806,53 +1815,9 @@ def extract_metrics(
                 pass
             figures_trials.append(fig_t)
 
-    # Optional: weight visualization
-    if cfg.get('nnls_show_weights', False) and want_plot:
-        try:
-            # Calculate weights for visualization
-            if weight_mode == 'savgol' and y_sg_avg is None:
-                y_vis = sg_smooth(fill_nans_timewise(y_avg, t), sgW, sgP)
-            else:
-                y_vis = y_sg_avg
-            weights = _calculate_nnls_weights(
-                t,
-                stim_times,
-                isi,
-                weight_mode,
-                weight_tau_s,
-                y_ref=y_vis,
-            )
-            
-            # Create weight plot
-            plt.figure(figsize=(10, 4))
-            plt.plot(t, weights, 'b-', linewidth=2, label=f'Weights ({weight_mode})')
-            
-            # Mark stimulus times
-            for i, st in enumerate(stim_times):
-                plt.axvline(st, color='red', linestyle='--', alpha=0.7, label='Stimuli' if i == 0 else "")
-            
-            plt.xlabel('Time (s)')
-            plt.ylabel('Weight')
-            plt.title(f'NNLS Weight Pattern: {weight_mode.capitalize()}')
-            if weight_tau_s is not None:
-                plt.title(f'NNLS Weight Pattern: {weight_mode.capitalize()} (τ={weight_tau_s*1000:.1f}ms)')
-            plt.legend()
-            plt.grid(True, alpha=0.3)
-            
-            # Zoom to train region
-            train_duration = (stim_times[-1] - stim_times[0]) * 1.5
-            plt.xlim(stim_times[0] - train_duration * 0.2, stim_times[-1] + train_duration * 0.5)
-            
-            plt.tight_layout()
-            try:
-                plt.show(block=False); plt.pause(0.05)
-            except Exception:
-                pass
-        except Exception as e:
-            print(f"[warning] Failed to plot weights: {e}")
-
     # Optional: average plot with a left event-fit panel (0-50 ms) + right main plot
     figure = None
+    fit_diag_figure = None
     if want_plot:
         # If residual diagnostics requested, allocate an extra bottom row
         if plot_residuals:
@@ -1861,6 +1826,19 @@ def extract_metrics(
         else:
             figure = plt.figure(figsize=(12, 5))
             gs = figure.add_gridspec(1, 2, width_ratios=[1.5, 4], wspace=0.15)
+
+        resid_avg = None
+        model_avg_for_resid = None
+        if plot_residuals:
+            if meas == 'SAVGOL' and (y_sg_avg is not None):
+                model_avg_for_resid = y_sg_avg
+            else:
+                model_avg_for_resid = yhat_avg
+            if model_avg_for_resid is not None:
+                try:
+                    resid_avg = np.asarray(y_avg - model_avg_for_resid, float)
+                except Exception:
+                    resid_avg = None
         # Left: aggregated event + model fit (−3..next stim−guard)
         axL = figure.add_subplot(gs[0, 0])
         _trim_spines(axL)
@@ -2005,6 +1983,20 @@ def extract_metrics(
             ax.plot(tz, y_sg_avg[zmask], label='savgol', color='tab:green')
         if 'nnls' in traces:
             ax.plot(tz, yhat_avg[zmask], label='nnls model', color='tab:blue')
+        if plot_residuals and resid_avg is not None:
+            try:
+                resid_offset = -0.2
+                ax.plot(
+                    tz,
+                    resid_avg[zmask] + resid_offset,
+                    label='residual (offset)',
+                    color='tab:purple',
+                    linewidth=1.2,
+                    alpha=0.9,
+                )
+                ax.axhline(resid_offset, color='tab:purple', linestyle=':', linewidth=0.8, alpha=0.7)
+            except Exception:
+                pass
         # Replace the orange line plotting section with:
         # Replace the orange line plotting with cumulative reconstruction:
         if show_decay and 'nnls' in traces and comp_avg is not None:
@@ -2092,15 +2084,8 @@ def extract_metrics(
 
         # Residual diagnostics panel (average): place directly under the main
         # average panel and show a small inset histogram (no separate figure).
-        if plot_residuals:
+        if plot_residuals and (resid_avg is not None) and (model_avg_for_resid is not None):
             try:
-                # Choose model per requested measurement series
-                if meas == 'SAVGOL' and (y_sg_avg is not None):
-                    model_avg = y_sg_avg
-                else:
-                    model_avg = yhat_avg
-                resid_avg = (y_avg - model_avg)
-
                 # Bottom-right: residual trace aligned with the top-right panel
                 axR = figure.add_subplot(gs[1, 1], sharex=ax)
                 axR.plot(tz, resid_avg[zmask], color='tab:purple', lw=1.2, label='residual (avg − model)')
@@ -2155,6 +2140,70 @@ def extract_metrics(
             except Exception:
                 pass
 
+        if cfg.get('fit_diagnostic_plot', False) and np.size(tau_d_vec):
+            try:
+                fit_diag_figure, axes = plt.subplots(1, 2, figsize=(11.0, 4.2))
+                ax_w, ax_tau = axes
+
+                # Weight kernel panel
+                if weight_mode == 'savgol' and y_sg_avg is None:
+                    y_vis = sg_smooth(fill_nans_timewise(y_avg, t), sgW, sgP)
+                else:
+                    y_vis = y_sg_avg
+                weights = _calculate_nnls_weights(
+                    t,
+                    stim_times,
+                    isi,
+                    weight_mode,
+                    weight_tau_s,
+                    y_ref=y_vis,
+                )
+                ax_w.plot(t, weights, color='#1f77b4', linewidth=2.0, label=f'{weight_mode} weight')
+                for i, st in enumerate(stim_times):
+                    label = 'stimulus' if i == 0 else None
+                    ax_w.axvline(st, color='red', linestyle='--', alpha=0.6, linewidth=0.9, label=label)
+                ax_w.set_xlabel('Time (s)')
+                ax_w.set_ylabel('Weight')
+                if weight_tau_s is not None:
+                    ax_w.set_title(f'Weight kernel (τ={weight_tau_s*1000:.1f} ms)')
+                else:
+                    ax_w.set_title('Weight kernel')
+                ax_w.legend(loc='upper right', frameon=False, fontsize=8)
+                ax_w.grid(True, alpha=0.2)
+
+                # τd progression panel
+                pulse_idx = np.arange(1, len(tau_d_vec) + 1, dtype=float)
+                if tau_d_vec_raw is not None and np.size(tau_d_vec_raw) == len(tau_d_vec):
+                    ax_tau.plot(
+                        pulse_idx,
+                        np.asarray(tau_d_vec_raw, float) * 1000.0,
+                        marker='o',
+                        color='#9467bd',
+                        linewidth=1.5,
+                        label='raw τd',
+                    )
+                ax_tau.plot(
+                    pulse_idx,
+                    np.asarray(tau_d_vec, float) * 1000.0,
+                    marker='s',
+                    color='#2ca02c',
+                    linewidth=1.5,
+                    label=f"progressed τd ({dec_mode})",
+                )
+                ax_tau.set_xlabel('Pulse #')
+                ax_tau.set_ylabel('τd (ms)')
+                ax_tau.set_title('Decay progression')
+                ax_tau.legend(loc='upper left', frameon=False, fontsize=8)
+                ax_tau.grid(True, alpha=0.2)
+
+                fit_diag_figure.tight_layout()
+                try:
+                    plt.show(block=False); plt.pause(0.05)
+                except Exception:
+                    pass
+            except Exception as e:
+                print(f"[warning] Failed to render fit diagnostics: {e}")
+
     return {
         'tau_r_s': float(tau_r),
         'tau_d_s': np.asarray(tau_d_vec, float),
@@ -2183,6 +2232,7 @@ def extract_metrics(
         'threshold_amp1': np.asarray(thr_list, float),
         'pval_amp1': np.asarray(pval_list, float),
         'figure': figure,
+        'figure_fit_diagnostic': fit_diag_figure,
         'figure_event_model': None,
         'figures_trials': figures_trials,
     }

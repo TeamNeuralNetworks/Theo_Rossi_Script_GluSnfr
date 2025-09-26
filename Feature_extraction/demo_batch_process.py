@@ -109,34 +109,78 @@ for in_dir in folders:
         # Define option presets
         options_presets = {
             'double_exp_default': {
-                'normalize_dff': True,
-                'bleach': True,
-                # Kinetics source and progression
-                'fit_source': 'global',
-                'decay_progression_mode': 'free_monotonic',  # 'fixed'|'free_monotonic'|'linear'
-                'event_model': 'hetero_coop', # 'single_exp'|'double_exp'|'two_component'|'binding_kinetics'|'cooperative'
-                'recut_projection': 'robust_mean',  # 'mean'|'median'|'std'|'robust_mean'
-                'recut_oversample': 50,     # integer >=1
-                'peak_recenter': 0,   # samples to shift (int or tuple); 0 disables
-                'recut_snippets': True,
-                'event_model_settings': {},  # valid for single_exp
-                # NNLS weight control options
-                'nnls_weight_mode': 'savgol',  # 'uniform', 'linear', 'exponential', 'savgol'
-                'nnls_weight_tau_s': 0.008,  # if None: auto (uses ISI or fitted tau)
-                'nnls_show_weights': False,  # Display weight pattern
-
-
+                # === Preprocessing ===
+                'normalize_dff': True,  # bool (default: True) - apply ΔF/F0 normalization
+                'bleach': True,  # bool (default: True) - correct slow bleaching
+                'sg_window': 9,  # int (default: 9) - Savitzky-Golay window size
+                'sg_poly': 2,  # int (default: 2) - Savitzky-Golay polynomial order
+                
+                # === Kinetics Estimation ===
+                'fit_source': 'global',  # (default: 'global') 'global'|'average'|'individual'
+                'decay_progression_mode': 'free_monotonic',  # (default: 'linear') 'fixed'|'free_monotonic'|'linear'
+                
+                # === Event Model ===
+                'event_model': 'double_exp',  # (default: 'double_exp') 'double_exp'|'cooperative'|'bilinear'|'single_exp'|'two_step_binding'|'alpha'|'gamma'|'binding_kinetics'|'two_component'|'desensitization'|'coop_plus_linear'|'diffusion_clearance'|'double_cooperative'|'hetero_coop'|'two_comp_coop'
+                'event_model_settings': {},  # dict (default: {}) - model-specific params - see event_models.py for details (e.g., {'n_coop': 2.0})
+                
+                # === Recut/Averaging ===
+                'recut_projection': 'median',  # (default: 'median') 'mean'|'median'|'std'|'robust_mean'
+                'recut_oversample': 50,  # int ≥1 (default: 1) - interpolation factor
+                'recut_peak_recenter': 0,  # int|tuple|None (default: 0) - peak realignment (0=disabled)
+                'recut_snippets': True,  # bool (default: False) - return snippets for plotting
+                
+                # === NNLS Fitting ===
+                'nnls_weight_mode': 'savgol',  # (default: 'uniform') 'uniform'|'linear'|'exponential'|'savgol'
+                'nnls_weight_tau_s': None,  # float|None (default: None=auto) - time constant (for linear or exponential modes)
+                'fit_diagnostic_plot': True,  # bool (default: False) - weight + τd diagnostics
+                'allow_shift': True,  # bool (default: True) - enable per-pulse micro-shifts
+                'huber_delta': 5.5,  # float (default: 5.5) - robust fitting threshold
+                'irls_iters': 20,  # int (default: 6) - IRLS iterations
+                'delta_max_s': 0.002,  # float (default: 0.002) - max shift in seconds
+                'delta_step_s': 0.00025,  # float (default: 0.00025) - shift step size in seconds
+                'shift_min_s': 0.00005,  # float (default: 0.00005) - minimum shift in seconds
+                
+                # === Time Windows ===
+                'pre_zoom_s': 0.20,  # float (default: 0.15) - pre-train window
+                'post_zoom_s': 0.20,  # float (default: 0.60) - post-train window
+                'f0_window_s': 1.0,  # float (default: 0.4) - baseline window
+                
+                # === Peak Detection ===
+                'peak_window_ms': 25.0,  # float (default: 25.0) - peak search window
+                'peak_avg_points': 5,  # int (default: 5) - points to average at peak
+                'pre_peak_ms': 0.0,  # float (default: 0.0) - pre-peak offset
+                
+                # === Thresholding ===
+                'measurement': 'NNLS',  # (default: 'NNLS') 'NNLS'|'SAVGOL'|'RAW' - series for p-values
+                'fail_method': 'SAVGOL',  # (default: None) 'NNLS'|'SAVGOL'|'RAW'|None - failure classification (None=use measurement)
+                'threshold_mode': 'auto',  # (default: 'auto') 'auto'|'mad'|'sd' - threshold rule (auto=MAD for NNLS, SD for SAVGOL)
+                'null_N': 1.0,  # float (default: 3.0) - threshold multiplier
+                'null_sim_max_points': 1000,  # int (default: 1000) - max null samples
+                'null_min_post_zoom_s': 0.05,  # float (default: 0.05) - min post window for null
+                
+                # === Kinetics Grids ===
+                'kin_taur_grid_ms': [0.6, 0.8, 1.0, 1.2, 1.5, 2.0],  # list[float] (default: [0.6, 0.8, 1.0, 1.2, 1.5, 2.0])
+                'kin_taud0_grid_ms': [1.6, 2.0, 2.5, 3.0, 4.0, 6.0, 8.0, 10.0, 12.5, 15.0, 18.0, 22.0, 28.0, 35.0, 45.0, 60.0],  # list[float] (default: [1.6, 2.0, ..., 60.0])
+                'kin_slope_grid_ms': [0.0, 0.25, 0.5, 1.0, 2.0, 3.0, 5.0],  # list[float] (default: [0.0, 0.25, 0.5, 1.0, 2.0, 3.0, 5.0])
+                
+                # === Bleach Correction ===
+                'bleach_huber_delta': 3.0,  # float (default: 3.0) - robust fitting threshold
+                'bleach_tau_range_factor': (0.25, 4.0),  # tuple[float,float] (default: (0.25, 4.0)) - tau range multipliers
+                'bleach_n_tau': 25,  # int (default: 25) - number of tau values to test
+                
+                # === Plotting ===
                 'plot': {
-                    'enabled': True,
-                    'traces': ['raw','savgol','nnls'],  # show all average overlays
-                    'show_decay': True,
-                    'trials': False,
-                    'baseline': False,
-                    'residuals': False,
-                    'plot_peaks_details': True,
+                    'enabled': True,  # bool (default: False) - create plots
+                    'traces': ['raw', 'nnls'],  # list[str] (default: ['nnls']) - traces to show
+                    'show_decay': True,  # bool (default: True) - show decay components
+                    'trials': False,  # bool (default: False) - plot individual trials
+                    'baseline': False,  # bool (default: False) - show baseline diagnostics
+                    'residuals': True,  # bool (default: False) - show residual analysis
+                    'plot_peaks_details': True,  # bool (default: False) - show peak markers and residuals
                 }
             },
         }
+    
 
 
         # Choose which preset to use

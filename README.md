@@ -303,9 +303,9 @@ Photobleaching causes the baseline fluorescence to drift downward even without n
 - If the train start differs across datasets, update `TRAIN_START_OVERRIDE_MAP` or pass `--train-start` for single-file runs.
 - Ensure at least one input workbook has ≥3 columns; a placeholder sheet is added automatically if none processed.
 
-## NNLS Weight Control
+## NNLS Weight Control & Diagnostics
 
-The NNLS (Non-Negative Least Squares) fitter supports configurable weighting patterns for event amplitude estimation.
+The NNLS (Non-Negative Least Squares) fitter supports configurable weighting patterns for event amplitude estimation and an optional diagnostic figure to inspect how weights and decay constraints shape the fit.
 
 ### Supported Modes
 
@@ -322,7 +322,7 @@ The NNLS (Non-Negative Least Squares) fitter supports configurable weighting pat
   - Exponential: controls the exponential decay time constant.
     - `fit_source='global'`: uses estimated tau_d from kinetics fitting (default 10 ms if unavailable).
     - Other fit sources: default 10 ms.
-- `nnls_show_weights` (bool, default `False`): when `True`, displays a plot showing the weight pattern for the train.
+- `fit_diagnostic_plot` (bool, default `False`): when `True`, opens a 2-panel figure showing the current weight kernel and the raw vs. progressed τd sequence driven by `decay_progression_mode`.
   - When `'savgol'` is selected the smoothing trace is computed automatically if not already requested.
 
 ### Weight Pattern Behavior
@@ -338,27 +338,27 @@ The NNLS (Non-Negative Least Squares) fitter supports configurable weighting pat
 # Basic exponential weighting with auto tau
 options = {
     'nnls_weight_mode': 'exponential',
-    'nnls_show_weights': True,
+    'fit_diagnostic_plot': True,
 }
 
 # Linear weighting with custom slope
 options = {
     'nnls_weight_mode': 'linear',
     'nnls_weight_tau_s': 0.025,  # 25 ms time constant
-    'nnls_show_weights': True,
+    'fit_diagnostic_plot': True,
 }
 
 # Exponential weighting with explicit time constant
 options = {
     'nnls_weight_mode': 'exponential',
     'nnls_weight_tau_s': 0.015,  # 15 ms decay
-    'nnls_show_weights': True,
+    'fit_diagnostic_plot': True,
 }
 
 # Savgol weighting driven by the smoothed trace
 options = {
     'nnls_weight_mode': 'savgol',
-    'nnls_show_weights': True,
+    'fit_diagnostic_plot': True,
 }
 ```
 
@@ -367,7 +367,7 @@ options = {
 - `_calculate_nnls_weights()` computes weight patterns for the supported modes (including Savitzky–Golay derived weights).
 - `_nnls_weighted()` performs weighted NNLS solving.
 - `estimate_kinetics_from_average()` accepts weight parameters (including SG window/polynomial for `'savgol'` mode), and `extract_metrics()` threads them through.
-- Weight visualization integrates with the existing plotting system when `nnls_show_weights=True`.
+- Fit diagnostics integrate with the plotting system when `fit_diagnostic_plot=True`, pairing the weight kernel with τd progression overlays.
 
 ### Automatic Parameter Selection
 
