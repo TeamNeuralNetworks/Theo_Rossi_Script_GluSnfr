@@ -1616,37 +1616,52 @@ def extract_metrics(
             if ax_base is not None:
                 base_mask = (t < float(train_start))
                 tb = t[base_mask]
+                use_savgol_baseline = False
                 if tb.size:
+                    use_savgol_baseline = (
+                        (meas == 'NNLS')
+                        and (failm != meas)
+                        and (yj_sg is not None)
+                    )
                     if 'raw' in traces:
                         ax_base.plot(tb, yj[base_mask], color='0.4', linewidth=1.0, label='baseline')
-                    # Overlay a subset of null-fit events in red
-                    baseline_start = tb[0]; baseline_end = tb[-1]
-                    null_start = max(baseline_start, float(train_start) - cfg['f0_window_s'])
-                    null_end = min(baseline_end, float(train_start))
-                    st_min = null_start + cfg['pre_zoom_s']
-                    st_max = null_end - cfg['null_min_post_zoom_s']
-                    cand_mask = (t >= st_min) & (t <= st_max)
-                    starts_full = t[cand_mask]
-                    if starts_full.size:
-                        events = []  # (amp, start, shift)
-                        for stcand in starts_full:
-                            avail_post = min(cfg['post_zoom_s'], float(train_start) - stcand - 1e-6, null_end - stcand)
-                            if avail_post < cfg['null_min_post_zoom_s']:
-                                continue
-                            a_hat_b, d_hat_b = _fit_single_pulse_amp(
-                                yj, t, float(stcand), tau_r, tau_d0,
-                                pre_zoom_s=cfg['pre_zoom_s'], post_zoom_s=avail_post,
-                                robust=True, huber_delta=cfg['huber_delta'], irls_iters=cfg['irls_iters'],
-                                allow_shift=True, delta_max_s=cfg['delta_max_s'], delta_step_s=cfg['delta_step_s'],
-                                shift_min_s=cfg['shift_min_s'],
-                            )
-                            events.append((float(a_hat_b), float(stcand), float(d_hat_b)))
-                        events = [e for e in events if np.isfinite(e[0]) and e[0] > 0]
-                        events.sort(key=lambda e: e[0], reverse=True)
-                        draw_n = min(20, len(events))
-                        for a_hat_b, stcand, d_hat_b in events[:draw_n]:
-                            y_evt_b = a_hat_b * _KERNEL_FUN(tb - (stcand + d_hat_b), tau_r, tau_d0)
-                            ax_base.plot(tb, y_evt_b, color='red', alpha=0.5, linewidth=1.0)
+                    if use_savgol_baseline:
+                        ax_base.plot(
+                            tb,
+                            yj_sg[base_mask],
+                            color='red',
+                            linewidth=1.1,
+                            label='savgol',
+                        )
+                    else:
+                        # Overlay a subset of null-fit events in red
+                        baseline_start = tb[0]; baseline_end = tb[-1]
+                        null_start = max(baseline_start, float(train_start) - cfg['f0_window_s'])
+                        null_end = min(baseline_end, float(train_start))
+                        st_min = null_start + cfg['pre_zoom_s']
+                        st_max = null_end - cfg['null_min_post_zoom_s']
+                        cand_mask = (t >= st_min) & (t <= st_max)
+                        starts_full = t[cand_mask]
+                        if starts_full.size:
+                            events = []  # (amp, start, shift)
+                            for stcand in starts_full:
+                                avail_post = min(cfg['post_zoom_s'], float(train_start) - stcand - 1e-6, null_end - stcand)
+                                if avail_post < cfg['null_min_post_zoom_s']:
+                                    continue
+                                a_hat_b, d_hat_b = _fit_single_pulse_amp(
+                                    yj, t, float(stcand), tau_r, tau_d0,
+                                    pre_zoom_s=cfg['pre_zoom_s'], post_zoom_s=avail_post,
+                                    robust=True, huber_delta=cfg['huber_delta'], irls_iters=cfg['irls_iters'],
+                                    allow_shift=True, delta_max_s=cfg['delta_max_s'], delta_step_s=cfg['delta_step_s'],
+                                    shift_min_s=cfg['shift_min_s'],
+                                )
+                                events.append((float(a_hat_b), float(stcand), float(d_hat_b)))
+                            events = [e for e in events if np.isfinite(e[0]) and e[0] > 0]
+                            events.sort(key=lambda e: e[0], reverse=True)
+                            draw_n = min(20, len(events))
+                            for a_hat_b, stcand, d_hat_b in events[:draw_n]:
+                                y_evt_b = a_hat_b * _KERNEL_FUN(tb - (stcand + d_hat_b), tau_r, tau_d0)
+                                ax_base.plot(tb, y_evt_b, color='red', alpha=0.5, linewidth=1.0)
                     # Inset histogram of null amplitudes with threshold
                     try:
                         ax_in = ax_base.inset_axes([0.65, 0.55, 0.33, 0.4])
@@ -1661,7 +1676,10 @@ def extract_metrics(
                         pass
                 ax_base.set_xlabel('Time (s)')
                 ax_base.set_ylabel('ΔF/F0' if use_dff else 'ΔF')
-                ax_base.set_title('Baseline window + null-fit events')
+                if use_savgol_baseline:
+                    ax_base.set_title('Baseline window (savgol)')
+                else:
+                    ax_base.set_title('Baseline window + null-fit events')
                 _trim_spines(ax_base)
 
             # Match Y limits across comparable panels (exclude residuals)
