@@ -25,6 +25,48 @@ The function keeps the math equivalent to the main pipeline while exposing a sma
     - `free_monotonic`: interpolate τd between first and last event (non‑decreasing)
     - `linear`: non‑negative‑slope linear trend across pulses
 
+### Baseline computation, normalization, and failure thresholds
+
+The extractor keeps the same baseline logic as the full pipeline. The main
+pieces (and the knobs you can adjust) are:
+
+1. **Bleach removal (optional).** With `options['bleach']=True` the trace is
+   first detrended by fitting a robust mono-exponential on quiet regions before
+   and after the train. Disable this if bleaching has already been handled.
+2. **Baseline window.** Samples strictly before `train_start` define the
+   baseline mask. If fewer than five points exist (short pre-train segment),
+   the earliest 10 % of the trace is used instead. This mask is shared by all
+   downstream steps.
+3. **F₀ estimation and ΔF/F normalization.** For each trial the median of the
+   baseline samples becomes F₀. With `normalize_dff=True` the code reports
+   ΔF/F₀; if a trial’s F₀ is effectively zero it falls back to simple
+   baseline-subtraction so the series stays finite.
+4. **Peak correction for overlapping decays.** Amplitudes are measured by
+   subtracting the cumulative NNLS reconstruction from earlier pulses, so the
+   “peak minus baseline” reflects only the current event even when decays
+   overlap.
+5. **Null distribution for failure calls.** The combination of
+   `measurement`, `fail_method`, `threshold_mode`, and `null_N` controls the
+   A1 threshold and p-values:
+   - `measurement` selects which amplitude series is summarized and evaluated
+     (`'NNLS'`, `'SAVGOL'`, or `'RAW'`).
+   - `fail_method` chooses how the noise floor is estimated. `'NNLS'` (default)
+     simulates single-pulse fits inside the final `f0_window_s` seconds before
+     the train using the same kinetics, micro-shifts (`allow_shift`), and
+     windowing as the real fit. `'SAVGOL'` or `'RAW'` instead measure windowed
+     maxima on the smoothed or raw baseline, respectively.
+   - `threshold_mode` sets the statistic: `'mad'` uses
+     median + `null_N`·1.4826·MAD, `'sd'` uses mean + `null_N`·SD, and `'auto'`
+     picks `'mad'` for NNLS-based nulls and `'sd'` for Savitzky-Golay or raw.
+   - `null_N` (default 3.0) is the multiplier applied to the chosen spread.
+   A single threshold computed from that null distribution is reused for pulse
+   1 failures and the pulse 2/3 p-values. Reducing `f0_window_s` or disabling
+   `allow_shift` tightens the null when pre-train baselines are short.
+6. **Baseline figures (optional).** Enable `options['plot']['baseline']=True`
+   to save per-trial two-panel plots that show the baseline fit, null histogram
+   and the stimulus train. This is useful when checking that the baseline mask
+   and threshold rule match your expectations.
+
 Related demo scripts in this folder (with concrete paths): `demo_single_file.py` and `demo_batch_process.py` (works for one or many folders).
 
 ---
