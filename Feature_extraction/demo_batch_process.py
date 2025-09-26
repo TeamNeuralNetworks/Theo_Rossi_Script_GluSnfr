@@ -120,7 +120,7 @@ for in_dir in folders:
                 'decay_progression_mode': 'free_monotonic',  # (default: 'linear') 'fixed'|'free_monotonic'|'linear'
                 
                 # === Event Model ===
-                'event_model': 'double_exp',  # (default: 'double_exp') 'double_exp'|'cooperative'|'bilinear'|'single_exp'|'two_step_binding'|'alpha'|'gamma'|'binding_kinetics'|'two_component'|'desensitization'|'coop_plus_linear'|'diffusion_clearance'|'double_cooperative'|'hetero_coop'|'two_comp_coop'
+                'event_model': 'two_comp_coop',  # (default: 'double_exp') 'double_exp'|'cooperative'|'bilinear'|'single_exp'|'two_step_binding'|'alpha'|'gamma'|'binding_kinetics'|'two_component'|'desensitization'|'coop_plus_linear'|'diffusion_clearance'|'double_cooperative'|'hetero_coop'|'two_comp_coop'
                 'event_model_settings': {},  # dict (default: {}) - model-specific params - see event_models.py for details (e.g., {'n_coop': 2.0})
                 
                 # === Recut/Averaging ===
@@ -132,7 +132,7 @@ for in_dir in folders:
                 # === NNLS Fitting ===
                 'nnls_weight_mode': 'savgol',  # (default: 'uniform') 'uniform'|'linear'|'exponential'|'savgol'
                 'nnls_weight_tau_s': None,  # float|None (default: None=auto) - time constant (for linear or exponential modes)
-                'fit_diagnostic_plot': True,  # bool (default: False) - weight + τd diagnostics
+                'fit_diagnostic_plot': False,  # bool (default: False) - weight + τd diagnostics
                 'allow_shift': True,  # bool (default: True) - enable per-pulse micro-shifts
                 'huber_delta': 5.5,  # float (default: 5.5) - robust fitting threshold
                 'irls_iters': 20,  # int (default: 6) - IRLS iterations

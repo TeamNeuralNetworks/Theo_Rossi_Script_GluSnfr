@@ -1985,7 +1985,7 @@ def extract_metrics(
             ax.plot(tz, yhat_avg[zmask], label='nnls model', color='tab:blue')
         if plot_residuals and resid_avg is not None:
             try:
-                resid_offset = -0.2
+                resid_offset = -1
                 ax.plot(
                     tz,
                     resid_avg[zmask] + resid_offset,
