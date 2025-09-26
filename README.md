@@ -4,7 +4,7 @@ This repository provides a practical toolkit to analyze iGluSnFR stimulation tra
 
 ## Toolkit Overview
 
-- **Feature extraction**: `Feature_extraction/extract_metrics.py` plus demos (`demo_single_file.py`, `demo_single_folder.py`, `demo_batch_process.py`) and snippets.
+- **Feature extraction**: `Feature_extraction/extract_metrics.py` plus demos (`demo_single_file.py`, `demo_batch_process.py`) and snippets. The batch demo covers both single- and multi-folder workflows.
 - **Batch analysis**: `batch_measure_complex.py` with CLI flags, runtime overrides, and helper scripts (`smoothing_test.py`, `whitenng_interactive.py`).
 - **Model calibration**: `Model_Calibration/demo_adjust_fit_events.py`, `Model_Calibration/Demo_two_good_model_fitting.py`, and the notebook `Model_Calibration/Demo_Different_model_fitting.ipynb` (edit code/markdown only).
 - **Utilities**: `smoothing.py` and helpers for detrending, kernels, NNLS, plotting, and NNLS weight visualization.
@@ -390,7 +390,7 @@ Build median event waveforms across files, then compare two kinetic models.
 ## Repository Layout
 
 - `Feature_extraction/extract_metrics.py`: small, explicit interface to compute amplitudes (NNLS and alternatives), PPR, and plots.
-- `Feature_extraction/demo_single_file.py`, `Feature_extraction/demo_single_folder.py`, `Feature_extraction/demo_batch_process.py`: runnable demos covering single file, single folder, and multi-folder scenarios.
+- `Feature_extraction/demo_single_file.py`, `Feature_extraction/demo_batch_process.py`: runnable demos covering single-file and single-/multi-folder scenarios.
 - `batch_measure_complex.py`: consolidated settings and CLI for folder and multi-folder export; supports plotting and Excel output.
 - `Model_Calibration/demo_adjust_fit_events.py`, `Model_Calibration/Demo_two_good_model_fitting.py`: model calibration demos and comparisons.
 - `smoothing.py`: shared smoothing, detrending, NNLS, and plotting helpers.

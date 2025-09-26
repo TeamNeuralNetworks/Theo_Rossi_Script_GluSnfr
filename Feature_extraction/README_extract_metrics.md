@@ -25,7 +25,7 @@ The function keeps the math equivalent to the main pipeline while exposing a sma
     - `free_monotonic`: interpolate τd between first and last event (non‑decreasing)
     - `linear`: non‑negative‑slope linear trend across pulses
 
-Related demo scripts in this folder (with concrete paths): `demo_single_file.py`, `demo_single_folder.py`, `demo_batch_process.py`.
+Related demo scripts in this folder (with concrete paths): `demo_single_file.py` and `demo_batch_process.py` (works for one or many folders).
 
 ---
 
