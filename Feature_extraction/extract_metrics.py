@@ -1597,13 +1597,34 @@ def extract_metrics(
                     ax_resid.set_ylabel('ΔF/F0' if use_dff else 'ΔF')
                     ax_resid.set_title('Residuals in train window')
                     ax_resid.legend(loc='upper right', frameon=False, fontsize=8)
-                    # Inset histogram of residuals (zoom window) similar to baseline inset
+                    # Inset histogram of residuals (zoom window) with fixed bins and Gaussian fit
                     try:
                         ax_in_r = ax_resid.inset_axes([0.65, 0.55, 0.33, 0.4])
                         rdata = np.asarray(resid_t[zmask_t], float)
                         rdata = rdata[np.isfinite(rdata)]
                         if rdata.size:
-                            ax_in_r.hist(rdata, bins='fd', color='#d8c7e8', edgecolor='#6b4fa3')
+                            bin_w = (0.01 if use_dff else 10.0)
+                            lo = float(np.nanmin(rdata))
+                            hi = float(np.nanmax(rdata))
+                            if not np.isfinite(lo):
+                                lo = 0.0
+                            if not np.isfinite(hi) or hi <= lo:
+                                hi = lo + bin_w
+                            edges = np.arange(lo, hi + bin_w, bin_w)
+                            ax_in_r.hist(rdata, bins=edges, color='#d8c7e8', edgecolor='#6b4fa3')
+                            # Fit Gaussian to residuals and overlay across full inset range
+                            try:
+                                mu = float(np.nanmean(rdata))
+                                sigma = float(np.nanstd(rdata))
+                            except Exception:
+                                mu, sigma = float('nan'), float('nan')
+                            if np.isfinite(sigma) and sigma > 0:
+                                x0, x1 = ax_in_r.get_xlim()
+                                x = np.linspace(x0, x1, 400)
+                                pdf = (1.0 / (np.sqrt(2.0 * np.pi) * sigma)) * np.exp(-0.5 * ((x - mu) / sigma) ** 2)
+                                N = rdata.size
+                                y = N * bin_w * pdf
+                                ax_in_r.plot(x, y, color='#26457a', linewidth=1.4, label='fit')
                         ax_in_r.set_title('residual', fontsize=8)
                         ax_in_r.tick_params(labelsize=7)
                     except Exception:
@@ -1662,12 +1683,37 @@ def extract_metrics(
                             for a_hat_b, stcand, d_hat_b in events[:draw_n]:
                                 y_evt_b = a_hat_b * _KERNEL_FUN(tb - (stcand + d_hat_b), tau_r, tau_d0)
                                 ax_base.plot(tb, y_evt_b, color='red', alpha=0.5, linewidth=1.0)
-                    # Inset histogram of null amplitudes with threshold
+                    # Inset histogram of null amplitudes with threshold and fitted noise curve
                     try:
                         ax_in = ax_base.inset_axes([0.65, 0.55, 0.33, 0.4])
                         data = np.asarray(null_amps, float)
+                        data = data[np.isfinite(data)]
                         if data.size:
-                            ax_in.hist(data[~np.isnan(data)], bins='fd', color='#c9d4e8', edgecolor='#4f6aa3')
+                            # Fixed bin width based on measurement scale
+                            bin_w = (0.01 if use_dff else 10.0)
+                            lo = 0.0  # null amplitudes are non‑negative
+                            hi = float(np.nanmax(data)) if np.isfinite(np.nanmax(data)) else 0.0
+                            if hi <= lo:
+                                hi = lo + bin_w
+                            edges = np.arange(lo, hi + bin_w, bin_w)
+                            # Draw histogram
+                            ax_in.hist(data, bins=edges, color='#c9d4e8', edgecolor='#4f6aa3')
+                            # Overlay fitted half‑normal model scaled to counts
+                            # MLE for half‑normal sigma: sqrt(mean(x^2)) on x >= 0
+                            try:
+                                sigma = float(np.sqrt(np.mean(np.square(np.clip(data, 0.0, None)))))
+                            except Exception:
+                                sigma = float('nan')
+                            if np.isfinite(sigma) and sigma > 0:
+                                x0, x1 = ax_in.get_xlim()
+                                x = np.linspace(x0, x1, 400)
+                                # half‑normal pdf
+                                x_clip = np.clip(x, 0.0, None)
+                                pdf = (np.sqrt(2.0) / (sigma * np.sqrt(np.pi))) * np.exp(-(x_clip**2) / (2.0 * sigma * sigma))
+                                pdf = np.where(x >= 0.0, pdf, 0.0)
+                                N = data.size
+                                y = N * bin_w * pdf  # scale pdf to expected counts per bin
+                                ax_in.plot(x, y, color='#26457a', linewidth=1.4, label='fit')
                             if np.isfinite(thr1):
                                 ax_in.axvline(thr1, color='red', linestyle='--', linewidth=0.9)
                         ax_in.set_title('noise', fontsize=8)
@@ -2007,13 +2053,34 @@ def extract_metrics(
                 axR.legend(loc='upper right', frameon=False, fontsize=8)
                 _trim_spines(axR)
 
-                # Inset histogram of residuals in the zoom window
+                # Inset histogram of residuals in the zoom window with fixed bins and Gaussian fit
                 try:
                     ax_in = axR.inset_axes([0.70, 0.55, 0.28, 0.4])
                     rv = np.asarray(resid_avg[zmask], float)
                     rv = rv[np.isfinite(rv)]
                     if rv.size:
-                        ax_in.hist(rv, bins='fd', color='#d8c7e8', edgecolor='#6b4fa3')
+                        bin_w = (0.01 if use_dff else 10.0)
+                        lo = float(np.nanmin(rv))
+                        hi = float(np.nanmax(rv))
+                        if not np.isfinite(lo):
+                            lo = 0.0
+                        if not np.isfinite(hi) or hi <= lo:
+                            hi = lo + bin_w
+                        edges = np.arange(lo, hi + bin_w, bin_w)
+                        ax_in.hist(rv, bins=edges, color='#d8c7e8', edgecolor='#6b4fa3')
+                        # Gaussian fit overlay across full inset range
+                        try:
+                            mu = float(np.nanmean(rv))
+                            sigma = float(np.nanstd(rv))
+                        except Exception:
+                            mu, sigma = float('nan'), float('nan')
+                        if np.isfinite(sigma) and sigma > 0:
+                            x0, x1 = ax_in.get_xlim()
+                            x = np.linspace(x0, x1, 400)
+                            pdf = (1.0 / (np.sqrt(2.0 * np.pi) * sigma)) * np.exp(-0.5 * ((x - mu) / sigma) ** 2)
+                            N = rv.size
+                            y = N * bin_w * pdf
+                            ax_in.plot(x, y, color='#26457a', linewidth=1.4, label='fit')
                     ax_in.set_title('residual', fontsize=8)
                     ax_in.tick_params(labelsize=7)
                 except Exception:
