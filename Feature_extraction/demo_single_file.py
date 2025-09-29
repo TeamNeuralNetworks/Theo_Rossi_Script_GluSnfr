@@ -59,6 +59,7 @@ xlsx_path = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\WT_Anthime\241212_F
 START = 0.498 + 0.5
 
 out_dir = r"C:\Users\Antoine.Valera\Desktop\Testout"
+
 os.makedirs(out_dir, exist_ok=True)
 df = pd.read_excel(xlsx_path, sheet_name=0, engine="openpyxl")
 # time in last column; trials in all columns except last
@@ -114,8 +115,8 @@ options_presets = {
         
         # === Thresholding ===
         'measurement': 'NNLS',  # (default: 'NNLS') 'NNLS'|'SAVGOL'|'RAW' - series for p-values
-        'fail_method': 'SAVGOL',  # (default: None) 'NNLS'|'SAVGOL'|'RAW'|None - failure classification (None=use measurement)
-        'threshold_mode': 'auto',  # (default: 'auto') 'auto'|'mad'|'sd' - threshold rule (auto=MAD for NNLS, SD for SAVGOL)
+        'fail_method': 'NNLS',  # (default: None) 'NNLS'|'SAVGOL'|'RAW'|None - failure classification (None=use measurement)
+        'threshold_mode': 'sd',  # (default: 'auto') 'auto'|'mad'|'sd' - threshold rule (auto=MAD for NNLS, SD for SAVGOL)
         'null_N': 3.0,  # float (default: 3.0) - threshold multiplier
         'null_sim_max_points': 1000,  # int (default: 1000) - max null samples
         'null_min_post_zoom_s': 0.05,  # float (default: 0.05) - min post window for null

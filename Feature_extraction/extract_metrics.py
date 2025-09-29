@@ -299,13 +299,15 @@ def _fit_single_pulse_amp(
     delta_max_s: float,
     delta_step_s: float,
     shift_min_s: float,
+    event_t0_s: float = 0.0,
 ) -> Tuple[float, float]:
     """Estimate amplitude at ``stim_time`` with optional micro-shift.
 
     Assumes baseline has been corrected; residual from earlier events should be
     subtracted before calling. Returns ``(amplitude, best_shift_s)``.
     """
-    local_mask = (t >= (stim_time - pre_zoom_s)) & (t <= (stim_time + post_zoom_s))
+    anchor = float(stim_time) + float(event_t0_s)
+    local_mask = (t >= (anchor - pre_zoom_s)) & (t <= (anchor + post_zoom_s))
     if not np.any(local_mask):
         return 0.0, 0.0
     y_seg = y[local_mask]
@@ -321,7 +323,7 @@ def _fit_single_pulse_amp(
         shifts = np.array([0.0])
     shifts = np.unique(shifts.astype(float))
     for d in shifts:
-        k_full = _KERNEL_FUN(t - (stim_time + d), tau_r_s, tau_d_s)
+        k_full = _KERNEL_FUN(t - (anchor + d), tau_r_s, tau_d_s)
         k_loc = k_full[local_mask]
         if k_loc.size < 3 or np.all(k_loc == 0):
             continue
@@ -347,6 +349,7 @@ def fit_amplitudes_no_overlap_forward(
     delta_max_s: float,
     delta_step_s: float,
     shift_min_s: float,
+    event_t0_s: float = 0.0,
 ):
     """Forward, non‑overlap per‑pulse fitting with micro‑shifts.
     
@@ -357,11 +360,17 @@ def fit_amplitudes_no_overlap_forward(
     d = np.zeros(n, float)
     residual = y.copy()
     
+    event_t0_s = float(event_t0_s)
+
     for p in range(n):
         st = float(stim_times[p])
-        next_st = float(stim_times[p + 1]) if p < n - 1 else None
-        max_end = min(st + post_zoom_s, next_st) if next_st is not None else (st + post_zoom_s)
-        avail_post = max(0.0, max_end - st)
+        anchor = st + event_t0_s
+        if p < n - 1:
+            next_anchor = float(stim_times[p + 1]) + event_t0_s
+        else:
+            next_anchor = None
+        max_end = min(anchor + post_zoom_s, next_anchor) if next_anchor is not None else (anchor + post_zoom_s)
+        avail_post = max(0.0, max_end - anchor)
         
         if avail_post < 1e-6:
             continue
@@ -371,14 +380,14 @@ def fit_amplitudes_no_overlap_forward(
             pre_zoom_s=pre_zoom_s, post_zoom_s=avail_post,
             robust=robust, huber_delta=huber_delta, irls_iters=irls_iters,
             allow_shift=allow_shift, delta_max_s=delta_max_s, delta_step_s=delta_step_s,
-            shift_min_s=shift_min_s,
+            shift_min_s=shift_min_s, event_t0_s=event_t0_s,
         )
         
         a[p] = a_p
         d[p] = d_p
         
         # Subtract this component from residual for next iteration
-        k = _KERNEL_FUN(t - (st + d_p), tau_r_s, float(tau_d_vec_s[p]))
+        k = _KERNEL_FUN(t - (anchor + d_p), tau_r_s, float(tau_d_vec_s[p]))
         comp = a_p * k
         residual = residual - comp
     
@@ -387,7 +396,8 @@ def fit_amplitudes_no_overlap_forward(
     components = []
     for p in range(n):
         if a[p] > 0:  # Only create component if amplitude is non-zero
-            k = _KERNEL_FUN(t - (float(stim_times[p]) + d[p]), tau_r_s, float(tau_d_vec_s[p]))
+            anchor_p = float(stim_times[p]) + event_t0_s
+            k = _KERNEL_FUN(t - (anchor_p + d[p]), tau_r_s, float(tau_d_vec_s[p]))
             components.append(a[p] * k)
         else:
             components.append(np.zeros_like(y))
@@ -398,7 +408,11 @@ def fit_amplitudes_no_overlap_forward(
     # Build design matrix for reference
     X = (
         np.column_stack([
-            _KERNEL_FUN(t - (float(stim_times[p]) + d[p]), tau_r_s, float(tau_d_vec_s[p]))
+            _KERNEL_FUN(
+                t - (float(stim_times[p]) + event_t0_s + d[p]),
+                tau_r_s,
+                float(tau_d_vec_s[p]),
+            )
             for p in range(n)
         ])
         if n
@@ -417,6 +431,8 @@ def compute_localmax_corrected_amps(
     d_vec: np.ndarray,
     tau_r_s: float,
     tau_d_vec_s: np.ndarray,
+    *,
+    event_t0_s: float = 0.0,
 ):
     """Local averaged max around each stimulus, removing earlier events.
 
@@ -429,8 +445,10 @@ def compute_localmax_corrected_amps(
         return np.zeros(len(stim_times), float)
     y_resid = y.copy()
     amps = []
+    event_t0_s = float(event_t0_s)
     for p, st in enumerate(stim_times):
-        v = windowed_max(t, y_resid, [st], win_ms, int(n_avg), pre_ms)
+        center = float(st) + event_t0_s
+        v = windowed_max(t, y_resid, [center], win_ms, int(n_avg), pre_ms)
         amp_p = float(v[0]) if np.size(v) else 0.0
         amps.append(amp_p)
         if (
@@ -440,7 +458,9 @@ def compute_localmax_corrected_amps(
             and len(tau_d_vec_s) > p
         ):
             k = _KERNEL_FUN(
-                t - (float(st) + float(d_vec[p])), tau_r_s, float(tau_d_vec_s[p])
+                t - (float(st) + event_t0_s + float(d_vec[p])),
+                tau_r_s,
+                float(tau_d_vec_s[p]),
             )
             y_resid = y_resid - amp_p * k
     return np.asarray(amps, float)
@@ -525,6 +545,7 @@ def sample_null_amplitudes_consistent(
     shift_min_s: float,
     n_samples: int = 1000,
     seed: int = 42,
+    event_t0_s: float = 0.0,
 ):
     """Null distribution for A1 using the same single‑pulse estimator.
 
@@ -558,8 +579,10 @@ def sample_null_amplitudes_consistent(
         starts = starts_full
 
     amps = []
+    event_t0_s = float(event_t0_s)
     for st in starts:
-        avail_post = min(post_zoom_s, train_start - st - 1e-6, null_end - st)
+        anchor = float(st) + event_t0_s
+        avail_post = min(post_zoom_s, train_start - anchor - 1e-6, null_end - st)
         if avail_post < null_min_post_zoom_s:
             continue
         a_hat, d_hat = _fit_single_pulse_amp(
@@ -567,13 +590,20 @@ def sample_null_amplitudes_consistent(
             pre_zoom_s=pre_zoom_s, post_zoom_s=avail_post,
             robust=robust, huber_delta=huber_delta, irls_iters=irls_iters,
             allow_shift=allow_shift, delta_max_s=delta_max_s, delta_step_s=delta_step_s,
-            shift_min_s=shift_min_s,
+            shift_min_s=shift_min_s, event_t0_s=event_t0_s,
         )
-        t_fit = t[(t >= st - pre_zoom_s) & (t <= st + avail_post)]
+        t_fit = t[(t >= anchor - pre_zoom_s) & (t <= anchor + avail_post)]
         if t_fit.size:
-            k_fit = _KERNEL_FUN(t_fit - (st + d_hat), tau_r_s, tau_d_s)
+            k_fit = _KERNEL_FUN(t_fit - (anchor + d_hat), tau_r_s, tau_d_s)
             y_evt = a_hat * k_fit
-            val = windowed_max(t_fit, y_evt, [st], peak_window_ms, peak_avg_points, pre_peak_ms)
+            val = windowed_max(
+                t_fit,
+                y_evt,
+                [float(st) + event_t0_s],
+                peak_window_ms,
+                peak_avg_points,
+                pre_peak_ms,
+            )
             amps.append(float(val[0]) if np.size(val) else 0.0)
     return np.asarray(amps, float)
 
@@ -711,13 +741,15 @@ def estimate_kinetics_from_average(
     weight_tau_s: Optional[float] = None,
     sg_window: int = DEFAULTS['sg_window'],
     sg_poly: int = DEFAULTS['sg_poly'],
+    event_t0_s: float = 0.0,
 ) -> Tuple[float, float, float, np.ndarray]:
     """Grid search τr, τd0, slope on the average trace (zoomed window)."""
     tau_r_grid = np.array(taur_grid_ms, float) / 1000.0
     tau_d0_grid = np.array(taud0_grid_ms, float) / 1000.0
     slope_grid = np.array(slope_grid_ms, float) / 1000.0
     isi_guess = float(stim_times[1] - stim_times[0]) if len(stim_times) > 1 else isi
-    zmask, _, _ = time_zoom_mask(t, float(stim_times[0]), isi_guess, len(stim_times), pre_zoom_s, post_zoom_s)
+    anchor0 = float(stim_times[0]) + float(event_t0_s)
+    zmask, _, _ = time_zoom_mask(t, anchor0, isi_guess, len(stim_times), pre_zoom_s, post_zoom_s)
 
     # Calculate weights for NNLS fitting
     if weight_mode == 'savgol':
@@ -734,7 +766,10 @@ def estimate_kinetics_from_average(
     )
 
     def obj_for(tau_r, tau_d_vec):
-        X = np.column_stack([_KERNEL_FUN(t - st, tau_r, td) for st, td in zip(stim_times, tau_d_vec)])
+        X = np.column_stack([
+            _KERNEL_FUN(t - (float(st) + float(event_t0_s)), tau_r, td)
+            for st, td in zip(stim_times, tau_d_vec)
+        ])
         if X.size == 0:
             a = np.zeros(len(stim_times))
         else:
@@ -1192,7 +1227,7 @@ def extract_metrics(
                     taur_grid_ms=cfg['kin_taur_grid_ms'], taud0_grid_ms=cfg['kin_taud0_grid_ms'],
                     slope_grid_ms=cfg['kin_slope_grid_ms'], pre_zoom_s=cfg['pre_zoom_s'], post_zoom_s=cfg['post_zoom_s'],
                     isi=isi, weight_mode=cfg['nnls_weight_mode'], weight_tau_s=weight_tau_s,
-                    sg_window=cfg['sg_window'], sg_poly=cfg['sg_poly']
+                    sg_window=cfg['sg_window'], sg_poly=cfg['sg_poly'], event_t0_s=event_t0_s,
                 )
             tau_r = float(tr_b); tau_d0 = float(td0_b)
             # Use the recut average if available; otherwise fall back to the
@@ -1268,7 +1303,7 @@ def extract_metrics(
                     taur_grid_ms=cfg['kin_taur_grid_ms'], taud0_grid_ms=cfg['kin_taud0_grid_ms'],
                     slope_grid_ms=cfg['kin_slope_grid_ms'], pre_zoom_s=cfg['pre_zoom_s'], post_zoom_s=cfg['post_zoom_s'],
                     isi=isi, weight_mode=weight_mode, weight_tau_s=weight_tau_s,
-                    sg_window=cfg['sg_window'], sg_poly=cfg['sg_poly']
+                    sg_window=cfg['sg_window'], sg_poly=cfg['sg_poly'], event_t0_s=event_t0_s,
                 )
                 tau_rs.append(trj)
                 tau_d_mat.append(tdvecj)
@@ -1290,7 +1325,7 @@ def extract_metrics(
             taur_grid_ms=cfg['kin_taur_grid_ms'], taud0_grid_ms=cfg['kin_taud0_grid_ms'],
             slope_grid_ms=cfg['kin_slope_grid_ms'], pre_zoom_s=cfg['pre_zoom_s'], post_zoom_s=cfg['post_zoom_s'],
             isi=isi, weight_mode=weight_mode, weight_tau_s=weight_tau_s,
-            sg_window=cfg['sg_window'], sg_poly=cfg['sg_poly']
+            sg_window=cfg['sg_window'], sg_poly=cfg['sg_poly'], event_t0_s=event_t0_s,
         )
         # For linear/monotonic, also anchor to the last event using the average trace
         if dec_mode in ('linear','free_monotonic'):
@@ -1321,7 +1356,7 @@ def extract_metrics(
         pre_zoom_s=cfg['pre_zoom_s'], post_zoom_s=cfg['post_zoom_s'],
         robust=True, huber_delta=cfg['huber_delta'], irls_iters=cfg['irls_iters'],
         allow_shift=allow_shift, delta_max_s=cfg['delta_max_s'], delta_step_s=cfg['delta_step_s'],
-        shift_min_s=cfg['shift_min_s'],
+        shift_min_s=cfg['shift_min_s'], event_t0_s=event_t0_s,
     )
     need_avg_sg = (
         ('savgol' in traces)
@@ -1335,7 +1370,8 @@ def extract_metrics(
         y_sg_avg = None
 
     amp_nnls_avg = compute_localmax_corrected_amps(
-        t, yhat_avg, stim_times, win_ms, n_avg, pre_ms, d_avg, tau_r, tau_d_vec
+        t, yhat_avg, stim_times, win_ms, n_avg, pre_ms, d_avg, tau_r, tau_d_vec,
+        event_t0_s=event_t0_s,
     )
     amp_nnls_corr_avg = compute_peak_corrected_from_components(
         t, yhat_avg, stim_times, comp_avg, win_ms=win_ms, pre_ms=pre_ms
@@ -1346,7 +1382,10 @@ def extract_metrics(
         return a / d if np.isfinite(d) and abs(d) > 1e-12 else a * np.nan
     ppr_nnls_avg = _norm(amp_nnls_avg)
     ppr_nnls_corr_avg = _norm(amp_nnls_corr_avg)
-    amp_raw_avg = compute_localmax_corrected_amps(t, y_avg, stim_times, win_ms, n_avg, pre_ms, d_avg, tau_r, tau_d_vec)
+    amp_raw_avg = compute_localmax_corrected_amps(
+        t, y_avg, stim_times, win_ms, n_avg, pre_ms, d_avg, tau_r, tau_d_vec,
+        event_t0_s=event_t0_s,
+    )
     amp_raw_corr_avg = compute_peak_corrected_from_components(
         t, y_avg, stim_times, comp_avg, win_ms=win_ms, pre_ms=pre_ms
     )
@@ -1360,6 +1399,7 @@ def extract_metrics(
         d_avg,
         tau_r,
         tau_d_vec,
+        event_t0_s=event_t0_s,
     )
     amp_sg_corr_avg = compute_peak_corrected_from_components(
         t, (y_sg_avg if y_sg_avg is not None else y_avg), stim_times, comp_avg, win_ms=win_ms, pre_ms=pre_ms
@@ -1379,20 +1419,25 @@ def extract_metrics(
             pre_zoom_s=cfg['pre_zoom_s'], post_zoom_s=cfg['post_zoom_s'],
             robust=True, huber_delta=cfg['huber_delta'], irls_iters=cfg['irls_iters'],
             allow_shift=allow_shift, delta_max_s=cfg['delta_max_s'], delta_step_s=cfg['delta_step_s'],
-            shift_min_s=cfg['shift_min_s'],
+            shift_min_s=cfg['shift_min_s'], event_t0_s=event_t0_s,
         )
-        amp_raw = compute_localmax_corrected_amps(t, yj, stim_times, win_ms, n_avg, pre_ms, d_t, tau_r, tau_d_vec)
+        amp_raw = compute_localmax_corrected_amps(
+            t, yj, stim_times, win_ms, n_avg, pre_ms, d_t, tau_r, tau_d_vec,
+            event_t0_s=event_t0_s,
+        )
         amp_raw_corr = compute_peak_corrected_from_components(
             t, yj, stim_times, comp_t, win_ms=win_ms, pre_ms=pre_ms
         )
         amp_sg = compute_localmax_corrected_amps(
-            t, yj_sg, stim_times, win_ms, n_avg, pre_ms, d_t, tau_r, tau_d_vec
+            t, yj_sg, stim_times, win_ms, n_avg, pre_ms, d_t, tau_r, tau_d_vec,
+            event_t0_s=event_t0_s,
         )
         amp_sg_corr = compute_peak_corrected_from_components(
             t, yj_sg, stim_times, comp_t, win_ms=win_ms, pre_ms=pre_ms
         )
         amp_nn = compute_localmax_corrected_amps(
-            t, yhat_t, stim_times, win_ms, n_avg, pre_ms, d_t, tau_r, tau_d_vec
+            t, yhat_t, stim_times, win_ms, n_avg, pre_ms, d_t, tau_r, tau_d_vec,
+            event_t0_s=event_t0_s,
         )
         amp_nn_corr = compute_peak_corrected_from_components(
             t, yhat_t, stim_times, comp_t, win_ms=win_ms, pre_ms=pre_ms
@@ -1450,6 +1495,7 @@ def extract_metrics(
                 null_min_post_zoom_s=cfg['null_min_post_zoom_s'], null_sim_max_points=cfg['null_sim_max_points'],
                 peak_window_ms=cfg['peak_window_ms'], peak_avg_points=cfg['peak_avg_points'], pre_peak_ms=cfg['pre_peak_ms'],
                 shift_min_s=cfg['shift_min_s'], n_samples=1000,
+                seed=cfg.get('seed', 42), event_t0_s=event_t0_s,
             )
 
         thr1, pfun = baseline_threshold_and_pval(null_amps, null_N, mode=eff_mode)
@@ -1700,14 +1746,15 @@ def extract_metrics(
                                     pre_zoom_s=cfg['pre_zoom_s'], post_zoom_s=avail_post,
                                     robust=True, huber_delta=cfg['huber_delta'], irls_iters=cfg['irls_iters'],
                                     allow_shift=True, delta_max_s=cfg['delta_max_s'], delta_step_s=cfg['delta_step_s'],
-                                    shift_min_s=cfg['shift_min_s'],
+                                    shift_min_s=cfg['shift_min_s'], event_t0_s=event_t0_s,
                                 )
                                 events.append((float(a_hat_b), float(stcand), float(d_hat_b)))
                             events = [e for e in events if np.isfinite(e[0]) and e[0] > 0]
                             events.sort(key=lambda e: e[0], reverse=True)
                             draw_n = min(20, len(events))
                             for a_hat_b, stcand, d_hat_b in events[:draw_n]:
-                                y_evt_b = a_hat_b * _KERNEL_FUN(tb - (stcand + d_hat_b), tau_r, tau_d0)
+                                anchor_b = float(stcand) + event_t0_s
+                                y_evt_b = a_hat_b * _KERNEL_FUN(tb - (anchor_b + d_hat_b), tau_r, tau_d0)
                                 ax_base.plot(tb, y_evt_b, color='red', alpha=0.5, linewidth=1.0)
                     # Inset histogram of null amplitudes with threshold and fitted noise curve
                     try:

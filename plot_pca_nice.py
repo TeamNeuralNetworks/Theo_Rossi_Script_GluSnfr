@@ -199,12 +199,21 @@ def plot_pca_with_variance_labels(x_data, y_data, cluster_labels,
         Variance explained by PC1 (as decimal, e.g., 0.45)
     pc2_variance : float
         Variance explained by PC2 (as decimal, e.g., 0.23)
+    colors : array-like or None
+        Custom colors for clusters. If None, uses Set2 colormap.
     Other parameters same as plot_pca_clusters_3cm()
     
     Returns:
     --------
     fig, ax : matplotlib figure and axes objects
     """
+    
+    # Use Set2 colormap by default if no colors provided
+    if colors is None:
+        from matplotlib.cm import Set2
+        import numpy as np
+        n_clusters = len(np.unique(cluster_labels))
+        colors = Set2(np.linspace(0, 1, n_clusters))
     
     axis_labels = (f'PC1 ({pc1_variance:.0%})', f'PC2 ({pc2_variance:.0%})')
     
@@ -218,7 +227,6 @@ def plot_pca_with_variance_labels(x_data, y_data, cluster_labels,
         colors=colors,
         dpi=dpi
     )
-
 
 # Example usage:
 if __name__ == "__main__":
