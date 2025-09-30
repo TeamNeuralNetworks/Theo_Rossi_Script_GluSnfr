@@ -1360,11 +1360,20 @@ def extract_metrics(
             tau_r = float(fitted.get('tau_rise', np.nan))
             tau_d0 = float(fitted.get('tau_decay', np.nan))
             event_t0_s = float(fitted.get('t_peak', 0.0)) / 1000.0
+
+            # For multi-component models, try to get the primary decay component
+            if not np.isfinite(tau_d0):
+                # Try fast component first (most relevant for event decay)
+                tau_d0 = float(fitted.get('tau_decay_fast', np.nan))
+                if not np.isfinite(tau_d0):
+                    # Try slow component as fallback
+                    tau_d0 = float(fitted.get('tau_decay_slow', np.nan))
+
             # If cooperative, adopt fitted n_coop for the kernel and re-apply
             if not np.isfinite(tau_r):
                 tau_r = 0.002
             if not np.isfinite(tau_d0):
-                tau_d0 = 0.010
+                tau_d0 = 0.010  # Final fallback default
             cfg.setdefault('event_model_settings', {})
             if event_model == 'cooperative' and ('n_coop' in fitted):
                 if 'n_coop' not in explicit_em_settings:

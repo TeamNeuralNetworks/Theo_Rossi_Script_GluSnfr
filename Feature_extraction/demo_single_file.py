@@ -94,7 +94,7 @@ options_presets = {
         
         # === Kinetics Estimation ===
         'fit_source': 'global',  # (default: 'global') 'global'|'average'|'individual'
-        'decay_progression_mode': 'free_monotonic',  # (default: 'linear') 'fixed'|'free_monotonic'|'linear'
+        'decay_progression_mode': 'linear',  # (default: 'linear') 'fixed'|'free_monotonic'|'linear'
         'anchor_final_tau': True,  # bool (default: True) - anchor final tau in progression fitting
         
         # === Event Model ===
