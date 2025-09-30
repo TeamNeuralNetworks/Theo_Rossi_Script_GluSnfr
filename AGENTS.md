@@ -14,6 +14,7 @@ Guidelines for agents working in this repository. The goal is to produce focused
 - Do not add or run tests, linters, or other automated checks.
 - Do not create ad‑hoc “test” files or scaffolding; propose changes and implement minimal diffs instead.
 - Do not modify notebook outputs; when editing `.ipynb`, only touch code and markdown cells.
+- Do not replace unicode caharacters with their /uxxx code if not asked explicitely
 
 ## Editing & Execution
 
