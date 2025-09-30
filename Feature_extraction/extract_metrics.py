@@ -1305,8 +1305,27 @@ def extract_metrics(
             source_method: 'global', 'average', or 'individual'
         """
         y = np.asarray(tau_d_vec_in, float)
-        if y.size != n_pulses or not np.isfinite(y).any():
-            y = np.full(n_pulses, float(tau_d0_in))
+
+        # Validate inputs
+        if y.size != n_pulses:
+            try:
+                progress_print(f"[warning] tau_d_vec has wrong size {y.size}, expected {n_pulses}. Using fallback.")
+            except Exception:
+                pass
+            y = np.full(n_pulses, float(tau_d0_in) if np.isfinite(tau_d0_in) else 0.010)
+
+        # Replace any NaN/Inf with tau_d0
+        if not np.all(np.isfinite(y)):
+            try:
+                progress_print(f"[warning] tau_d_vec contains NaN/Inf. Replacing with tau_d0={tau_d0_in*1000:.1f}ms")
+            except Exception:
+                pass
+            fallback_tau = float(tau_d0_in) if np.isfinite(tau_d0_in) else 0.010
+            y[~np.isfinite(y)] = fallback_tau
+
+        # If all values are invalid, use fallback
+        if not np.isfinite(y).any():
+            y = np.full(n_pulses, float(tau_d0_in) if np.isfinite(tau_d0_in) else 0.010)
 
         anchor_first = bool(cfg.get('anchor_first_tau', False))
         anchor_final = bool(cfg.get('anchor_final_tau', True))
@@ -1337,8 +1356,15 @@ def extract_metrics(
                 a, b = _robust_linear_fit(x[:-1], y[:-1])
                 b = max(0.0, b)  # Ensure non-negative slope
                 a = tau_final - b * (n_pulses - 1)  # Adjust to pass through final point
+                # Ensure intercept is positive (tau cannot be negative)
+                if a < 1e-4:  # 0.1 ms minimum
+                    a = 1e-4
+                    # Recalculate slope to pass through final point
+                    b = (tau_final - a) / max(1, n_pulses - 1)
                 yfit = a + b * x
                 yfit[-1] = tau_final
+                # Ensure all values are positive
+                yfit = np.maximum(yfit, 1e-4)
             elif anchor_first and n_pulses > 1:
                 # Anchor first tau only: force line to pass through first point
                 tau_first = float(y[0])
@@ -1387,6 +1413,23 @@ def extract_metrics(
                 # Apply monotonic regression without anchors
                 yfit = _monotonic_regression(y)
             return tau_r_in, yfit
+
+        # Final validation: ensure output is finite and monotonic
+        if not np.all(np.isfinite(yfit)):
+            try:
+                progress_print(f"[warning] _apply_progression produced NaN/Inf. Using fallback.")
+            except Exception:
+                pass
+            fallback_tau = float(tau_d0_in) if np.isfinite(tau_d0_in) else 0.010
+            yfit = np.full(n_pulses, fallback_tau)
+
+        # Ensure all tau values are positive (minimum 0.1 ms)
+        yfit = np.maximum(yfit, 1e-4)
+
+        # Ensure final monotonic constraint (safety)
+        yfit = np.maximum.accumulate(yfit)
+
+        return tau_r_in, yfit
 
     # Variables for optional display overlays and logging
     tau_last_display = None
@@ -1602,13 +1645,52 @@ def extract_metrics(
         and cfg.get('fit_source', 'global') == 'global'):
         weight_tau_s = float(tau_d_vec[0])  # Use estimated tau_d
 
+    # Validate tau_d_vec and apply fallbacks if needed
+    tau_d_vec = np.asarray(tau_d_vec, float)
+    if not np.all(np.isfinite(tau_d_vec)):
+        bad_indices = np.where(~np.isfinite(tau_d_vec))[0]
+        try:
+            progress_print(f"[warning] tau_d_vec contains NaN/Inf at indices {bad_indices.tolist()}. Applying fallback.")
+        except Exception:
+            pass
+        # Replace bad values with tau_d0 or nearest valid value
+        if np.isfinite(tau_d0):
+            tau_d_vec[~np.isfinite(tau_d_vec)] = tau_d0
+        else:
+            # Last resort: use 10ms default
+            tau_d_vec[~np.isfinite(tau_d_vec)] = 0.010
+        # Ensure monotonic after fixing
+        tau_d_vec = np.maximum.accumulate(tau_d_vec)
+
+    # Validate tau_r
+    if not np.isfinite(tau_r):
+        try:
+            progress_print(f"[warning] tau_r is NaN/Inf. Using fallback 0.002s.")
+        except Exception:
+            pass
+        tau_r = 0.002
+
     # Print the τd vector to be used for constrained refitting
     try:
-        td_ms_list = ", ".join(f"{v*1000:.2f}" for v in np.asarray(tau_d_vec).tolist())
+        td_ms_list = ", ".join(f"{v*1000:.2f}" for v in tau_d_vec.tolist())
         progress_print(f"[constrain] τd vector (ms) prior to NNLS refit: [{td_ms_list}]")
         progress_print("[constrain] Refitting average and trials with τd fixed per pulse to this vector (amp+jitter only).")
     except Exception:
         pass
+
+    # Debug: Check which array has NaN/Inf
+    if not np.all(np.isfinite(y_avg)):
+        nan_count = np.sum(~np.isfinite(y_avg))
+        nan_indices = np.where(~np.isfinite(y_avg))[0]
+        progress_print(f"[debug] y_avg contains {nan_count} NaN/Inf values at indices: {nan_indices[:10].tolist()}{'...' if len(nan_indices) > 10 else ''}")
+    if not np.all(np.isfinite(t)):
+        nan_count = np.sum(~np.isfinite(t))
+        nan_indices = np.where(~np.isfinite(t))[0]
+        progress_print(f"[debug] t contains {nan_count} NaN/Inf values at indices: {nan_indices[:10].tolist()}{'...' if len(nan_indices) > 10 else ''}")
+    if not np.all(np.isfinite(stim_times)):
+        nan_count = np.sum(~np.isfinite(stim_times))
+        nan_indices = np.where(~np.isfinite(stim_times))[0]
+        progress_print(f"[debug] stim_times contains {nan_count} NaN/Inf values at indices: {nan_indices.tolist()}")
 
     # Fit average trace (forward, no overlap) and measure amplitudes
     a_avg, d_avg, X_avg, yhat_avg, comp_avg = fit_amplitudes_no_overlap_forward(
