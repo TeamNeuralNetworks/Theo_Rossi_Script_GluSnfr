@@ -1003,9 +1003,11 @@ def extract_metrics(
         return spec, _kernel_from_params, _kernel_tau_varying
 
     global _KERNEL_FUN
+    # Store model spec for progression rules
+    model_spec = None
     # Helper to set kernel from current cfg and return effective (event_model, n_coop|None)
     def _apply_event_model_from_cfg() -> Tuple[str, Optional[float]]:
-        nonlocal event_model, coop_n_default, em_settings
+        nonlocal event_model, coop_n_default, em_settings, model_spec
         # τ‑varying supported directly
         varying_supported = {'double_exp', 'cooperative', 'bilinear'}
         evm = str(cfg.get('event_model', event_model)).strip().lower()
@@ -1018,6 +1020,7 @@ def extract_metrics(
                 evm = _lib
         if evm in varying_supported:
             spec, _, make_var = _build_kernel_from_library(evm if evm != 'double_exp' else 'double_exp')
+            model_spec = spec  # Store for progression rules
             if evm == 'cooperative':
                 extra_keys = set(em_settings.keys()) - {'n_coop'}
                 if extra_keys:
@@ -1051,6 +1054,7 @@ def extract_metrics(
             if lib_name.startswith('library:'):
                 lib_name = lib_name.split(':', 1)[1].strip().lower()
             spec, make_fixed, _ = _build_kernel_from_library(lib_name)
+            model_spec = spec  # Store for progression rules
             allowed = set(spec['params']) - {'amp', 't_peak'}
             unknown = set(em_settings.keys()) - allowed
             if unknown:
@@ -1358,12 +1362,22 @@ def extract_metrics(
 
         return a, b
 
-    def _monotonic_regression(y_in):
-        """Apply isotonic regression to ensure non-decreasing values."""
+    def _monotonic_regression(y_in, direction='increasing'):
+        """Apply isotonic regression to ensure monotonic values.
+
+        Args:
+            y_in: Input values
+            direction: 'increasing' (non-decreasing) or 'decreasing' (non-increasing)
+        """
         from scipy.interpolate import PchipInterpolator
         y = np.asarray(y_in, float)
-        # Ensure monotonically non-decreasing by cumulative maximum
-        y_mono = np.maximum.accumulate(y)
+        # Ensure monotonicity based on direction
+        if direction == 'increasing':
+            y_mono = np.maximum.accumulate(y)
+        elif direction == 'decreasing':
+            y_mono = np.minimum.accumulate(y)
+        else:
+            return y  # No monotonic constraint
         # Smooth with PCHIP interpolation while preserving monotonicity
         x = np.arange(len(y))
         try:
@@ -1371,12 +1385,15 @@ def extract_metrics(
             interp = PchipInterpolator(x, y_mono)
             y_smooth = interp(x)
             # Force monotonic again in case of numerical issues
-            y_smooth = np.maximum.accumulate(y_smooth)
+            if direction == 'increasing':
+                y_smooth = np.maximum.accumulate(y_smooth)
+            elif direction == 'decreasing':
+                y_smooth = np.minimum.accumulate(y_smooth)
             return y_smooth
         except Exception:
             return y_mono
 
-    def _apply_progression(tau_r_in, tau_d_vec_in, tau_d0_in, source_method):
+    def _apply_progression(tau_r_in, tau_d_vec_in, tau_d0_in, source_method, param_name='tau_decay'):
         """Apply decay progression rules based on mode and fit_source.
 
         Args:
@@ -1384,8 +1401,49 @@ def extract_metrics(
             tau_d_vec_in: Per-event decay time constants (raw)
             tau_d0_in: Fallback single decay constant
             source_method: 'global', 'average', or 'individual'
+            param_name: Parameter name to look up progression rule (default: 'tau_decay')
         """
         y = np.asarray(tau_d_vec_in, float)
+
+        # Get progression rule for this parameter from model spec
+        progression_rule = 'monotonic_increasing'  # default for backward compatibility
+        if model_spec is not None:
+            progression_rules = model_spec.get('progression_rules', {})
+            if isinstance(progression_rules, dict):
+                progression_rule = progression_rules.get(param_name, 'free')
+
+        # Outlier detection: identify and replace extreme values
+        # Use MAD (median absolute deviation) for robust outlier detection
+        def _detect_and_replace_outliers(y, threshold=5.0):
+            """Replace outliers with median using MAD-based detection."""
+            y = np.asarray(y, float)
+            if y.size < 3:
+                return y
+            finite_mask = np.isfinite(y)
+            if not np.any(finite_mask):
+                return y
+            y_finite = y[finite_mask]
+            median = float(np.nanmedian(y_finite))
+            mad = float(np.nanmedian(np.abs(y_finite - median)))
+            if mad < 1e-10:
+                return y  # No variance, skip outlier detection
+            scale = 1.4826 * mad  # Scale factor for normal distribution
+            # Identify outliers (beyond threshold*MAD from median)
+            outlier_mask = np.abs(y - median) > threshold * scale
+            if np.any(outlier_mask):
+                y_clean = y.copy()
+                y_clean[outlier_mask] = median
+                outlier_indices = np.where(outlier_mask)[0]
+                try:
+                    outlier_str = ", ".join(f"event {int(i)+1}(val={y[i]:.4f}→{median:.4f})"
+                                           for i in outlier_indices)
+                    progress_print(f"[{param_name}] Detected {len(outlier_indices)} outliers: {outlier_str}")
+                except Exception:
+                    pass
+                return y_clean
+            return y
+
+        y = _detect_and_replace_outliers(y, threshold=5.0)
 
         # Validate inputs
         if y.size != n_pulses:
@@ -1417,7 +1475,7 @@ def extract_metrics(
             return tau_r_in, np.full(n_pulses, td_med)
 
         elif dec_mode == 'linear':
-            # Linear regression with non-negative slope
+            # Linear regression with slope constraint based on progression rule
             x = np.arange(n_pulses, dtype=float)
 
             if anchor_first and anchor_final and n_pulses > 2:
@@ -1425,7 +1483,12 @@ def extract_metrics(
                 tau_first = float(y[0])
                 tau_final = float(y[-1])
                 # Constrained line: passes through (0, tau_first) and (n-1, tau_final)
-                b = max(0.0, (tau_final - tau_first) / max(1, n_pulses - 1))
+                b = (tau_final - tau_first) / max(1, n_pulses - 1)
+                if progression_rule == 'monotonic_increasing':
+                    b = max(0.0, b)  # Ensure non-negative slope
+                elif progression_rule == 'monotonic_decreasing':
+                    b = min(0.0, b)  # Ensure non-positive slope
+                # 'free': no slope constraint
                 a = tau_first
                 yfit = a + b * x
                 yfit[0] = tau_first
@@ -1433,17 +1496,31 @@ def extract_metrics(
             elif anchor_final and n_pulses > 1:
                 # Anchor last tau only: force line to pass through last point
                 tau_final = float(y[-1])
-                # Robust fit to first n-1 points
-                a, b = _robust_linear_fit(x[:-1], y[:-1])
-                b = max(0.0, b)  # Ensure non-negative slope
-                a = tau_final - b * (n_pulses - 1)  # Adjust to pass through final point
+
+                # Do robust fit on ALL points, then adjust slope to pass through final point
+                # This gives a better estimate of the trend than excluding the final point
+                a_full, b_full = _robust_linear_fit(x, y)
+
+                # Apply slope constraints based on progression rule
+                if progression_rule == 'monotonic_increasing':
+                    b = max(0.0, b_full)  # Ensure non-negative slope
+                elif progression_rule == 'monotonic_decreasing':
+                    b = min(0.0, b_full)  # Ensure non-positive slope
+                else:
+                    b = b_full  # 'free': no slope constraint
+
+                # Adjust intercept to pass through final point
+                a = tau_final - b * (n_pulses - 1)
+
                 # Ensure intercept is positive (tau cannot be negative)
                 if a < 1e-4:  # 0.1 ms minimum
                     a = 1e-4
                     # Recalculate slope to pass through final point
                     b = (tau_final - a) / max(1, n_pulses - 1)
+
                 yfit = a + b * x
-                yfit[-1] = tau_final
+                yfit[-1] = tau_final  # Enforce anchor
+
                 # Ensure all values are positive
                 yfit = np.maximum(yfit, 1e-4)
             elif anchor_first and n_pulses > 1:
@@ -1451,51 +1528,96 @@ def extract_metrics(
                 tau_first = float(y[0])
                 # Robust fit to points 2-N
                 a, b = _robust_linear_fit(x[1:], y[1:])
-                b = max(0.0, b)  # Ensure non-negative slope
+                if progression_rule == 'monotonic_increasing':
+                    b = max(0.0, b)  # Ensure non-negative slope
+                elif progression_rule == 'monotonic_decreasing':
+                    b = min(0.0, b)  # Ensure non-positive slope
+                # 'free': no slope constraint
                 a = tau_first  # Force through first point: a + b*0 = tau_first
                 yfit = a + b * x
                 yfit[0] = tau_first
             else:
                 # Standard robust linear regression without anchors
                 a, b = _robust_linear_fit(x, y)
-                b = max(0.0, b)  # Ensure non-negative slope
+                if progression_rule == 'monotonic_increasing':
+                    b = max(0.0, b)  # Ensure non-negative slope
+                elif progression_rule == 'monotonic_decreasing':
+                    b = min(0.0, b)  # Ensure non-positive slope
+                # 'free': no slope constraint
                 yfit = a + b * x
 
-            # Ensure monotonic (can only get slower)
-            yfit = np.maximum.accumulate(yfit)
+            # Apply monotonic constraint only if rule requires it
+            if progression_rule == 'monotonic_increasing':
+                yfit = np.maximum.accumulate(yfit)
+            elif progression_rule == 'monotonic_decreasing':
+                yfit = np.minimum.accumulate(yfit)
+            # 'free': no monotonic constraint
+
+            # Re-enforce anchor constraints after monotonic accumulation
+            if anchor_first and anchor_final and n_pulses > 2:
+                yfit[0] = float(y[0])
+                yfit[-1] = float(y[-1])
+            elif anchor_final and n_pulses > 1:
+                yfit[-1] = float(y[-1])
+            elif anchor_first and n_pulses > 1:
+                yfit[0] = float(y[0])
+
             return tau_r_in, yfit
 
         else:  # 'free_monotonic'
+            # Determine monotonic direction from progression rule
+            mono_direction = None
+            if progression_rule == 'monotonic_increasing':
+                mono_direction = 'increasing'
+            elif progression_rule == 'monotonic_decreasing':
+                mono_direction = 'decreasing'
+            # 'free': mono_direction stays None, no constraint
+
             if anchor_first and anchor_final and n_pulses > 2:
                 # Both anchors: interpolate between first and last with monotonic constraint
                 tau_first = float(y[0])
                 tau_final = float(y[-1])
                 # Ensure all values between first and final
-                y_clipped = np.clip(y, tau_first, tau_final)
+                if mono_direction == 'increasing':
+                    y_clipped = np.clip(y, tau_first, tau_final)
+                elif mono_direction == 'decreasing':
+                    y_clipped = np.clip(y, tau_final, tau_first)
+                else:
+                    y_clipped = y.copy()
                 y_clipped[0] = tau_first
                 y_clipped[-1] = tau_final
                 # Apply monotonic regression
-                yfit = _monotonic_regression(y_clipped)
+                yfit = _monotonic_regression(y_clipped, mono_direction) if mono_direction else y_clipped
                 yfit[0] = tau_first
                 yfit[-1] = tau_final
             elif anchor_final and n_pulses > 1:
                 # Anchor final tau only
                 tau_final = float(y[-1])
-                y_clipped = np.minimum(y, tau_final)
-                yfit = _monotonic_regression(y_clipped)
+                if mono_direction == 'increasing':
+                    y_clipped = np.minimum(y, tau_final)
+                elif mono_direction == 'decreasing':
+                    y_clipped = np.maximum(y, tau_final)
+                else:
+                    y_clipped = y.copy()
+                yfit = _monotonic_regression(y_clipped, mono_direction) if mono_direction else y_clipped
                 yfit[-1] = tau_final
             elif anchor_first and n_pulses > 1:
                 # Anchor first tau only
                 tau_first = float(y[0])
-                y_clipped = np.maximum(y, tau_first)
-                yfit = _monotonic_regression(y_clipped)
+                if mono_direction == 'increasing':
+                    y_clipped = np.maximum(y, tau_first)
+                elif mono_direction == 'decreasing':
+                    y_clipped = np.minimum(y, tau_first)
+                else:
+                    y_clipped = y.copy()
+                yfit = _monotonic_regression(y_clipped, mono_direction) if mono_direction else y_clipped
                 yfit[0] = tau_first
             else:
                 # Apply monotonic regression without anchors
-                yfit = _monotonic_regression(y)
+                yfit = _monotonic_regression(y, mono_direction) if mono_direction else y.copy()
             return tau_r_in, yfit
 
-        # Final validation: ensure output is finite and monotonic
+        # Final validation: ensure output is finite
         if not np.all(np.isfinite(yfit)):
             try:
                 progress_print(f"[warning] _apply_progression produced NaN/Inf. Using fallback.")
@@ -1507,8 +1629,12 @@ def extract_metrics(
         # Ensure all tau values are positive (minimum 0.1 ms)
         yfit = np.maximum(yfit, 1e-4)
 
-        # Ensure final monotonic constraint (safety)
-        yfit = np.maximum.accumulate(yfit)
+        # Apply final monotonic constraint only if rule requires it (safety)
+        if progression_rule == 'monotonic_increasing':
+            yfit = np.maximum.accumulate(yfit)
+        elif progression_rule == 'monotonic_decreasing':
+            yfit = np.minimum.accumulate(yfit)
+        # 'free': no final constraint
 
         return tau_r_in, yfit
 
@@ -1854,6 +1980,7 @@ def extract_metrics(
             raw_series,
             base_value,
             *,
+            param_name: str = 'unknown',
             min_value: float = 1e-4,
             clip: Optional[Tuple[Optional[float], Optional[float]]] = None,
         ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray]]:
@@ -1899,7 +2026,7 @@ def extract_metrics(
             if min_value is not None:
                 arr_constrained = np.maximum(arr_constrained, float(min_value))
 
-            _, progressed = _apply_progression(tau_r, arr_constrained, fallback_val, fit_source)
+            _, progressed = _apply_progression(tau_r, arr_constrained, fallback_val, fit_source, param_name)
             progressed = np.asarray(progressed, float)
 
             if clip is not None:
@@ -1921,27 +2048,58 @@ def extract_metrics(
             if 'tau_decay_fast' not in global_fit_params and 'tau_decay' not in global_fit_params:
                 global_fit_params.setdefault('tau_decay', float(tau_d0))
 
+        # Handle fast decay component
+        # For bi-exponential models (e.g., iGluSnfr), tau_decay_fast should come from per_event_param_map
+        # For single-exponential models, use tau_d_vec from the main progression
         fast_key = 'tau_decay_fast' if 'tau_decay_fast' in global_fit_params else 'tau_decay'
         fast_label = _format_display(fast_key)
-        _register_setting(
-            fast_key,
-            tau_d_vec,
-            raw=tau_d_vec_raw,
-            constrained=tau_d_vec_constrained,
-            label=fast_label,
-            unit='ms',
-            scale=1000.0,
-            note='fast component (directly fitted progression)',
-            derivation='fitted_progression',
-        )
+        fast_base = global_fit_params.get('tau_decay_fast')
+        if fast_base is None and 'tau_decay' in global_fit_params:
+            fast_base = global_fit_params.get('tau_decay')
 
-        fast_global = None
-        if fast_key in global_fit_params and np.isfinite(global_fit_params[fast_key]):
-            fast_global = float(global_fit_params[fast_key])
-        elif 'tau_decay' in global_fit_params and np.isfinite(global_fit_params['tau_decay']):
-            fast_global = float(global_fit_params['tau_decay'])
-        elif np.isfinite(tau_d0):
-            fast_global = float(tau_d0)
+        # Check if model has separate fast/slow components (bi-exponential)
+        has_biexp = 'tau_decay_fast' in global_fit_params and dec_mode in ('linear', 'free_monotonic')
+
+        if has_biexp and 'tau_decay_fast' in per_event_param_map:
+            # Use per-event fitted tau_decay_fast for bi-exponential models
+            fast_seq, fast_raw, fast_constrained = _progress_metric_series(
+                per_event_param_map.get('tau_decay_fast'),
+                fast_base,
+                param_name='tau_decay_fast',
+            )
+            if fast_seq is not None:
+                _register_setting(
+                    'tau_decay_fast',
+                    fast_seq,
+                    raw=fast_raw,
+                    constrained=fast_constrained,
+                    label=_format_display('tau_decay_fast'),
+                    unit='ms',
+                    scale=1000.0,
+                    note='fast component (directly fitted progression)',
+                    derivation='fitted_progression',
+                )
+            fast_global = fast_base
+        else:
+            # Use tau_d_vec for single-exponential models or fallback
+            _register_setting(
+                fast_key,
+                tau_d_vec,
+                raw=tau_d_vec_raw,
+                constrained=tau_d_vec_constrained,
+                label=fast_label,
+                unit='ms',
+                scale=1000.0,
+                note='fast component (directly fitted progression)',
+                derivation='fitted_progression',
+            )
+            fast_global = None
+            if fast_key in global_fit_params and np.isfinite(global_fit_params[fast_key]):
+                fast_global = float(global_fit_params[fast_key])
+            elif 'tau_decay' in global_fit_params and np.isfinite(global_fit_params['tau_decay']):
+                fast_global = float(global_fit_params['tau_decay'])
+            elif np.isfinite(tau_d0):
+                fast_global = float(tau_d0)
 
         slow_seq = None
         slow_seq_raw = None
@@ -1952,6 +2110,7 @@ def extract_metrics(
             slow_seq, slow_seq_raw, slow_seq_constrained = _progress_metric_series(
                 per_event_param_map.get('tau_decay_slow'),
                 slow_base,
+                param_name='tau_decay_slow',
             )
             if slow_seq is not None:
                 slow_from_fit = True
@@ -2041,6 +2200,7 @@ def extract_metrics(
             rise_seq, rise_raw, rise_constrained = _progress_metric_series(
                 per_event_param_map.get('tau_rise'),
                 rise_base,
+                param_name='tau_rise',
             )
             if rise_seq is not None:
                 rise_from_fit = True
@@ -2093,6 +2253,7 @@ def extract_metrics(
             frac_seq, frac_raw, frac_constrained = _progress_metric_series(
                 per_event_param_map.get('frac_fast'),
                 frac_fast,
+                param_name='frac_fast',
                 min_value=1e-6,
                 clip=(0.0, 1.0),
             )

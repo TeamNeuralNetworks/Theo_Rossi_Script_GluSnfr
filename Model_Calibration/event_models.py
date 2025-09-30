@@ -536,6 +536,12 @@ def get_event_model(name: str) -> Dict:
             'bounds': ([0, 0.0005, 0.001, 0], [np.inf, 0.010, 0.200, 10]),
             'p0_func': lambda y, t: [float(np.nanmax(y)), 0.002, 0.020, float(t[np.nanargmax(y)])],
             'complexity': 4,
+            'progression_rules': {
+                'tau_rise': 'monotonic_increasing',
+                'tau_decay': 'monotonic_increasing',
+                'amp': 'free',
+                't_peak': 'free',
+            },
         })
     if nm in ('coop', 'cooperative', 'cooperative_binding'):
         return _apply_global_bounds({
@@ -578,6 +584,18 @@ def get_event_model(name: str) -> Dict:
                 float(t[np.nanargmax(y)])               # t_peak
             ],
             'complexity': 6,
+            # Per-parameter progression rules for train dynamics
+            # 'monotonic_increasing': parameter can only increase (e.g., tau gets slower)
+            # 'monotonic_decreasing': parameter can only decrease
+            # 'free': no monotonic constraint (default if not specified)
+            'progression_rules': {
+                'tau_rise': 'monotonic_increasing',         # glutamate accumulation → slower rise
+                'tau_decay_fast': 'monotonic_increasing',   # glutamate accumulation → slower decay
+                'tau_decay_slow': 'monotonic_increasing',   # glutamate accumulation → slower decay
+                'frac_fast': 'free',                        # can vary either direction
+                'amp': 'free',                              # can increase or decrease
+                't_peak': 'free',                           # timing parameter
+            },
         })
     if nm in ('single', 'single_exp', 'single-exponential'):
         return _apply_global_bounds({
