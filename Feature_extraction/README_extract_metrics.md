@@ -25,6 +25,226 @@ The function keeps the math equivalent to the main pipeline while exposing a sma
     - `free_monotonic`: interpolate τd between first and last event (non‑decreasing)
     - `linear`: non‑negative‑slope linear trend across pulses
 
+---
+
+## Decay Progression System
+
+The decay progression system determines how decay time constants (τd) evolve across the stimulus train. This is critical for accurately modeling synaptic depression or facilitation where each subsequent event may have different kinetics.
+
+### Overview
+
+The system operates in **three stages**:
+
+1. **Initial Estimation**: Fit τd for each event (or use global template)
+2. **Constraint Application**: Apply anchoring and clipping rules (for `global` mode)
+3. **Progression Fitting**: Apply smoothing/regression based on `decay_progression_mode`
+
+### Key Options
+
+```python
+options = {
+    'fit_source': 'global',              # How to estimate initial τd values
+    'decay_progression_mode': 'linear',  # How to smooth/fit the progression
+    'anchor_first_tau': False,           # Anchor to first event's τd
+    'anchor_final_tau': True,            # Anchor to last event's τd (default)
+}
+```
+
+---
+
+### 1. Fit Source (`fit_source`)
+
+Controls how initial per-event τd values are estimated:
+
+#### `'global'` (default, most robust)
+- Fits a **single global template** by recutting and averaging all events from all trials
+- For `linear` or `free_monotonic` modes:
+  1. Fits each event individually on the average trace
+  2. **Anchors** the global τd at the **middle event** (event 5 for 10 pulses)
+  3. **Clips** surrounding events:
+     - Events 1-4: cannot be slower than anchor (ensures realistic baseline)
+     - Events 6-10: cannot be faster than anchor (ensures monotonic trend)
+  4. Applies progression mode
+
+**Best for**: Most datasets, especially with noisy trials
+
+#### `'average'`
+- Fits each event **individually on the multi-trial average trace**
+- No middle-event anchoring (unlike `global`)
+- Directly applies progression mode to per-event estimates
+
+**Best for**: Clean average traces, when you want per-event detail without global anchoring
+
+#### `'individual'`
+- Fits each **trial independently**, then aggregates (median)
+- Can be noisy due to single-trial variability
+- Applies progression mode to aggregated estimates
+
+**Best for**: Highly consistent trials, or when trial-to-trial variability is of interest
+
+---
+
+### 2. Decay Progression Mode (`decay_progression_mode`)
+
+Controls how the per-event τd estimates are smoothed/fit:
+
+#### `'fixed'`
+- Uses a **single τd for all events** (median of estimates)
+- Flat line in decay progression plot
+- Ignores per-event variation
+
+**Use when**: Events have identical kinetics, or to enforce uniform decay
+
+#### `'linear'`
+- **Robust linear regression** through per-event τd estimates
+- Uses **IRLS (Iteratively Reweighted Least Squares)** with Huber weights
+- Automatically downweights outliers (printed to console)
+- Enforces non-negative slope (τd can only get slower or stay same)
+
+**Use when**: Expect gradual, linear change across train (common for depression)
+
+#### `'free_monotonic'`
+- **Monotonic spline** (PCHIP interpolation) through per-event τd
+- Enforces non-decreasing constraint (τd never gets faster)
+- Smooth, flexible curve that follows data closely
+
+**Use when**: Expect non-linear progression but want smooth, monotonic trend
+
+---
+
+### 3. Anchor Constraints
+
+Fine-tune the progression by anchoring to specific events:
+
+#### `anchor_final_tau` (default: `True`)
+- **Anchors the last event's τd** as the maximum (slowest) decay time
+- **Rationale**: Last event has no following events → cleanest decay window → most reliable estimate
+- For `linear`: Forces regression line through final point
+- For `free_monotonic`: Forces spline endpoint to final τd
+
+**Recommended**: Keep enabled (default) for most robust results
+
+#### `anchor_first_tau` (default: `False`)
+- **Anchors the first event's τd** as the minimum (fastest) decay time
+- Useful for enforcing a specific baseline decay
+- For `linear`: Forces regression line through first point
+- For `free_monotonic`: Forces spline start to first τd
+
+**Use when**: You want to enforce a specific starting τd value
+
+#### Both anchors enabled
+- Forces progression **between first and last** τd values
+- For `linear`: Direct line from event 1 to event 10
+- For `free_monotonic`: Smooth curve constrained between endpoints
+
+---
+
+### Mode Combinations
+
+#### Example 1: Default (Robust, Recommended)
+```python
+options = {
+    'fit_source': 'global',
+    'decay_progression_mode': 'linear',
+    'anchor_first_tau': False,
+    'anchor_final_tau': True,  # Anchor to most reliable estimate
+}
+```
+- Global template anchored at middle event
+- Robust linear fit through per-event estimates
+- Final event anchored (most reliable)
+- **Best for**: Most experiments, especially with noisy data
+
+#### Example 2: Flexible, Smooth Progression
+```python
+options = {
+    'fit_source': 'average',
+    'decay_progression_mode': 'free_monotonic',
+    'anchor_first_tau': False,
+    'anchor_final_tau': True,
+}
+```
+- Per-event fits on average trace
+- Smooth monotonic spline
+- Final event anchored
+- **Best for**: Clean data with non-linear progression
+
+#### Example 3: Fully Constrained
+```python
+options = {
+    'fit_source': 'average',
+    'decay_progression_mode': 'linear',
+    'anchor_first_tau': True,
+    'anchor_final_tau': True,
+}
+```
+- Direct line from first to last event
+- Ignores intermediate variation
+- **Best for**: When you trust first and last estimates most
+
+#### Example 4: Fixed Decay (No Progression)
+```python
+options = {
+    'fit_source': 'global',
+    'decay_progression_mode': 'fixed',
+    # Anchor settings ignored for 'fixed' mode
+}
+```
+- Single τd for entire train
+- **Best for**: Events with identical kinetics
+
+---
+
+### Visualization: Decay Progression Plot
+
+When `fit_diagnostic_plot=True`, the decay progression plot shows:
+
+1. **Red dotted line with circles**: Initial per-event τd estimates
+2. **Orange X markers** (`global` mode only): Constrained values after clipping
+3. **Green solid line with squares**: Final progression fit
+4. **Vertical lines with markers**: Anchor points
+   - **Blue diamond** (`global` mode): Middle event anchor (global τd)
+   - **Green square** (`anchor_first_tau=True`): First event anchor
+   - **Purple star** (`anchor_final_tau=True`): Final event anchor
+5. **Horizontal dotted lines**: Show anchor τd values for reference
+
+#### Interpreting the Plot
+
+- **Gap between red and green**: How much smoothing/constraint was applied
+- **Outliers**: Points far from green line; automatically downweighted in `linear` mode
+- **Anchors**: Vertical lines show which events are constrained
+- **Legend**: Shows actual τd values at anchor points
+
+---
+
+### Robust Linear Regression
+
+The `linear` mode uses **IRLS with Huber weights** for outlier resistance:
+
+- **MAD-based scale**: Robust to extreme outliers
+- **Huber weighting**: Outliers (>2 MAD) are downweighted
+- **Iterative refinement**: Converges in ~3-5 iterations
+- **Automatic detection**: Prints outliers to console
+
+Example output:
+```
+[robust fit] Detected outliers: event 4(τ=85.0ms,w=0.31), event 7(τ=92.1ms,w=0.28)
+```
+
+This means events 4 and 7 were automatically downweighted (weights 0.31 and 0.28 instead of 1.0) because they deviate significantly from the linear trend.
+
+---
+
+### Multi-Component Models
+
+For models with multiple decay components (e.g., `iglusnfr` with `tau_decay_fast` and `tau_decay_slow`):
+
+- The **fast component** is used as the primary decay for progression
+- Falls back to slow component if fast is unavailable
+- Global anchor uses the fitted fast component
+
+---
+
 ### Baseline computation, normalization, and failure thresholds
 
 The extractor keeps the same baseline logic as the full pipeline. The main
@@ -363,6 +583,7 @@ All defaults live in a single dictionary inside `extract_metrics.py` named `DEFA
 
 - Smoothing: `sg_window`, `sg_poly`
 - Fit/plot window: `pre_zoom_s`, `post_zoom_s`
+- Decay progression: `fit_source`, `decay_progression_mode`, `anchor_first_tau`, `anchor_final_tau`
 - Peak window: `peak_window_ms`, `peak_avg_points`, `pre_peak_ms`
 - Peak window controls determine how stimulus-locked maxima are located and
   quantified:
