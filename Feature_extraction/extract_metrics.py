@@ -123,6 +123,7 @@ DEFAULTS = {
     #  - 'free_monotonic': interpolate between first and last τd, non-decreasing
     #  - 'linear': non-negative slope linear regression across pulses
     'decay_progression_mode': 'linear',
+    'anchor_final_tau': True,  # If True, anchor last event's tau as maximum (most reliable, no following events)
     # NNLS weight control
     'nnls_weight_mode': 'uniform',  # 'uniform', 'linear', 'exponential', 'savgol'
     'nnls_weight_tau_s': None,  # Time constant for exponential or slope for linear (auto if None)
@@ -1232,6 +1233,8 @@ def extract_metrics(
         if y.size != n_pulses or not np.isfinite(y).any():
             y = np.full(n_pulses, float(tau_d0_in))
 
+        anchor_final = bool(cfg.get('anchor_final_tau', True))
+
         if dec_mode == 'fixed':
             # Use single tau for all events
             td_med = float(np.nanmedian(y)) if np.isfinite(y).any() else float(tau_d0_in)
@@ -1240,20 +1243,59 @@ def extract_metrics(
         elif dec_mode == 'linear':
             # Linear regression with non-negative slope
             x = np.arange(n_pulses, dtype=float)
-            A = np.column_stack([np.ones_like(x), x])
-            try:
-                coef, _, _, _ = np.linalg.lstsq(A, y, rcond=None)
-                a, b = float(coef[0]), max(0.0, float(coef[1]))
-            except Exception:
-                a, b = float(y[0]), 0.0
-            yfit = a + b * x
+
+            if anchor_final and n_pulses > 1:
+                # Anchor last tau: force line to pass through last point
+                tau_final = float(y[-1])
+                # Linear fit with constraint: y = a + b*x, with y[-1] = tau_final
+                # This gives: a + b*(n-1) = tau_final
+                # Solve constrained least squares for other points
+                A = np.column_stack([np.ones(n_pulses-1), x[:-1]])
+                y_fit_points = y[:-1]
+                try:
+                    # Unconstrained fit to first n-1 points
+                    coef, _, _, _ = np.linalg.lstsq(A, y_fit_points, rcond=None)
+                    a, b = float(coef[0]), float(coef[1])
+                    # Adjust to pass through final point
+                    # a_new + b_new*(n-1) = tau_final
+                    # We keep the slope direction but adjust intercept to hit final point
+                    b = max(0.0, b)  # Ensure non-negative slope
+                    a = tau_final - b * (n_pulses - 1)
+                except Exception:
+                    # Fallback: simple line from first to last
+                    a = float(y[0])
+                    b = max(0.0, (tau_final - a) / max(1, n_pulses - 1))
+
+                yfit = a + b * x
+                # Ensure last point is exactly at tau_final
+                yfit[-1] = tau_final
+            else:
+                # Standard linear regression without final anchor
+                A = np.column_stack([np.ones_like(x), x])
+                try:
+                    coef, _, _, _ = np.linalg.lstsq(A, y, rcond=None)
+                    a, b = float(coef[0]), max(0.0, float(coef[1]))
+                except Exception:
+                    a, b = float(y[0]), 0.0
+                yfit = a + b * x
+
             # Ensure monotonic (can only get slower)
             yfit = np.maximum.accumulate(yfit)
             return tau_r_in, yfit
 
         else:  # 'free_monotonic'
-            # Apply monotonic regression (tau can stay same or get slower)
-            yfit = _monotonic_regression(y)
+            if anchor_final and n_pulses > 1:
+                # Anchor final tau and apply monotonic constraint
+                tau_final = float(y[-1])
+                # Ensure all previous taus don't exceed tau_final
+                y_clipped = np.minimum(y, tau_final)
+                # Apply monotonic regression
+                yfit = _monotonic_regression(y_clipped)
+                # Ensure last point is exactly tau_final
+                yfit[-1] = tau_final
+            else:
+                # Apply monotonic regression without final anchor
+                yfit = _monotonic_regression(y)
             return tau_r_in, yfit
 
     # Variables for optional display overlays and logging
@@ -1359,14 +1401,19 @@ def extract_metrics(
 
             # Anchor global tau at middle event
             mid_idx = n_pulses // 2
-            tau_anchor = float(tau_d0)
+            tau_anchor = float(tau_d0)  # Global tau from recut template
 
-            # Apply constraints: events before mid cannot be slower, events after cannot be faster
+            # Apply constraints: force middle event to global tau, then clip others
             tau_constrained = np.copy(tau_per_evt)
+            tau_constrained[mid_idx] = tau_anchor  # Force middle event to global tau
+
+            # Events before mid cannot be slower than anchor
             for i in range(mid_idx):
                 if tau_constrained[i] > tau_anchor:
                     tau_constrained[i] = tau_anchor
-            for i in range(mid_idx, n_pulses):
+
+            # Events after mid cannot be faster than anchor
+            for i in range(mid_idx + 1, n_pulses):
                 if tau_constrained[i] < tau_anchor:
                     tau_constrained[i] = tau_anchor
 
@@ -1918,6 +1965,10 @@ def extract_metrics(
                     'free_monotonic': 'monotonic spline'
                 }
                 progression_label = progression_label_map.get(dec_mode, dec_mode)
+                anchor_final = bool(cfg.get('anchor_final_tau', True))
+                if anchor_final and dec_mode in ('linear', 'free_monotonic'):
+                    progression_label += ' (anchored to final)'
+
                 ax_tau.plot(
                     pulse_idx,
                     np.asarray(tau_d_vec, float) * 1000.0,
@@ -1930,16 +1981,82 @@ def extract_metrics(
                     label=f"final progression ({progression_label})",
                 )
 
-                # Add anchor point for global mode
+                # Add anchor points
+                anchor_lines_added = False
+
+                # Anchor for global mode (middle event anchored to global tau)
                 if fit_source == 'global' and dec_mode in ('linear', 'free_monotonic'):
                     mid_idx = n_pulses // 2
+                    # Get the global tau (from tau_d0 or from constrained values)
+                    if tau_d_vec_constrained is not None:
+                        global_tau_ms = float(tau_d_vec_constrained[mid_idx]) * 1000.0
+                    else:
+                        global_tau_ms = float(tau_d0) * 1000.0
+
+                    # Vertical line at middle event
                     ax_tau.axvline(
                         mid_idx + 1,  # pulse_idx is 1-indexed
-                        color='gray',
+                        color='#1f77b4',
                         linestyle='--',
-                        alpha=0.5,
-                        linewidth=1.5,
-                        label=f'anchor (event {mid_idx + 1})'
+                        alpha=0.6,
+                        linewidth=2.0,
+                        label=f'anchor: mid event (global τd={global_tau_ms:.1f}ms)'
+                    )
+                    # Horizontal line showing global tau value
+                    ax_tau.axhline(
+                        global_tau_ms,
+                        color='#1f77b4',
+                        linestyle=':',
+                        alpha=0.4,
+                        linewidth=1.5
+                    )
+                    # Star marker at the anchor point
+                    ax_tau.scatter(
+                        [mid_idx + 1],
+                        [global_tau_ms],
+                        marker='D',  # Diamond
+                        s=200,
+                        color='#1f77b4',
+                        alpha=0.8,
+                        zorder=10,
+                        edgecolors='black',
+                        linewidths=1.5
+                    )
+                    anchor_lines_added = True
+
+                # Anchor for final tau (if enabled)
+                if anchor_final and dec_mode in ('linear', 'free_monotonic'):
+                    final_tau_ms = float(np.asarray(tau_d_vec, float)[-1] * 1000.0)
+                    final_label = f'anchor: final event (τd={final_tau_ms:.1f}ms)'
+
+                    # Vertical line at final event
+                    ax_tau.axvline(
+                        n_pulses,  # Last pulse
+                        color='purple',
+                        linestyle='-.',
+                        alpha=0.6,
+                        linewidth=2.0,
+                        label=final_label
+                    )
+                    # Horizontal line showing final tau value
+                    ax_tau.axhline(
+                        final_tau_ms,
+                        color='purple',
+                        linestyle=':',
+                        alpha=0.4,
+                        linewidth=1.5
+                    )
+                    # Highlight the final tau value with a star
+                    ax_tau.scatter(
+                        [n_pulses],
+                        [final_tau_ms],
+                        marker='*',
+                        s=300,
+                        color='purple',
+                        alpha=0.7,
+                        zorder=10,
+                        edgecolors='black',
+                        linewidths=1.5
                     )
 
                 ax_tau.set_xlabel('Pulse #')

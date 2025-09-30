@@ -14,13 +14,20 @@ Notes:
 
 Decay progression modes (options['decay_progression_mode']):
  - 'fixed'         : a single tau_d applied to whole train (median)
- - 'free_monotonic': interpolate per-pulse tau_d non-decreasingly
- - 'linear'        : non-negative linear slope across pulses (default)
+ - 'free_monotonic': monotonic spline through per-pulse tau_d (non-decreasing)
+ - 'linear'        : non-negative linear regression across pulses (default)
+
+Anchor final tau (options['anchor_final_tau']):
+ - True (default)  : anchor last event's tau (most reliable, no following events)
+ - False           : fit without final anchor constraint
 
 Kinetics fit source (options['fit_source']):
  - 'global'     : fit one template from all trials (recut median) (default)
- - 'average'    : fit kinetics on the multi-trial average trace
- - 'individual' : fit kinetics per trial then aggregate (median)
+                  For linear/monotonic: anchor global tau at middle event, then
+                  fit each event on average, clip to respect anchor, then apply progression
+ - 'average'    : fit each event individually on the multi-trial average trace
+                  For linear/monotonic: fit per-event taus then apply progression
+ - 'individual' : fit kinetics per trial then aggregate (median, can be noisy)
 
 NNLS weight control (options['nnls_weight_mode']):
  - 'uniform'     : all timepoints have equal weight (default)
@@ -54,10 +61,10 @@ from Feature_extraction.extract_metrics import extract_metrics
 
 xlsx_path = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Theo_4Ca\20211125_linescan1_20Hz_10pulses_4mMCa_bouton1_traces_converted.xlsx"
 # xlsx_path = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Theo_1_5Ca\20220726_linescan3_20Hz_10pulses_1.5mMCa_bouton3_traces_converted.xlsx"
-xlsx_path = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\WT_Anthime\241212_Fibre2_PortionA_bouton2.xlsx"
+#xlsx_path = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\WT_Anthime\241212_Fibre2_PortionA_bouton2.xlsx"
 
-xlsx_path = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Theo_4_50Hz\20220726_linescan5_50Hz_10pulses_4mMCa_bouton1_traces_converted.xlsx"
-xlsx_path = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Theo_1_5Ca\20220726_linescan3_20Hz_10pulses_1.5mMCa_bouton3_traces_converted.xlsx"
+#xlsx_path = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Theo_4_50Hz\20220726_linescan5_50Hz_10pulses_4mMCa_bouton1_traces_converted.xlsx"
+#xlsx_path = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Theo_1_5Ca\20220726_linescan3_20Hz_10pulses_1.5mMCa_bouton3_traces_converted.xlsx"
 
 START = 0.5 
 # START = 0.5 + 0.5
@@ -88,6 +95,7 @@ options_presets = {
         # === Kinetics Estimation ===
         'fit_source': 'global',  # (default: 'global') 'global'|'average'|'individual'
         'decay_progression_mode': 'free_monotonic',  # (default: 'linear') 'fixed'|'free_monotonic'|'linear'
+        'anchor_final_tau': True,  # bool (default: True) - anchor final tau in progression fitting
         
         # === Event Model ===
         'event_model': 'iglusnfr',  # (default: 'double_exp') 'double_exp'|'cooperative'|'bilinear'|'single_exp'|'two_step_binding'|'alpha'|'gamma'|'binding_kinetics'|'two_component'|'desensitization'|'coop_plus_linear'|'diffusion_clearance'|'double_cooperative'|'hetero_coop'|'two_comp_coop'
