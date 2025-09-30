@@ -17,7 +17,7 @@ Only the pieces necessary for this workflow are implemented here, using the
 same formulas and defaults as the original pipeline for equivalence.
 """
 
-from typing import Optional, Dict, List, Tuple
+from typing import Optional, Dict, List, Tuple, Any
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -863,6 +863,8 @@ def extract_metrics(
             cfg['fit_diagnostic_plot'] = bool(opts.get('nnls_show_weights', False))
         except Exception:
             cfg['fit_diagnostic_plot'] = bool(cfg.get('fit_diagnostic_plot', False))
+    interpolated_settings: List[Dict[str, Any]] = []
+    global_fit_params: Dict[str, float] = {}
     explicit_em_settings = {}
     if isinstance(opts.get('event_model_settings'), dict):
         # Preserve user-provided overrides so later auto-fits do not clobber them
@@ -1506,6 +1508,11 @@ def extract_metrics(
             tau_r = float(tr_b); tau_d0 = float(td0_b)
 
             # Prefer recut average for left panel if available
+                'tau_rise': float(tau_r),
+                'tau_decay': float(tau_d0),
+            }
+            # Use the recut average if available; otherwise fall back to the
+            # train-aligned average series.
             if (recut_t_rel is not None) and (recut_avg is not None):
                 try:
                     t_avg_evt = np.asarray(recut_t_rel, float) * 1000.0
@@ -1519,6 +1526,24 @@ def extract_metrics(
             event_t0_s = 0.0  # no peak shift available in fallback
         else:
             # ---- Use parameters from fitted dict ----
+            fitted, t_avg_evt, y_avg_evt = res
+            # If the fit helper attached recut outputs to the params dict, capture them
+            try:
+                if isinstance(fitted, dict) and '_recut' in fitted:
+                    t_rel_s, avg_s, snippets_s = fitted.pop('_recut')
+                    recut_t_rel = t_rel_s
+                    recut_avg = avg_s
+                    recut_snippets = snippets_s
+            except Exception:
+                pass
+            try:
+                global_fit_params = {
+                    k: float(v)
+                    for k, v in fitted.items()
+                    if k != 'amp' and k != 't_peak' and k != '_recut'
+                }
+            except Exception:
+                global_fit_params = {}
             tau_r = float(fitted.get('tau_rise', np.nan))
             tau_d0 = float(fitted.get('tau_decay', np.nan))
             if not np.isfinite(tau_d0):
@@ -1665,8 +1690,247 @@ def extract_metrics(
         if is_varying_model:
             progress_print(f"[fit] source=average | τd0={tau_d_vec[0]*1000:.2f}ms → τdN={tau_d_vec[-1]*1000:.2f}ms | mode={dec_mode}")
 
+    # Build interpolated-setting summaries for diagnostics and downstream use
+    anchor_first_cfg = bool(cfg.get('anchor_first_tau', False))
+    anchor_final_cfg = bool(cfg.get('anchor_final_tau', True))
+    anchor_applicable = dec_mode in ('linear', 'free_monotonic')
+    mid_index = int(min(max(0, n_pulses // 2), max(0, n_pulses - 1))) if n_pulses > 0 else 0
+    anchor_template = {
+        'first': anchor_applicable and anchor_first_cfg and n_pulses > 0,
+        'final': anchor_applicable and anchor_final_cfg and n_pulses > 0,
+        'mid': anchor_applicable and (fit_source == 'global') and n_pulses > 0,
+        'mid_index': mid_index,
+    }
+    progression_label_map = {
+        'fixed': 'fixed (median)',
+        'linear': 'linear regression',
+        'free_monotonic': 'monotonic spline',
+    }
+    progression_label = progression_label_map.get(dec_mode, dec_mode)
+    if anchor_applicable:
+        if anchor_first_cfg and anchor_final_cfg:
+            progression_label += ' (anchored first & final)'
+        elif anchor_final_cfg:
+            progression_label += ' (anchored to final)'
+        elif anchor_first_cfg:
+            progression_label += ' (anchored to first)'
+
+    interpolated_settings = []
+    if n_pulses > 0 and np.size(tau_d_vec):
+        def _format_display(name: str, override: Optional[str] = None) -> str:
+            if override is not None:
+                return override
+            if not name:
+                return name
+            if name.startswith('tau'):
+                return 'τ' + name[3:]
+            if name.startswith('t_'):
+                return 't' + name[2:]
+            return name
+
+        def _register_setting(
+            name: str,
+            final_values,
+            *,
+            raw=None,
+            constrained=None,
+            label: Optional[str] = None,
+            unit: str = 'ms',
+            scale: float = 1000.0,
+            note: Optional[str] = None,
+            direction_note: Optional[str] = None,
+            derivation: Optional[str] = None,
+        ) -> None:
+            arr_final = np.asarray(final_values, float)
+            if arr_final.ndim == 0:
+                arr_final = np.full(n_pulses, float(arr_final))
+            if arr_final.size != n_pulses or not np.any(np.isfinite(arr_final)):
+                return
+
+            arr_raw = None
+            if raw is not None:
+                arr_raw = np.asarray(raw, float)
+                if arr_raw.ndim == 0:
+                    arr_raw = np.full(n_pulses, float(arr_raw))
+                if arr_raw.size != n_pulses or not np.any(np.isfinite(arr_raw)):
+                    arr_raw = None
+
+            arr_constrained = None
+            if constrained is not None:
+                arr_constrained = np.asarray(constrained, float)
+                if arr_constrained.ndim == 0:
+                    arr_constrained = np.full(n_pulses, float(arr_constrained))
+                if arr_constrained.size != n_pulses or not np.any(np.isfinite(arr_constrained)):
+                    arr_constrained = None
+
+            entry: Dict[str, Any] = {
+                'name': name,
+                'display': label or _format_display(name),
+                'unit': unit,
+                'scale': float(scale),
+                'raw': arr_raw,
+                'constrained': arr_constrained,
+                'final': arr_final,
+                'note': note,
+                'direction_note': direction_note,
+                'fit_source': fit_source,
+                'decay_progression_mode': dec_mode,
+                'progression_label': progression_label,
+                'derivation': derivation or 'direct',
+            }
+
+            anchors: List[Dict[str, Any]] = []
+            if anchor_template['first']:
+                anchors.append({'kind': 'first', 'index': 0, 'value': float(arr_final[0])})
+            if anchor_template['mid'] and 0 <= anchor_template['mid_index'] < n_pulses:
+                idx = int(anchor_template['mid_index'])
+                anchors.append({'kind': 'mid', 'index': idx, 'value': float(arr_final[idx])})
+            if anchor_template['final']:
+                anchors.append({'kind': 'final', 'index': n_pulses - 1, 'value': float(arr_final[-1])})
+            entry['anchors'] = anchors
+            interpolated_settings.append(entry)
+
+        if np.isfinite(tau_r):
+            global_fit_params.setdefault('tau_rise', float(tau_r))
+        if np.isfinite(tau_d0):
+            if 'tau_decay_fast' not in global_fit_params and 'tau_decay' not in global_fit_params:
+                global_fit_params.setdefault('tau_decay', float(tau_d0))
+
+        fast_key = 'tau_decay_fast' if 'tau_decay_fast' in global_fit_params else 'tau_decay'
+        fast_label = _format_display(fast_key)
+        _register_setting(
+            fast_key,
+            tau_d_vec,
+            raw=tau_d_vec_raw,
+            constrained=tau_d_vec_constrained,
+            label=fast_label,
+            unit='ms',
+            scale=1000.0,
+            note='fast component (directly fitted progression)',
+            derivation='fitted_progression',
+        )
+
+        fast_global = None
+        if fast_key in global_fit_params and np.isfinite(global_fit_params[fast_key]):
+            fast_global = float(global_fit_params[fast_key])
+        elif 'tau_decay' in global_fit_params and np.isfinite(global_fit_params['tau_decay']):
+            fast_global = float(global_fit_params['tau_decay'])
+        elif np.isfinite(tau_d0):
+            fast_global = float(tau_d0)
+
+        slow_seq = None
+        slow_seq_raw = None
+        slow_seq_constrained = None
+        slow_base = global_fit_params.get('tau_decay_slow')
+        if (
+            slow_base is not None
+            and np.isfinite(slow_base)
+            and fast_global is not None
+            and fast_global > 0
+        ):
+            ratio_slow = float(slow_base) / float(fast_global)
+            if np.isfinite(ratio_slow) and ratio_slow > 0:
+                slow_seq = tau_d_vec * ratio_slow
+                slow_seq_raw = tau_d_vec_raw * ratio_slow if tau_d_vec_raw is not None else None
+                slow_seq_constrained = (
+                    tau_d_vec_constrained * ratio_slow if tau_d_vec_constrained is not None else None
+                )
+                _register_setting(
+                    'tau_decay_slow',
+                    slow_seq,
+                    raw=slow_seq_raw,
+                    constrained=slow_seq_constrained,
+                    label=_format_display('tau_decay_slow'),
+                    unit='ms',
+                    scale=1000.0,
+                    note='slower component (scaled by global τ_slow/τ_fast)',
+                    derivation='scaled_from_fast_progression',
+                )
+
+        if slow_seq is not None:
+            with np.errstate(divide='ignore', invalid='ignore'):
+                ratio_final = np.divide(
+                    slow_seq,
+                    tau_d_vec,
+                    out=np.full_like(slow_seq, np.nan),
+                    where=np.isfinite(tau_d_vec) & (np.abs(tau_d_vec) > 0),
+                )
+            ratio_raw = None
+            if slow_seq_raw is not None and tau_d_vec_raw is not None:
+                with np.errstate(divide='ignore', invalid='ignore'):
+                    ratio_raw = np.divide(
+                        slow_seq_raw,
+                        tau_d_vec_raw,
+                        out=np.full_like(slow_seq_raw, np.nan),
+                        where=np.isfinite(tau_d_vec_raw) & (np.abs(tau_d_vec_raw) > 0),
+                    )
+            ratio_constrained = None
+            if slow_seq_constrained is not None and tau_d_vec_constrained is not None:
+                with np.errstate(divide='ignore', invalid='ignore'):
+                    ratio_constrained = np.divide(
+                        slow_seq_constrained,
+                        tau_d_vec_constrained,
+                        out=np.full_like(slow_seq_constrained, np.nan),
+                        where=np.isfinite(tau_d_vec_constrained) & (np.abs(tau_d_vec_constrained) > 0),
+                    )
+            if np.any(np.isfinite(ratio_final)):
+                _register_setting(
+                    'tau_ratio_slow_fast',
+                    ratio_final,
+                    raw=ratio_raw,
+                    constrained=ratio_constrained,
+                    label=_format_display('', 'τ_slow/τ_fast'),
+                    unit='',
+                    scale=1.0,
+                    note='slow/fast decay ratio (global constant)',
+                    derivation='global_ratio_constant',
+                )
+
+        rise_base = global_fit_params.get('tau_rise', float(tau_r) if np.isfinite(tau_r) else np.nan)
+        if (
+            fast_global is not None
+            and fast_global > 0
+            and rise_base is not None
+            and np.isfinite(rise_base)
+            and rise_base > 0
+        ):
+            ratio_rise = float(rise_base) / float(fast_global)
+            if np.isfinite(ratio_rise) and ratio_rise > 0:
+                rise_seq = tau_d_vec * ratio_rise
+                rise_raw = tau_d_vec_raw * ratio_rise if tau_d_vec_raw is not None else None
+                rise_constrained = (
+                    tau_d_vec_constrained * ratio_rise if tau_d_vec_constrained is not None else None
+                )
+                _register_setting(
+                    'tau_rise',
+                    rise_seq,
+                    raw=rise_raw,
+                    constrained=rise_constrained,
+                    label=_format_display('tau_rise'),
+                    unit='ms',
+                    scale=1000.0,
+                    direction_note='lower = faster rise',
+                    note='derived from fast decay using global τ_rise/τ_fast ratio',
+                    derivation='scaled_from_fast_progression',
+                )
+
+        frac_fast = global_fit_params.get('frac_fast')
+        if frac_fast is not None and np.isfinite(frac_fast):
+            frac_arr = np.full(n_pulses, float(frac_fast), float)
+            _register_setting(
+                'frac_fast',
+                frac_arr,
+                raw=frac_arr.copy(),
+                constrained=None,
+                label=_format_display('frac_fast'),
+                unit='',
+                scale=1.0,
+                note='fast component weight (global constant)',
+                derivation='global_constant',
+            )
+
     # Update exponential weight tau if using global fit_source and auto tau
-    if (weight_mode == 'exponential' and cfg.get('nnls_weight_tau_s', None) is None 
+    if (weight_mode == 'exponential' and cfg.get('nnls_weight_tau_s', None) is None
         and cfg.get('fit_source', 'global') == 'global'):
         weight_tau_s = float(tau_d_vec[0])  # Use estimated tau_d
 
@@ -2100,10 +2364,14 @@ def extract_metrics(
             pass
 
         # Fit diagnostic figure: show immediately after average figure
-        if cfg.get('fit_diagnostic_plot', False) and np.size(tau_d_vec):
+        if cfg.get('fit_diagnostic_plot', False) and interpolated_settings:
             try:
-                fit_diag_figure, axes = plt.subplots(1, 2, figsize=(11.0, 4.2))
-                ax_w, ax_tau = axes
+                n_cols = 1 + len(interpolated_settings)
+                fig_width = 5.5 + 3.2 * len(interpolated_settings)
+                fit_diag_figure, axes = plt.subplots(1, n_cols, figsize=(fig_width, 4.2))
+                axes_arr = np.atleast_1d(axes)
+                ax_w = axes_arr[0]
+                setting_axes = axes_arr[1:]
 
                 # Weight kernel panel
                 if weight_mode == 'savgol' and y_sg_avg is None:
@@ -2131,187 +2399,130 @@ def extract_metrics(
                 ax_w.legend(loc='upper right', frameon=False, fontsize=8)
                 ax_w.grid(True, alpha=0.2)
 
-                # τd progression panel
-                pulse_idx = np.arange(1, len(tau_d_vec) + 1, dtype=float)
-
-                # Step 1: Plot initial per-event estimates (individual measurements)
-                if tau_d_vec_raw is not None and np.size(tau_d_vec_raw) == len(tau_d_vec):
-                    # Plot as scatter points with connecting line to show structure
-                    ax_tau.plot(
-                        pulse_idx,
-                        np.asarray(tau_d_vec_raw, float) * 1000.0,
-                        marker='o',
-                        markersize=8,
-                        color='#d62728',
-                        linestyle=':',
-                        linewidth=1.5,
-                        alpha=0.8,
-                        zorder=3,
-                        label='initial per-event τd',
-                    )
-
-                # Step 2: Plot constrained values (after clipping/anchoring for global mode)
-                if tau_d_vec_constrained is not None and np.size(tau_d_vec_constrained) == len(tau_d_vec):
-                    ax_tau.scatter(
-                        pulse_idx,
-                        np.asarray(tau_d_vec_constrained, float) * 1000.0,
-                        marker='x',
-                        s=80,
-                        color='#ff7f0e',
-                        linewidths=2,
-                        alpha=0.8,
-                        zorder=4,
-                        label='constrained τd (clipped)',
-                    )
-
-                # Step 3: Plot final progression fit
-                progression_label_map = {
-                    'fixed': 'fixed (median)',
-                    'linear': 'linear regression',
-                    'free_monotonic': 'monotonic spline'
+                anchor_styles = {
+                    'first': {'color': 'green', 'vline': '-.', 'hline': ':', 'marker': 's', 'size': 250},
+                    'mid': {'color': '#1f77b4', 'vline': '--', 'hline': ':', 'marker': 'D', 'size': 200},
+                    'final': {'color': 'purple', 'vline': '-.', 'hline': ':', 'marker': '*', 'size': 300},
                 }
-                progression_label = progression_label_map.get(dec_mode, dec_mode)
-                anchor_first = bool(cfg.get('anchor_first_tau', False))
-                anchor_final = bool(cfg.get('anchor_final_tau', True))
-                if dec_mode in ('linear', 'free_monotonic'):
-                    if anchor_first and anchor_final:
-                        progression_label += ' (anchored first & final)'
-                    elif anchor_final:
-                        progression_label += ' (anchored to final)'
-                    elif anchor_first:
-                        progression_label += ' (anchored to first)'
+                anchor_names = {
+                    'first': 'first event',
+                    'mid': 'mid event',
+                    'final': 'final event',
+                }
 
-                ax_tau.plot(
-                    pulse_idx,
-                    np.asarray(tau_d_vec, float) * 1000.0,
-                    marker='s',
-                    markersize=6,
-                    color='#2ca02c',
-                    linewidth=2.5,
-                    alpha=0.9,
-                    zorder=5,
-                    label=f"final progression ({progression_label})",
-                )
+                def _plot_setting_axis(ax, info: Dict[str, Any]) -> None:
+                    _trim_spines(ax)
+                    pulses = np.arange(1, np.asarray(info['final']).size + 1, dtype=float)
+                    scale = float(info.get('scale', 1.0))
+                    label = str(info.get('display', info.get('name', 'setting')))
+                    unit = str(info.get('unit', ''))
+                    final_vals = np.asarray(info['final'], float) * scale
 
-                # Add anchor points
-                anchor_lines_added = False
-                anchor_first = bool(cfg.get('anchor_first_tau', False))
+                    raw_vals = info.get('raw')
+                    if raw_vals is not None and np.any(np.isfinite(raw_vals)):
+                        ax.plot(
+                            pulses,
+                            np.asarray(raw_vals, float) * scale,
+                            marker='o',
+                            markersize=8,
+                            color='#d62728',
+                            linestyle=':',
+                            linewidth=1.5,
+                            alpha=0.8,
+                            zorder=3,
+                            label=f'initial per-event {label}',
+                        )
 
-                # Anchor for first tau (if enabled)
-                if anchor_first and dec_mode in ('linear', 'free_monotonic'):
-                    first_tau_ms = float(np.asarray(tau_d_vec, float)[0] * 1000.0)
+                    constrained_vals = info.get('constrained')
+                    if constrained_vals is not None and np.any(np.isfinite(constrained_vals)):
+                        ax.scatter(
+                            pulses,
+                            np.asarray(constrained_vals, float) * scale,
+                            marker='x',
+                            s=80,
+                            color='#ff7f0e',
+                            linewidths=2,
+                            alpha=0.8,
+                            zorder=4,
+                            label=f'constrained {label}',
+                        )
 
-                    # Vertical line at first event
-                    ax_tau.axvline(
-                        1,  # First pulse
-                        color='green',
-                        linestyle='-.',
-                        alpha=0.6,
-                        linewidth=2.0,
-                        label=f'anchor: first event (τd={first_tau_ms:.1f}ms)'
-                    )
-                    # Horizontal line showing first tau value
-                    ax_tau.axhline(
-                        first_tau_ms,
-                        color='green',
-                        linestyle=':',
-                        alpha=0.4,
-                        linewidth=1.5
-                    )
-                    # Highlight the first tau value with a square
-                    ax_tau.scatter(
-                        [1],
-                        [first_tau_ms],
-                        marker='s',  # Square
-                        s=250,
-                        color='green',
-                        alpha=0.7,
-                        zorder=10,
-                        edgecolors='black',
-                        linewidths=1.5
-                    )
-                    anchor_lines_added = True
-
-                # Anchor for global mode (middle event anchored to global tau)
-                if fit_source == 'global' and dec_mode in ('linear', 'free_monotonic'):
-                    mid_idx = n_pulses // 2
-                    # Get the global tau (from tau_d0 or from constrained values)
-                    if tau_d_vec_constrained is not None:
-                        global_tau_ms = float(tau_d_vec_constrained[mid_idx]) * 1000.0
-                    else:
-                        global_tau_ms = float(tau_d0) * 1000.0
-
-                    # Vertical line at middle event
-                    ax_tau.axvline(
-                        mid_idx + 1,  # pulse_idx is 1-indexed
-                        color='#1f77b4',
-                        linestyle='--',
-                        alpha=0.6,
-                        linewidth=2.0,
-                        label=f'anchor: mid event (global τd={global_tau_ms:.1f}ms)'
-                    )
-                    # Horizontal line showing global tau value
-                    ax_tau.axhline(
-                        global_tau_ms,
-                        color='#1f77b4',
-                        linestyle=':',
-                        alpha=0.4,
-                        linewidth=1.5
-                    )
-                    # Star marker at the anchor point
-                    ax_tau.scatter(
-                        [mid_idx + 1],
-                        [global_tau_ms],
-                        marker='D',  # Diamond
-                        s=200,
-                        color='#1f77b4',
-                        alpha=0.8,
-                        zorder=10,
-                        edgecolors='black',
-                        linewidths=1.5
-                    )
-                    anchor_lines_added = True
-
-                # Anchor for final tau (if enabled)
-                if anchor_final and dec_mode in ('linear', 'free_monotonic'):
-                    final_tau_ms = float(np.asarray(tau_d_vec, float)[-1] * 1000.0)
-                    final_label = f'anchor: final event (τd={final_tau_ms:.1f}ms)'
-
-                    # Vertical line at final event
-                    ax_tau.axvline(
-                        n_pulses,  # Last pulse
-                        color='purple',
-                        linestyle='-.',
-                        alpha=0.6,
-                        linewidth=2.0,
-                        label=final_label
-                    )
-                    # Horizontal line showing final tau value
-                    ax_tau.axhline(
-                        final_tau_ms,
-                        color='purple',
-                        linestyle=':',
-                        alpha=0.4,
-                        linewidth=1.5
-                    )
-                    # Highlight the final tau value with a star
-                    ax_tau.scatter(
-                        [n_pulses],
-                        [final_tau_ms],
-                        marker='*',
-                        s=300,
-                        color='purple',
-                        alpha=0.7,
-                        zorder=10,
-                        edgecolors='black',
-                        linewidths=1.5
+                    ax.plot(
+                        pulses,
+                        final_vals,
+                        marker='s',
+                        markersize=6,
+                        color='#2ca02c',
+                        linewidth=2.5,
+                        alpha=0.9,
+                        zorder=5,
+                        label=f"final progression ({info.get('progression_label', 'final')})",
                     )
 
-                ax_tau.set_xlabel('Pulse #')
-                ax_tau.set_ylabel('τd (ms)')
-                ax_tau.set_title(f'Decay progression (fit_source={fit_source}, mode={dec_mode})')
-                ax_tau.legend(loc='best', frameon=True, fontsize=8, framealpha=0.9)
-                ax_tau.grid(True, alpha=0.3)
+                    legend_tags = set()
+                    for anchor in info.get('anchors', []):
+                        kind = anchor.get('kind')
+                        style = anchor_styles.get(kind)
+                        if style is None:
+                            continue
+                        idx = int(anchor.get('index', 0))
+                        if idx < 0 or idx >= len(pulses):
+                            continue
+                        value = float(anchor.get('value', np.nan))
+                        if not np.isfinite(value):
+                            continue
+                        y_disp = value * scale
+                        x_pos = pulses[idx]
+                        label_text = None
+                        if kind not in legend_tags:
+                            descriptor = anchor_names.get(kind, kind)
+                            unit_suffix = f" {unit}" if unit else ''
+                            if kind == 'mid':
+                                label_text = f"anchor: {descriptor} (global {label}={y_disp:.2f}{unit_suffix})"
+                            else:
+                                label_text = f"anchor: {descriptor} ({label}={y_disp:.2f}{unit_suffix})"
+                            legend_tags.add(kind)
+                        ax.axvline(
+                            x_pos,
+                            color=style['color'],
+                            linestyle=style['vline'],
+                            alpha=0.6,
+                            linewidth=2.0,
+                            label=label_text,
+                        )
+                        ax.axhline(
+                            y_disp,
+                            color=style['color'],
+                            linestyle=style['hline'],
+                            alpha=0.4,
+                            linewidth=1.5,
+                        )
+                        ax.scatter(
+                            [x_pos],
+                            [y_disp],
+                            marker=style['marker'],
+                            s=style['size'],
+                            color=style['color'],
+                            alpha=0.7,
+                            zorder=10,
+                            edgecolors='black',
+                            linewidths=1.5,
+                        )
+
+                    ax.set_xlabel('Pulse #')
+                    ylabel = label if not unit else f"{label} ({unit})"
+                    ax.set_ylabel(ylabel)
+                    title = f"{label} progression (fit_source={info.get('fit_source')}, mode={info.get('decay_progression_mode')})"
+                    if info.get('direction_note'):
+                        title += f"\n{info['direction_note']}"
+                    if info.get('note'):
+                        title += f"\n{info['note']}"
+                    ax.set_title(title)
+                    ax.legend(loc='best', frameon=True, fontsize=8, framealpha=0.9)
+                    ax.grid(True, alpha=0.3)
+
+                for axis, setting_info in zip(setting_axes, interpolated_settings):
+                    _plot_setting_axis(axis, setting_info)
 
                 fit_diag_figure.tight_layout()
                 try:
@@ -2787,6 +2998,7 @@ def extract_metrics(
             'name': ev_model_name,
             'n_coop': (float(n_coop_effective) if n_coop_effective is not None else None),
         },
+        'interpolated_settings': interpolated_settings,
         'average': {
             'amp_raw': np.asarray(amp_raw_avg, float),
             'amp_savgol': np.asarray(amp_sg_avg, float),
