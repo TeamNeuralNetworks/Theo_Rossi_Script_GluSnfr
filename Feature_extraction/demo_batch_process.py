@@ -40,10 +40,9 @@ from Feature_extraction.extract_metrics import extract_metrics
 
 
 def _safe_sheet_name(name: str) -> str:
-    """Return a workbook‑safe Excel sheet name."""
+    """Return a workbook-safe Excel sheet name."""
     cleaned = "".join(c for c in name if c not in ":\\/?*[]")
     return (cleaned or "Sheet")[:31]
-
 
 
 # Input listed above
@@ -57,17 +56,30 @@ folders = [
     r"C:\\Users\\Antoine.Valera\\Desktop\\PPR_DATA_FINAL\\WT_Theo",
     r"C:\\Users\\Antoine.Valera\\Desktop\\PPR_DATA_FINAL\\WT_Theo_1scd",
     r"C:\\Users\\Antoine.Valera\\Desktop\\PPR_DATA_FINAL\\WT_Anthime",
-    r"C:\\Users\\Antoine.Valera\\Desktop\\PPR_DATA_FINAL\\SynII",    
+    r"C:\\Users\\Antoine.Valera\\Desktop\\PPR_DATA_FINAL\\SynII",
+    r"C:\\Users\\Antoine.Valera\\Desktop\\PPR_DATA_FINAL\\Theo_1_5_50Hz",
+    r"C:\\Users\\Antoine.Valera\\Desktop\\PPR_DATA_FINAL\\Theo_2_5_50Hz",
+    r"C:\\Users\\Antoine.Valera\\Desktop\\PPR_DATA_FINAL\\Theo_4_50Hz",
 ]
 root_out = r"C:\\Users\\Antoine.Valera\\Desktop\\Testout"; os.makedirs(root_out, exist_ok=True)
 
-# Per-folder train_start (seconds). Default 1.0; override last two to 0.498
+# Per-folder train_start (seconds). Default 0.998; override selected folders to 0.498
+default_start = 0.998
 train_start_by_folder = {
     folders[2]: 0.498,
     folders[3]: 0.498,
     folders[4]: 0.498,
     folders[5]: 0.498,
     folders[6]: 0.498,
+}
+
+# ISI control: default_isi applies to all unless overridden in isi_by_folder.
+# Example: last entry gets ISI=0.02 instead of default 0.05
+default_isi = 0.05
+isi_by_folder = {
+    folders[10]: 0.02,  # Theo_1_5_50Hz
+    folders[11]: 0.02,  # Theo_2_5_50Hz
+    folders[12]: 0.02,  # Theo_4_50Hz
 }
 
 summaries = {}
@@ -78,8 +90,8 @@ for in_dir in folders:
     os.makedirs(out_dir, exist_ok=True)
 
     # Per-folder timing
-    train_start = train_start_by_folder.get(in_dir, 0.998)
-    isi = 0.05
+    train_start = train_start_by_folder.get(in_dir, default_start)
+    isi = isi_by_folder.get(in_dir, default_isi)
     n_pulses = 10
 
     rows = []
@@ -110,80 +122,78 @@ for in_dir in folders:
         options_presets = {
             'double_exp_default': {
                 # === Preprocessing ===
-                'normalize_dff': True,  # bool (default: True) - apply ΔF/F0 normalization
-                'bleach': True,  # bool (default: True) - correct slow bleaching
-                'sg_window': 9,  # int (default: 9) - Savitzky-Golay window size
-                'sg_poly': 2,  # int (default: 2) - Savitzky-Golay polynomial order
-                
+                'normalize_dff': True,
+                'bleach': True,
+                'sg_window': 9,
+                'sg_poly': 2,
+
                 # === Kinetics Estimation ===
-                'fit_source': 'global',  # (default: 'global') 'global'|'average'|'individual'
-                'decay_progression_mode': 'linear',  # (default: 'linear') 'fixed'|'free_monotonic'|'linear'
-                'anchor_final_tau': True,  # bool (default: True) - anchor final tau in progression fitting
-                'anchor_first_tau': False,  # bool (default: False) - anchor first tau in progression fitting
+                'fit_source': 'global',
+                'decay_progression_mode': 'linear',
+                'anchor_final_tau': True,
+                'anchor_first_tau': False,
 
                 # === Event Model ===
-                'event_model': 'iglusnfr',  # (default: 'double_exp') 'double_exp'|'cooperative'|'bilinear'|'single_exp'|'two_step_binding'|'alpha'|'gamma'|'binding_kinetics'|'two_component'|'desensitization'|'coop_plus_linear'|'diffusion_clearance'|'double_cooperative'|'hetero_coop'|'two_comp_coop'
-                'event_model_settings': {},  # dict (default: {}) - model-specific params - see event_models.py for details (e.g., {'n_coop': 2.0})
-                
+                'event_model': 'iglusnfr',
+                'event_model_settings': {},
+
                 # === Recut/Averaging ===
-                'recut_projection': 'median',  # (default: 'median') 'mean'|'median'|'std'|'robust_mean'
-                'recut_oversample': 50,  # int ≥1 (default: 1) - interpolation factor
-                'recut_peak_recenter': 0,  # int|tuple|None (default: 0) - peak realignment (0=disabled)
-                'recut_snippets': True,  # bool (default: False) - return snippets for plotting
-                
+                'recut_projection': 'median',
+                'recut_oversample': 50,
+                'recut_peak_recenter': 0,
+                'recut_snippets': True,
+
                 # === NNLS Fitting ===
-                'nnls_weight_mode': 'savgol',  # (default: 'uniform') 'uniform'|'linear'|'exponential'|'savgol'
-                'nnls_weight_tau_s': None,  # float|None (default: None=auto) - time constant (for linear or exponential modes)
-                'fit_diagnostic_plot': False,  # bool (default: False) - weight + τd diagnostics
-                'allow_shift': True,  # bool (default: True) - enable per-pulse micro-shifts
-                'huber_delta': 5.5,  # float (default: 5.5) - robust fitting threshold
-                'irls_iters': 20,  # int (default: 6) - IRLS iterations
-                'delta_max_s': 0.002,  # float (default: 0.002) - max shift in seconds
-                'delta_step_s': 0.00025,  # float (default: 0.00025) - shift step size in seconds
-                'shift_min_s': 0.00005,  # float (default: 0.00005) - minimum shift in seconds
-                
+                'nnls_weight_mode': 'savgol',
+                'nnls_weight_tau_s': None,
+                'fit_diagnostic_plot': False,
+                'allow_shift': True,
+                'huber_delta': 5.5,
+                'irls_iters': 20,
+                'delta_max_s': 0.002,
+                'delta_step_s': 0.00025,
+                'shift_min_s': 0.00005,
+
                 # === Time Windows ===
-                'pre_zoom_s': 0.20,  # float (default: 0.15) - pre-train window
-                'post_zoom_s': 0.20,  # float (default: 0.60) - post-train window
-                'f0_window_s': 1.0,  # float (default: 0.4) - baseline window
-                
+                'pre_zoom_s': 0.20,
+                'post_zoom_s': 0.20,
+                'f0_window_s': 1.0,
+
                 # === Peak Detection ===
-                'peak_window_ms': 25.0,  # float (default: 25.0) - peak search window
-                'peak_avg_points': 5,  # int (default: 5) - points to average at peak
-                'pre_peak_ms': 0.0,  # float (default: 0.0) - pre-peak offset
-                
+                'peak_window_ms': 20.0,
+                'peak_avg_points': 5,
+                'pre_peak_ms': 0.0,
+
                 # === Thresholding ===
-                'measurement': 'NNLS',  # (default: 'NNLS') 'NNLS'|'SAVGOL'|'RAW' - series for p-values
-                'fail_method': 'SAVGOL',  # (default: None) 'NNLS'|'SAVGOL'|'RAW'|None - failure classification (None=use measurement)
-                'threshold_mode': 'auto',  # (default: 'auto') 'auto'|'mad'|'sd' - threshold rule (auto=MAD for NNLS, SD for SAVGOL)
-                'null_N': 1.0,  # float (default: 3.0) - threshold multiplier
-                'null_sim_max_points': 1000,  # int (default: 1000) - max null samples
-                'null_min_post_zoom_s': 0.05,  # float (default: 0.05) - min post window for null
-                
+                'measurement': 'NNLS',
+                'fail_method': 'SAVGOL',
+                'threshold_mode': 'auto',
+                'null_N': 1.0,
+                'null_sim_max_points': 1000,
+                'null_min_post_zoom_s': 0.05,
+
                 # === Kinetics Grids ===
-                'kin_taur_grid_ms': [0.6, 0.8, 1.0, 1.2, 1.5, 2.0],  # list[float] (default: [0.6, 0.8, 1.0, 1.2, 1.5, 2.0])
-                'kin_taud0_grid_ms': [1.6, 2.0, 2.5, 3.0, 4.0, 6.0, 8.0, 10.0, 12.5, 15.0, 18.0, 22.0, 28.0, 35.0, 45.0, 60.0],  # list[float] (default: [1.6, 2.0, ..., 60.0])
-                'kin_slope_grid_ms': [0.0, 0.25, 0.5, 1.0, 2.0, 3.0, 5.0],  # list[float] (default: [0.0, 0.25, 0.5, 1.0, 2.0, 3.0, 5.0])
-                
+                'kin_taur_grid_ms': [0.6, 0.8, 1.0, 1.2, 1.5, 2.0],
+                'kin_taud0_grid_ms': [1.6, 2.0, 2.5, 3.0, 4.0, 6.0, 8.0, 10.0, 12.5, 15.0, 18.0, 22.0, 28.0, 35.0, 45.0, 60.0],
+                'kin_slope_grid_ms': [0.0, 0.25, 0.5, 1.0, 2.0, 3.0, 5.0],
+
                 # === Bleach Correction ===
-                'bleach_huber_delta': 3.0,  # float (default: 3.0) - robust fitting threshold
-                'bleach_tau_range_factor': (0.25, 4.0),  # tuple[float,float] (default: (0.25, 4.0)) - tau range multipliers
-                'bleach_n_tau': 25,  # int (default: 25) - number of tau values to test
-                
+                'bleach_huber_delta': 3.0,
+                'bleach_tau_range_factor': (0.25, 4.0),
+                'bleach_n_tau': 25,
+
                 # === Plotting ===
                 'plot': {
-                    'enabled': True,  # bool (default: False) - create plots
-                    'traces': ['raw', 'nnls'],  # list[str] (default: ['nnls']) - traces to show
-                    'show_decay': True,  # bool (default: True) - show decay components
-                    'trials': False,  # bool (default: False) - plot individual trials
-                    'baseline': False,  # bool (default: False) - show baseline diagnostics
-                    'residuals': True,  # bool (default: False) - show residual analysis
-                    'plot_peaks_details': True,  # bool (default: False) - show peak markers and residuals
+                    'enabled': True,
+                    'traces': ['raw', 'nnls'],
+                    'show_decay': True,
+                    'trials': False,
+                    'baseline': False,
+                    'residuals': True,
+                    'plot_peaks_details': True,
                 }
             },
         }
-    
-
 
         # Choose which preset to use
         preset_name = 'double_exp_default'
@@ -191,8 +201,8 @@ for in_dir in folders:
 
         res = extract_metrics(
             time, trials,
-            train_start=train_start,   # seconds
-            isi=isi,          # seconds
+            train_start=train_start,  # seconds
+            isi=isi,                  # seconds (per-folder override supported)
             n_pulses=n_pulses,
             options=options
         )

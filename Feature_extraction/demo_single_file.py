@@ -127,7 +127,7 @@ options_presets = {
         'f0_window_s': 1.0,  # float (default: 0.4) - baseline window
         
         # === Peak Detection ===
-        'peak_window_ms': 25.0,  # float (default: 25.0) - peak search window
+        'peak_window_ms': 20.0,  # float (default: 25.0) - peak search window
         'peak_avg_points': 5,  # int (default: 5) - points to average at peak
         'pre_peak_ms': 0.0,  # float (default: 0.0) - pre-peak offset
         
