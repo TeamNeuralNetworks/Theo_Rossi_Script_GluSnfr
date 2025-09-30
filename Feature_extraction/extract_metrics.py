@@ -1405,6 +1405,398 @@ def extract_metrics(
         t, (y_sg_avg if y_sg_avg is not None else y_avg), stim_times, comp_avg, win_ms=win_ms, pre_ms=pre_ms
     )
 
+    # Optional: average plot with a left event-fit panel (0-50 ms) + right main plot
+    figure = None
+    fit_diag_figure = None
+    if want_plot:
+        # If residual diagnostics requested, allocate an extra bottom row
+        if plot_residuals:
+            figure = plt.figure(figsize=(12, 9.2))
+            gs = figure.add_gridspec(2, 2, height_ratios=[2.4, 1.4], width_ratios=[1.5, 4], wspace=0.15, hspace=0.28)
+        else:
+            figure = plt.figure(figsize=(12, 5))
+            gs = figure.add_gridspec(1, 2, width_ratios=[1.5, 4], wspace=0.15)
+
+        resid_avg = None
+        model_avg_for_resid = None
+        if plot_residuals:
+            if meas == 'SAVGOL' and (y_sg_avg is not None):
+                model_avg_for_resid = y_sg_avg
+            else:
+                model_avg_for_resid = yhat_avg
+            if model_avg_for_resid is not None:
+                try:
+                    resid_avg = np.asarray(y_avg - model_avg_for_resid, float)
+                except Exception:
+                    resid_avg = None
+        # Left: aggregated event + model fit (−3..next stim−guard)
+        axL = figure.add_subplot(gs[0, 0])
+        _trim_spines(axL)
+        try:
+            t_ms_evt = t_avg_evt if 't_avg_evt' in locals() else (t - float(train_start)) * 1000.0
+            y_evt = y_avg_evt if 'y_avg_evt' in locals() else y_avg
+            isi_ms = float(isi) * 1000.0
+            # Display window: from -3 ms before stim to just before next stim
+            # Use a 3 ms guard before the next stimulus to avoid overlap
+            min_x = -3.0
+            max_x = max(isi_ms - 3.0, 0.0)
+            m0 = (t_ms_evt >= min_x) & (t_ms_evt < max_x)
+            axL.plot(t_ms_evt[m0], y_evt[m0], color='k', lw=1.5, label='Average')
+            # Overlay best-fit library model matching current kernel choice
+            try:
+                try:
+                    from Model_Calibration.event_models import get_event_model
+                except Exception:
+                    from event_models import get_event_model  # type: ignore
+                # Resolve the effective model name
+                _name = event_model
+                if _name.startswith('library:'):
+                    _name = _name.split(':', 1)[1].strip().lower()
+                spec = get_event_model(_name)
+                tf = t_ms_evt[m0]; yf = y_evt[m0]
+                # Build overlay params to reflect the model actually used:
+                popt = None
+                if _name in {'double_exp','cooperative','bilinear'}:
+                    # Use the kinetics selected for this run (tau_r, tau_d0)
+                    # Respect any fitted t_peak so the overlay shifts correctly
+                    t_peak_ms = 0.0
+                    try:
+                        if 'fitted' in locals() and fitted is not None:
+                            t_peak_ms = float(fitted.get('t_peak', 0.0))
+                    except Exception:
+                        t_peak_ms = 0.0
+                    if _name == 'double_exp':
+                        # [amp, tau_rise(s), tau_decay(s), t_peak(ms)]
+                        pars = [1.0, float(tau_r), float(tau_d0), t_peak_ms]
+                    elif _name == 'cooperative':
+                        ems = cfg.get('event_model_settings', {}) or {}
+                        n_used = float(ems.get('n_coop', 2.0))
+                        # [amp, tau_rise(s), tau_decay(s), n_coop, t_peak(ms)]
+                        pars = [1.0, float(tau_r), float(tau_d0), n_used, t_peak_ms]
+                    else:  # bilinear expects ms values for rise/decay durations
+                        pars = [1.0, float(tau_r)*1000.0, float(tau_d0)*1000.0, t_peak_ms]
+                    yshape = spec['func'](tf, *pars)
+                    denom = float(np.sum(yshape**2)) if np.isfinite(yshape).any() else 0.0
+                    amp_ls = float(np.sum(yf*yshape))/denom if denom > 0 else 1.0
+                    pars[0] = amp_ls
+                    popt = pars
+                    yhat_ev = spec['func'](tf, *popt)
+                else:
+                    # For fixed-template models, DO NOT refit here: honor
+                    # the effective event_model_settings that were applied to
+                    # the kernel earlier. Build the parameter vector in the
+                    # order expected by the spec and only solve a linear LS
+                    # for amplitude so the overlay matches scale.
+                    params = []
+                    t_peak_ms = 0.0
+                    try:
+                        if 'fitted' in locals() and fitted is not None:
+                            t_peak_ms = float(fitted.get('t_peak', 0.0))
+                    except Exception:
+                        t_peak_ms = 0.0
+                    ems = cfg.get('event_model_settings', {}) or {}
+                    for name in spec['params']:
+                        if name == 'amp':
+                            params.append(1.0)
+                        elif name == 't_peak':
+                            params.append(t_peak_ms)
+                        else:
+                            # Prefer values from the recent global fit if available;
+                            # then explicit user overrides in event_model_settings;
+                            # then tau_r/tau_d0 mapping; finally default p0.
+                            if 'fitted' in locals() and isinstance(fitted, dict) and name in fitted and np.isfinite(fitted.get(name, np.nan)):
+                                params.append(float(fitted[name]))
+                            elif name in ems and np.isfinite(ems.get(name, np.nan)):
+                                params.append(float(ems[name]))
+                            elif name == 'tau_decay':
+                                params.append(float(tau_d0))  # seconds
+                            elif name == 'tau_rise':
+                                params.append(float(tau_r))
+                            else:
+                                # If unknown, fall back to p0 for stability
+                                p0 = spec['p0_func'](yf, tf)
+                                idx = spec['params'].index(name)
+                                params.append(float(p0[idx]))
+                    # Compute LS amplitude against the fixed shape
+                    yshape = spec['func'](tf, *params)
+                    denom = float(np.sum(yshape**2)) if np.isfinite(yshape).any() else 0.0
+                    amp_ls = float(np.sum(yf * yshape)) / denom if denom > 0 else 1.0
+                    params[0] = amp_ls
+                    popt = params
+                    yhat_ev = spec['func'](tf, *popt)
+                axL.plot(tf, yhat_ev, color='crimson', ls='--', lw=1.8, label=_name)
+                try:
+                    # Omit 't_peak' and stack vertically; include amp at top for context
+                    pairs = [(n, v) for n, v in zip(spec['params'], popt)]
+                    pairs = [(n, v) for n, v in pairs if n != 't_peak']
+                    txt = "\n".join(f"{n}={v:.3g}" for n, v in pairs)
+                    axL.text(0.98, 0.98, txt, transform=axL.transAxes, fontsize=8,
+                             va='top', ha='right', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+                except Exception:
+                    pass
+            except Exception:
+                pass
+            axL.axvline(0.0, color='k', ls=':', alpha=0.5, lw=0.8)
+            axL.set_xlim(min_x, max_x)
+            # Autoscale y with a small margin to avoid a squashed panel
+            try:
+                y_slice = y_evt[m0]
+                ymins = np.nanmin(y_slice) if np.size(y_slice) else 0.0
+                ymaxs = np.nanmax(y_slice) if np.size(y_slice) else 1.0
+                if 'yhat_ev' in locals():
+                    ymins = min(ymins, float(np.nanmin(yhat_ev)))
+                    ymaxs = max(ymaxs, float(np.nanmax(yhat_ev)))
+                span = max(1e-6, ymaxs - ymins)
+                pad = 0.1 * span
+                axL.set_ylim(ymins - pad, ymaxs + pad)
+            except Exception:
+                pass
+            axL.set_xlabel('Time (ms)')
+            axL.set_ylabel('ΔF/F0' if use_dff else 'ΔF')
+            try:
+                axL.set_title(f'Event fit (−3.0–{max_x:.1f} ms)', fontsize=10)
+            except Exception:
+                axL.set_title('Event fit', fontsize=10)
+        except Exception:
+            pass
+
+        # Right: main average plot
+        ax = figure.add_subplot(gs[0, 1])
+        _trim_spines(ax)
+        zmask, z0, z1 = time_zoom_mask(t, float(train_start), float(isi), int(n_pulses), cfg['pre_zoom_s'], cfg['post_zoom_s'])
+        tz = t[zmask]
+        for st in stim_times:
+            ax.axvline(st, color='k', linestyle=':', linewidth=0.8, alpha=0.6)
+        if 'raw' in traces:
+            ax.plot(tz, y_avg[zmask], label='raw', color='0.6')
+        if 'savgol' in traces and y_sg_avg is not None:
+            ax.plot(tz, y_sg_avg[zmask], label='savgol', color='tab:green')
+        if 'nnls' in traces:
+            ax.plot(tz, yhat_avg[zmask], label='nnls model', color='tab:blue')
+        if plot_residuals and resid_avg is not None:
+            try:
+                resid_offset = -1
+                ax.plot(
+                    tz,
+                    resid_avg[zmask] + resid_offset,
+                    label='residual (offset)',
+                    color='tab:purple',
+                    linewidth=1.2,
+                    alpha=0.9,
+                )
+                ax.axhline(resid_offset, color='tab:purple', linestyle=':', linewidth=0.8, alpha=0.7)
+            except Exception:
+                pass
+        # Replace the orange line plotting section with:
+        # Replace the orange line plotting with cumulative reconstruction:
+        if show_decay and 'nnls' in traces and comp_avg is not None:
+            cumulative = np.zeros_like(y_avg)
+            for p in range(len(stim_times)):
+                if p >= len(comp_avg):
+                    continue
+                # Add this component to the cumulative sum
+                cumulative = cumulative + comp_avg[p]
+
+                # Plot the cumulative reconstruction up to this point
+                # This shows the "baseline" including all decay from previous pulses
+                ax.plot(
+                    tz,
+                    cumulative[zmask],
+                    color='tab:orange',
+                    linestyle='--',
+                    linewidth=1.0,
+                    alpha=0.6 - p * 0.04,  # Fade with each pulse
+                )
+        # If anchored (linear/monotonic), show the last-event pre-refit fit as an additional red overlay
+        try:
+            if dec_mode in ('linear','free_monotonic') and (tau_last_display is not None) and (amp_last_display is not None):
+                last_st = float(stim_times[-1]) + event_t0_s
+                k_last = _KERNEL_FUN(tz - last_st, tau_r, float(tau_last_display))
+                ax.plot(tz, float(amp_last_display) * k_last, color='crimson', linestyle='--', linewidth=1.4, alpha=0.9, label='last fit (pre-refit)')
+        except Exception:
+            pass
+
+        # Optional: overlay peak markers and residual-at-peak triangles
+        if plot_peaks_details:
+            # Choose which series defines the "measurement" trace for peak picking
+            if meas == 'SAVGOL' and (y_sg_avg is not None):
+                y_for_peaks = y_sg_avg
+            elif meas == 'RAW':
+                y_for_peaks = y_avg
+            else:
+                y_for_peaks = yhat_avg
+
+            # Build cumulative baseline from previous pulses only using NNLS components
+            # For pulse p, baseline_prev[p, :] = sum_{k < p} comp_avg[k]
+            baseline_prev_only = []
+            if comp_avg is not None:
+                cum = np.zeros_like(y_avg)
+                for p in range(len(stim_times)):
+                    baseline_prev_only.append(cum.copy())
+                    if p < len(comp_avg):
+                        cum = cum + comp_avg[p]
+
+            peak_ts: list = []
+            peak_vals: list = []
+            resid_vals: list = []
+            for p, st in enumerate(stim_times):
+                tp, vp = pick_peak_on_series(t, y_for_peaks, float(st), win_ms, pre_ms)
+                peak_ts.append(float(tp))
+                peak_vals.append(float(vp))
+                # Residual-under-peak = baseline from prior pulses at that time
+                try:
+                    i0 = int(np.argmin(np.abs(t - tp)))
+                    base_prev = baseline_prev_only[p][i0] if baseline_prev_only else 0.0
+                    resid_vals.append(float(base_prev))
+                except Exception:
+                    resid_vals.append(np.nan)
+
+            # Red circles at peaks (on the chosen measurement trace)
+            try:
+                ax.scatter(peak_ts, peak_vals, s=70, color='red', edgecolors='white', linewidths=0.9, zorder=6, label='peaks')
+            except Exception:
+                pass
+            # Down-pointing triangles for residual at peak time
+            try:
+                # Triangles sit on the orange dashed baseline (previous pulses only)
+                ax.scatter(peak_ts, resid_vals, s=60, marker='v', facecolors='white', edgecolors='tab:red', linewidths=1.0, zorder=5, label='residual at peak')
+            except Exception:
+                pass
+        ax.set_xlim(z0, z1)
+        ax.set_xlabel('Time (s)')
+        ax.set_ylabel('ΔF/F0' if use_dff else 'ΔF')
+        ax.legend(loc='upper right', frameon=False)
+        ax.set_title('Average trace (selected overlays)')
+
+        # Residual diagnostics panel (average): place directly under the main
+        # average panel and show a small inset histogram (no separate figure).
+        if plot_residuals and (resid_avg is not None) and (model_avg_for_resid is not None):
+            try:
+                # Bottom-right: residual trace aligned with the top-right panel
+                axR = figure.add_subplot(gs[1, 1], sharex=ax)
+                axR.plot(tz, resid_avg[zmask], color='tab:purple', lw=1.2, label='residual (avg − model)')
+                axR.axvline(float(train_start), color='k', ls=':', lw=0.8, alpha=0.6)
+                axR.set_xlim(z0, z1)
+                axR.set_xlabel('Time (s)')
+                axR.set_ylabel('ΔF/F0' if use_dff else 'ΔF')
+                axR.set_title('Residuals (average)')
+                axR.legend(loc='upper right', frameon=False, fontsize=8)
+                _trim_spines(axR)
+
+                # Inset histogram of residuals in the zoom window with fixed bins and Gaussian fit
+                try:
+                    ax_in = axR.inset_axes([0.70, 0.55, 0.28, 0.4])
+                    rv = np.asarray(resid_avg[zmask], float)
+                    rv = rv[np.isfinite(rv)]
+                    if rv.size:
+                        bin_w = (0.01 if use_dff else 10.0)
+                        lo = float(np.nanmin(rv))
+                        hi = float(np.nanmax(rv))
+                        if not np.isfinite(lo):
+                            lo = 0.0
+                        if not np.isfinite(hi) or hi <= lo:
+                            hi = lo + bin_w
+                        edges = np.arange(lo, hi + bin_w, bin_w)
+                        ax_in.hist(rv, bins=edges, color='#d8c7e8', edgecolor='#6b4fa3')
+                        # Gaussian fit overlay across full inset range
+                        try:
+                            mu = float(np.nanmean(rv))
+                            sigma = float(np.nanstd(rv))
+                        except Exception:
+                            mu, sigma = float('nan'), float('nan')
+                        if np.isfinite(sigma) and sigma > 0:
+                            x0, x1 = ax_in.get_xlim()
+                            x = np.linspace(x0, x1, 400)
+                            pdf = (1.0 / (np.sqrt(2.0 * np.pi) * sigma)) * np.exp(-0.5 * ((x - mu) / sigma) ** 2)
+                            N = rv.size
+                            y = N * bin_w * pdf
+                            ax_in.plot(x, y, color='#26457a', linewidth=1.4, label='fit')
+                    ax_in.set_title('residual', fontsize=8)
+                    ax_in.tick_params(labelsize=7)
+                except Exception:
+                    pass
+
+                # Add an empty placeholder under the left event-fit panel to
+                # keep the grid balanced.
+                try:
+                    ax_placeholder = figure.add_subplot(gs[1, 0])
+                    ax_placeholder.axis('off')
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+        # Show the complete average figure immediately
+        try:
+            plt.show(block=False); plt.pause(0.05)
+        except Exception:
+            pass
+
+        # Fit diagnostic figure: show immediately after average figure
+        if cfg.get('fit_diagnostic_plot', False) and np.size(tau_d_vec):
+            try:
+                fit_diag_figure, axes = plt.subplots(1, 2, figsize=(11.0, 4.2))
+                ax_w, ax_tau = axes
+
+                # Weight kernel panel
+                if weight_mode == 'savgol' and y_sg_avg is None:
+                    y_vis = sg_smooth(fill_nans_timewise(y_avg, t), sgW, sgP)
+                else:
+                    y_vis = y_sg_avg
+                weights = _calculate_nnls_weights(
+                    t,
+                    stim_times,
+                    isi,
+                    weight_mode,
+                    weight_tau_s,
+                    y_ref=y_vis,
+                )
+                ax_w.plot(t, weights, color='#1f77b4', linewidth=2.0, label=f'{weight_mode} weight')
+                for i, st in enumerate(stim_times):
+                    label = 'stimulus' if i == 0 else None
+                    ax_w.axvline(st, color='red', linestyle='--', alpha=0.6, linewidth=0.9, label=label)
+                ax_w.set_xlabel('Time (s)')
+                ax_w.set_ylabel('Weight')
+                if weight_tau_s is not None:
+                    ax_w.set_title(f'Weight kernel (τ={weight_tau_s*1000:.1f} ms)')
+                else:
+                    ax_w.set_title('Weight kernel')
+                ax_w.legend(loc='upper right', frameon=False, fontsize=8)
+                ax_w.grid(True, alpha=0.2)
+
+                # τd progression panel
+                pulse_idx = np.arange(1, len(tau_d_vec) + 1, dtype=float)
+                if tau_d_vec_raw is not None and np.size(tau_d_vec_raw) == len(tau_d_vec):
+                    ax_tau.plot(
+                        pulse_idx,
+                        np.asarray(tau_d_vec_raw, float) * 1000.0,
+                        marker='o',
+                        color='#9467bd',
+                        linewidth=1.5,
+                        label='raw τd',
+                    )
+                ax_tau.plot(
+                    pulse_idx,
+                    np.asarray(tau_d_vec, float) * 1000.0,
+                    marker='s',
+                    color='#2ca02c',
+                    linewidth=1.5,
+                    label=f"progressed τd ({dec_mode})",
+                )
+                ax_tau.set_xlabel('Pulse #')
+                ax_tau.set_ylabel('τd (ms)')
+                ax_tau.set_title('Decay progression')
+                ax_tau.legend(loc='upper left', frameon=False, fontsize=8)
+                ax_tau.grid(True, alpha=0.2)
+
+                fit_diag_figure.tight_layout()
+                try:
+                    plt.show(block=False); plt.pause(0.05)
+                except Exception:
+                    pass
+            except Exception as e:
+                print(f"[warning] Failed to render fit diagnostics: {e}")
+
     # Per‑trial metrics and null thresholds (MAD rule) for A1
     per_trial: List[Dict] = []
     thr_list: List[float] = []
@@ -1856,400 +2248,12 @@ def extract_metrics(
             except Exception:
                 pass
 
+            # Show trial figures immediately after they are created
             try:
                 plt.show(block=False); plt.pause(0.01)
             except Exception:
                 pass
             figures_trials.append(fig_t)
-
-    # Optional: average plot with a left event-fit panel (0-50 ms) + right main plot
-    figure = None
-    fit_diag_figure = None
-    if want_plot:
-        # If residual diagnostics requested, allocate an extra bottom row
-        if plot_residuals:
-            figure = plt.figure(figsize=(12, 9.2))
-            gs = figure.add_gridspec(2, 2, height_ratios=[2.4, 1.4], width_ratios=[1.5, 4], wspace=0.15, hspace=0.28)
-        else:
-            figure = plt.figure(figsize=(12, 5))
-            gs = figure.add_gridspec(1, 2, width_ratios=[1.5, 4], wspace=0.15)
-
-        resid_avg = None
-        model_avg_for_resid = None
-        if plot_residuals:
-            if meas == 'SAVGOL' and (y_sg_avg is not None):
-                model_avg_for_resid = y_sg_avg
-            else:
-                model_avg_for_resid = yhat_avg
-            if model_avg_for_resid is not None:
-                try:
-                    resid_avg = np.asarray(y_avg - model_avg_for_resid, float)
-                except Exception:
-                    resid_avg = None
-        # Left: aggregated event + model fit (−3..next stim−guard)
-        axL = figure.add_subplot(gs[0, 0])
-        _trim_spines(axL)
-        try:
-            t_ms_evt = t_avg_evt if 't_avg_evt' in locals() else (t - float(train_start)) * 1000.0
-            y_evt = y_avg_evt if 'y_avg_evt' in locals() else y_avg
-            isi_ms = float(isi) * 1000.0
-            # Display window: from -3 ms before stim to just before next stim
-            # Use a 3 ms guard before the next stimulus to avoid overlap
-            min_x = -3.0
-            max_x = max(isi_ms - 3.0, 0.0)
-            m0 = (t_ms_evt >= min_x) & (t_ms_evt < max_x)
-            axL.plot(t_ms_evt[m0], y_evt[m0], color='k', lw=1.5, label='Average')
-            # Overlay best-fit library model matching current kernel choice
-            try:
-                try:
-                    from Model_Calibration.event_models import get_event_model
-                except Exception:
-                    from event_models import get_event_model  # type: ignore
-                # Resolve the effective model name
-                _name = event_model
-                if _name.startswith('library:'):
-                    _name = _name.split(':', 1)[1].strip().lower()
-                spec = get_event_model(_name)
-                tf = t_ms_evt[m0]; yf = y_evt[m0]
-                # Build overlay params to reflect the model actually used:
-                popt = None
-                if _name in {'double_exp','cooperative','bilinear'}:
-                    # Use the kinetics selected for this run (tau_r, tau_d0)
-                    # Respect any fitted t_peak so the overlay shifts correctly
-                    t_peak_ms = 0.0
-                    try:
-                        if 'fitted' in locals() and fitted is not None:
-                            t_peak_ms = float(fitted.get('t_peak', 0.0))
-                    except Exception:
-                        t_peak_ms = 0.0
-                    if _name == 'double_exp':
-                        # [amp, tau_rise(s), tau_decay(s), t_peak(ms)]
-                        pars = [1.0, float(tau_r), float(tau_d0), t_peak_ms]
-                    elif _name == 'cooperative':
-                        ems = cfg.get('event_model_settings', {}) or {}
-                        n_used = float(ems.get('n_coop', 2.0))
-                        # [amp, tau_rise(s), tau_decay(s), n_coop, t_peak(ms)]
-                        pars = [1.0, float(tau_r), float(tau_d0), n_used, t_peak_ms]
-                    else:  # bilinear expects ms values for rise/decay durations
-                        pars = [1.0, float(tau_r)*1000.0, float(tau_d0)*1000.0, t_peak_ms]
-                    yshape = spec['func'](tf, *pars)
-                    denom = float(np.sum(yshape**2)) if np.isfinite(yshape).any() else 0.0
-                    amp_ls = float(np.sum(yf*yshape))/denom if denom > 0 else 1.0
-                    pars[0] = amp_ls
-                    popt = pars
-                    yhat_ev = spec['func'](tf, *popt)
-                else:
-                    # For fixed-template models, DO NOT refit here: honor
-                    # the effective event_model_settings that were applied to
-                    # the kernel earlier. Build the parameter vector in the
-                    # order expected by the spec and only solve a linear LS
-                    # for amplitude so the overlay matches scale.
-                    params = []
-                    t_peak_ms = 0.0
-                    try:
-                        if 'fitted' in locals() and fitted is not None:
-                            t_peak_ms = float(fitted.get('t_peak', 0.0))
-                    except Exception:
-                        t_peak_ms = 0.0
-                    ems = cfg.get('event_model_settings', {}) or {}
-                    for name in spec['params']:
-                        if name == 'amp':
-                            params.append(1.0)
-                        elif name == 't_peak':
-                            params.append(t_peak_ms)
-                        else:
-                            # Prefer values from the recent global fit if available;
-                            # then explicit user overrides in event_model_settings;
-                            # then tau_r/tau_d0 mapping; finally default p0.
-                            if 'fitted' in locals() and isinstance(fitted, dict) and name in fitted and np.isfinite(fitted.get(name, np.nan)):
-                                params.append(float(fitted[name]))
-                            elif name in ems and np.isfinite(ems.get(name, np.nan)):
-                                params.append(float(ems[name]))
-                            elif name == 'tau_decay':
-                                params.append(float(tau_d0))  # seconds
-                            elif name == 'tau_rise':
-                                params.append(float(tau_r))
-                            else:
-                                # If unknown, fall back to p0 for stability
-                                p0 = spec['p0_func'](yf, tf)
-                                idx = spec['params'].index(name)
-                                params.append(float(p0[idx]))
-                    # Compute LS amplitude against the fixed shape
-                    yshape = spec['func'](tf, *params)
-                    denom = float(np.sum(yshape**2)) if np.isfinite(yshape).any() else 0.0
-                    amp_ls = float(np.sum(yf * yshape)) / denom if denom > 0 else 1.0
-                    params[0] = amp_ls
-                    popt = params
-                    yhat_ev = spec['func'](tf, *popt)
-                axL.plot(tf, yhat_ev, color='crimson', ls='--', lw=1.8, label=_name)
-                try:
-                    # Omit 't_peak' and stack vertically; include amp at top for context
-                    pairs = [(n, v) for n, v in zip(spec['params'], popt)]
-                    pairs = [(n, v) for n, v in pairs if n != 't_peak']
-                    txt = "\n".join(f"{n}={v:.3g}" for n, v in pairs)
-                    axL.text(0.98, 0.98, txt, transform=axL.transAxes, fontsize=8,
-                             va='top', ha='right', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
-                except Exception:
-                    pass
-            except Exception:
-                pass
-            axL.axvline(0.0, color='k', ls=':', alpha=0.5, lw=0.8)
-            axL.set_xlim(min_x, max_x)
-            # Autoscale y with a small margin to avoid a squashed panel
-            try:
-                y_slice = y_evt[m0]
-                ymins = np.nanmin(y_slice) if np.size(y_slice) else 0.0
-                ymaxs = np.nanmax(y_slice) if np.size(y_slice) else 1.0
-                if 'yhat_ev' in locals():
-                    ymins = min(ymins, float(np.nanmin(yhat_ev)))
-                    ymaxs = max(ymaxs, float(np.nanmax(yhat_ev)))
-                span = max(1e-6, ymaxs - ymins)
-                pad = 0.1 * span
-                axL.set_ylim(ymins - pad, ymaxs + pad)
-            except Exception:
-                pass
-            axL.set_xlabel('Time (ms)')
-            axL.set_ylabel('ΔF/F0' if use_dff else 'ΔF')
-            try:
-                axL.set_title(f'Event fit (−3.0–{max_x:.1f} ms)', fontsize=10)
-            except Exception:
-                axL.set_title('Event fit', fontsize=10)
-        except Exception:
-            pass
-
-        # Right: main average plot
-        ax = figure.add_subplot(gs[0, 1])
-        _trim_spines(ax)
-        zmask, z0, z1 = time_zoom_mask(t, float(train_start), float(isi), int(n_pulses), cfg['pre_zoom_s'], cfg['post_zoom_s'])
-        tz = t[zmask]
-        for st in stim_times:
-            ax.axvline(st, color='k', linestyle=':', linewidth=0.8, alpha=0.6)
-        if 'raw' in traces:
-            ax.plot(tz, y_avg[zmask], label='raw', color='0.6')
-        if 'savgol' in traces and y_sg_avg is not None:
-            ax.plot(tz, y_sg_avg[zmask], label='savgol', color='tab:green')
-        if 'nnls' in traces:
-            ax.plot(tz, yhat_avg[zmask], label='nnls model', color='tab:blue')
-        if plot_residuals and resid_avg is not None:
-            try:
-                resid_offset = -1
-                ax.plot(
-                    tz,
-                    resid_avg[zmask] + resid_offset,
-                    label='residual (offset)',
-                    color='tab:purple',
-                    linewidth=1.2,
-                    alpha=0.9,
-                )
-                ax.axhline(resid_offset, color='tab:purple', linestyle=':', linewidth=0.8, alpha=0.7)
-            except Exception:
-                pass
-        # Replace the orange line plotting section with:
-        # Replace the orange line plotting with cumulative reconstruction:
-        if show_decay and 'nnls' in traces and comp_avg is not None:
-            cumulative = np.zeros_like(y_avg)
-            for p in range(len(stim_times)):
-                if p >= len(comp_avg):
-                    continue
-                # Add this component to the cumulative sum
-                cumulative = cumulative + comp_avg[p]
-                
-                # Plot the cumulative reconstruction up to this point
-                # This shows the "baseline" including all decay from previous pulses
-                ax.plot(
-                    tz,
-                    cumulative[zmask],
-                    color='tab:orange',
-                    linestyle='--',
-                    linewidth=1.0,
-                    alpha=0.6 - p * 0.04,  # Fade with each pulse
-                )
-        # If anchored (linear/monotonic), show the last-event pre-refit fit as an additional red overlay
-        try:
-            if dec_mode in ('linear','free_monotonic') and (tau_last_display is not None) and (amp_last_display is not None):
-                last_st = float(stim_times[-1]) + event_t0_s
-                k_last = _KERNEL_FUN(tz - last_st, tau_r, float(tau_last_display))
-                ax.plot(tz, float(amp_last_display) * k_last, color='crimson', linestyle='--', linewidth=1.4, alpha=0.9, label='last fit (pre-refit)')
-        except Exception:
-            pass
-
-        # Optional: overlay peak markers and residual-at-peak triangles
-        if plot_peaks_details:
-            # Choose which series defines the "measurement" trace for peak picking
-            if meas == 'SAVGOL' and (y_sg_avg is not None):
-                y_for_peaks = y_sg_avg
-            elif meas == 'RAW':
-                y_for_peaks = y_avg
-            else:
-                y_for_peaks = yhat_avg
-
-            # Build cumulative baseline from previous pulses only using NNLS components
-            # For pulse p, baseline_prev[p, :] = sum_{k < p} comp_avg[k]
-            baseline_prev_only = []
-            if comp_avg is not None:
-                cum = np.zeros_like(y_avg)
-                for p in range(len(stim_times)):
-                    baseline_prev_only.append(cum.copy())
-                    if p < len(comp_avg):
-                        cum = cum + comp_avg[p]
-
-            peak_ts: list = []
-            peak_vals: list = []
-            resid_vals: list = []
-            for p, st in enumerate(stim_times):
-                tp, vp = pick_peak_on_series(t, y_for_peaks, float(st), win_ms, pre_ms)
-                peak_ts.append(float(tp))
-                peak_vals.append(float(vp))
-                # Residual-under-peak = baseline from prior pulses at that time
-                try:
-                    i0 = int(np.argmin(np.abs(t - tp)))
-                    base_prev = baseline_prev_only[p][i0] if baseline_prev_only else 0.0
-                    resid_vals.append(float(base_prev))
-                except Exception:
-                    resid_vals.append(np.nan)
-
-            # Red circles at peaks (on the chosen measurement trace)
-            try:
-                ax.scatter(peak_ts, peak_vals, s=70, color='red', edgecolors='white', linewidths=0.9, zorder=6, label='peaks')
-            except Exception:
-                pass
-            # Down-pointing triangles for residual at peak time
-            try:
-                # Triangles sit on the orange dashed baseline (previous pulses only)
-                ax.scatter(peak_ts, resid_vals, s=60, marker='v', facecolors='white', edgecolors='tab:red', linewidths=1.0, zorder=5, label='residual at peak')
-            except Exception:
-                pass
-        ax.set_xlim(z0, z1)
-        ax.set_xlabel('Time (s)')
-        ax.set_ylabel('ΔF/F0' if use_dff else 'ΔF')
-        ax.legend(loc='upper right', frameon=False)
-        ax.set_title('Average trace (selected overlays)')
-        try:
-            plt.show(block=False); plt.pause(0.05)
-        except Exception:
-            pass
-
-        # Residual diagnostics panel (average): place directly under the main
-        # average panel and show a small inset histogram (no separate figure).
-        if plot_residuals and (resid_avg is not None) and (model_avg_for_resid is not None):
-            try:
-                # Bottom-right: residual trace aligned with the top-right panel
-                axR = figure.add_subplot(gs[1, 1], sharex=ax)
-                axR.plot(tz, resid_avg[zmask], color='tab:purple', lw=1.2, label='residual (avg − model)')
-                axR.axvline(float(train_start), color='k', ls=':', lw=0.8, alpha=0.6)
-                axR.set_xlim(z0, z1)
-                axR.set_xlabel('Time (s)')
-                axR.set_ylabel('ΔF/F0' if use_dff else 'ΔF')
-                axR.set_title('Residuals (average)')
-                axR.legend(loc='upper right', frameon=False, fontsize=8)
-                _trim_spines(axR)
-
-                # Inset histogram of residuals in the zoom window with fixed bins and Gaussian fit
-                try:
-                    ax_in = axR.inset_axes([0.70, 0.55, 0.28, 0.4])
-                    rv = np.asarray(resid_avg[zmask], float)
-                    rv = rv[np.isfinite(rv)]
-                    if rv.size:
-                        bin_w = (0.01 if use_dff else 10.0)
-                        lo = float(np.nanmin(rv))
-                        hi = float(np.nanmax(rv))
-                        if not np.isfinite(lo):
-                            lo = 0.0
-                        if not np.isfinite(hi) or hi <= lo:
-                            hi = lo + bin_w
-                        edges = np.arange(lo, hi + bin_w, bin_w)
-                        ax_in.hist(rv, bins=edges, color='#d8c7e8', edgecolor='#6b4fa3')
-                        # Gaussian fit overlay across full inset range
-                        try:
-                            mu = float(np.nanmean(rv))
-                            sigma = float(np.nanstd(rv))
-                        except Exception:
-                            mu, sigma = float('nan'), float('nan')
-                        if np.isfinite(sigma) and sigma > 0:
-                            x0, x1 = ax_in.get_xlim()
-                            x = np.linspace(x0, x1, 400)
-                            pdf = (1.0 / (np.sqrt(2.0 * np.pi) * sigma)) * np.exp(-0.5 * ((x - mu) / sigma) ** 2)
-                            N = rv.size
-                            y = N * bin_w * pdf
-                            ax_in.plot(x, y, color='#26457a', linewidth=1.4, label='fit')
-                    ax_in.set_title('residual', fontsize=8)
-                    ax_in.tick_params(labelsize=7)
-                except Exception:
-                    pass
-
-                # Add an empty placeholder under the left event-fit panel to
-                # keep the grid balanced.
-                try:
-                    ax_placeholder = figure.add_subplot(gs[1, 0])
-                    ax_placeholder.axis('off')
-                except Exception:
-                    pass
-            except Exception:
-                pass
-
-        if cfg.get('fit_diagnostic_plot', False) and np.size(tau_d_vec):
-            try:
-                fit_diag_figure, axes = plt.subplots(1, 2, figsize=(11.0, 4.2))
-                ax_w, ax_tau = axes
-
-                # Weight kernel panel
-                if weight_mode == 'savgol' and y_sg_avg is None:
-                    y_vis = sg_smooth(fill_nans_timewise(y_avg, t), sgW, sgP)
-                else:
-                    y_vis = y_sg_avg
-                weights = _calculate_nnls_weights(
-                    t,
-                    stim_times,
-                    isi,
-                    weight_mode,
-                    weight_tau_s,
-                    y_ref=y_vis,
-                )
-                ax_w.plot(t, weights, color='#1f77b4', linewidth=2.0, label=f'{weight_mode} weight')
-                for i, st in enumerate(stim_times):
-                    label = 'stimulus' if i == 0 else None
-                    ax_w.axvline(st, color='red', linestyle='--', alpha=0.6, linewidth=0.9, label=label)
-                ax_w.set_xlabel('Time (s)')
-                ax_w.set_ylabel('Weight')
-                if weight_tau_s is not None:
-                    ax_w.set_title(f'Weight kernel (τ={weight_tau_s*1000:.1f} ms)')
-                else:
-                    ax_w.set_title('Weight kernel')
-                ax_w.legend(loc='upper right', frameon=False, fontsize=8)
-                ax_w.grid(True, alpha=0.2)
-
-                # τd progression panel
-                pulse_idx = np.arange(1, len(tau_d_vec) + 1, dtype=float)
-                if tau_d_vec_raw is not None and np.size(tau_d_vec_raw) == len(tau_d_vec):
-                    ax_tau.plot(
-                        pulse_idx,
-                        np.asarray(tau_d_vec_raw, float) * 1000.0,
-                        marker='o',
-                        color='#9467bd',
-                        linewidth=1.5,
-                        label='raw τd',
-                    )
-                ax_tau.plot(
-                    pulse_idx,
-                    np.asarray(tau_d_vec, float) * 1000.0,
-                    marker='s',
-                    color='#2ca02c',
-                    linewidth=1.5,
-                    label=f"progressed τd ({dec_mode})",
-                )
-                ax_tau.set_xlabel('Pulse #')
-                ax_tau.set_ylabel('τd (ms)')
-                ax_tau.set_title('Decay progression')
-                ax_tau.legend(loc='upper left', frameon=False, fontsize=8)
-                ax_tau.grid(True, alpha=0.2)
-
-                fit_diag_figure.tight_layout()
-                try:
-                    plt.show(block=False); plt.pause(0.05)
-                except Exception:
-                    pass
-            except Exception as e:
-                print(f"[warning] Failed to render fit diagnostics: {e}")
 
     return {
         'tau_r_s': float(tau_r),
