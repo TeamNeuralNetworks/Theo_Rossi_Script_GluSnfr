@@ -1143,43 +1143,103 @@ def extract_metrics(
     # Offset (seconds) between stimulus time and actual event onset
     event_t0_s = 0.0
 
-    def _estimate_last_tau(tau_r_local, tau_d0_local):
+    def _estimate_single_event_tau(event_idx, tau_r_local, tau_d0_fallback):
+        """Fit tau_d for a single event on the average trace.
+
+        Fits only the decay after the event peak, focusing on the post-event window
+        to minimize contamination from subsequent events in the train.
+        """
         try:
-            last_st = stim_times[-1] + event_t0_s
-            zmask_last = (t >= last_st) & (t <= (last_st + cfg['post_zoom_s']))
-            tf = t[zmask_last]; yf = y_avg[zmask_last]
+            st = stim_times[event_idx] + event_t0_s
+            # Use a focused window: from event onset to next event (or post_zoom_s if last event)
+            if event_idx < len(stim_times) - 1:
+                # Not the last event: fit up to the next event
+                next_st = stim_times[event_idx + 1] + event_t0_s
+                zmask_evt = (t >= st) & (t < next_st)
+            else:
+                # Last event: use full post_zoom window
+                zmask_evt = (t >= st) & (t <= (st + cfg['post_zoom_s']))
+
+            tf = t[zmask_evt]; yf = y_avg[zmask_evt]
+
+            if tf.size < 3:
+                # Not enough points to fit
+                return float(tau_d0_fallback), 1.0
+
             tau_d_grid_ms = np.array(cfg['kin_taud0_grid_ms'], float)
             tau_d_grid = tau_d_grid_ms / 1000.0
-            best = (np.inf, tau_d0_local, 1.0)
+            best = (np.inf, tau_d0_fallback, 1.0)
+
             for td in tau_d_grid:
-                k = _KERNEL_FUN(tf - last_st, tau_r_local, td)
+                k = _KERNEL_FUN(tf - st, tau_r_local, td)
                 denom = float(np.sum(k**2))
                 amp = float(np.sum(yf * k)) / denom if denom > 0 else 1.0
                 fit = amp * k
                 err = float(np.nanmean((yf - fit) ** 2))
                 if err < best[0]:
                     best = (err, td, amp)
-            tau_last = float(best[1]); amp_last = float(best[2])
-            try:
-                if tau_last >= (float(np.max(tau_d_grid)) - 1e-9):
-                    progress_print(f"[decay] τd_last hit upper grid bound ({np.max(tau_d_grid_ms):.1f} ms). Consider extending 'kin_taud0_grid_ms'.")
-            except Exception:
-                pass
-            return tau_last, amp_last
-        except Exception:
-            return float(tau_d0_local), 1.0
 
-    def _apply_progression(tau_r_in, tau_d_vec_in, tau_d0_in):
-        # Apply dec_mode smoothing/progression rules to tau_d_vec
+            tau_evt = float(best[1]); amp_evt = float(best[2])
+            return tau_evt, amp_evt
+        except Exception:
+            return float(tau_d0_fallback), 1.0
+
+    def _fit_all_events_on_average(tau_r_local, tau_d0_fallback):
+        """Fit tau_d for each event individually on the average trace."""
+        tau_vec = []
+        amp_vec = []
+        for i in range(n_pulses):
+            tau_i, amp_i = _estimate_single_event_tau(i, tau_r_local, tau_d0_fallback)
+            tau_vec.append(tau_i)
+            amp_vec.append(amp_i)
+        tau_array = np.array(tau_vec, float)
+        amp_array = np.array(amp_vec, float)
+        try:
+            tau_ms_str = ", ".join(f"{v*1000:.1f}" for v in tau_array)
+            progress_print(f"[per-event fit] Individual τd (ms): [{tau_ms_str}]")
+        except Exception:
+            pass
+        return tau_array, amp_array
+
+    def _monotonic_regression(y_in):
+        """Apply isotonic regression to ensure non-decreasing values."""
+        from scipy.interpolate import PchipInterpolator
+        y = np.asarray(y_in, float)
+        # Ensure monotonically non-decreasing by cumulative maximum
+        y_mono = np.maximum.accumulate(y)
+        # Smooth with PCHIP interpolation while preserving monotonicity
+        x = np.arange(len(y))
+        try:
+            # PCHIP preserves monotonicity if input is monotonic
+            interp = PchipInterpolator(x, y_mono)
+            y_smooth = interp(x)
+            # Force monotonic again in case of numerical issues
+            y_smooth = np.maximum.accumulate(y_smooth)
+            return y_smooth
+        except Exception:
+            return y_mono
+
+    def _apply_progression(tau_r_in, tau_d_vec_in, tau_d0_in, source_method):
+        """Apply decay progression rules based on mode and fit_source.
+
+        Args:
+            tau_r_in: Rise time constant
+            tau_d_vec_in: Per-event decay time constants (raw)
+            tau_d0_in: Fallback single decay constant
+            source_method: 'global', 'average', or 'individual'
+        """
+        y = np.asarray(tau_d_vec_in, float)
+        if y.size != n_pulses or not np.isfinite(y).any():
+            y = np.full(n_pulses, float(tau_d0_in))
+
         if dec_mode == 'fixed':
-            td_med = float(np.nanmedian(tau_d_vec_in)) if np.size(tau_d_vec_in) else float(tau_d0_in)
+            # Use single tau for all events
+            td_med = float(np.nanmedian(y)) if np.isfinite(y).any() else float(tau_d0_in)
             return tau_r_in, np.full(n_pulses, td_med)
+
         elif dec_mode == 'linear':
-            # Non-negative slope linear fit across pulses
+            # Linear regression with non-negative slope
             x = np.arange(n_pulses, dtype=float)
-            y = np.asarray(tau_d_vec_in, float)
-            if y.size != n_pulses or not np.isfinite(y).any():
-                y = np.full(n_pulses, float(tau_d0_in))
             A = np.column_stack([np.ones_like(x), x])
             try:
                 coef, _, _, _ = np.linalg.lstsq(A, y, rcond=None)
@@ -1187,18 +1247,20 @@ def extract_metrics(
             except Exception:
                 a, b = float(y[0]), 0.0
             yfit = a + b * x
-            return tau_r_in, np.maximum.accumulate(yfit)
-        else:  # 'free_monotonic': interpolate between first and last
-            y = np.asarray(tau_d_vec_in, float)
-            if y.size != n_pulses:
-                y = np.full(n_pulses, float(tau_d0_in))
-            yfit = np.linspace(float(y[0]), float(y[-1]), n_pulses)
-            return tau_r_in, np.maximum.accumulate(yfit)
+            # Ensure monotonic (can only get slower)
+            yfit = np.maximum.accumulate(yfit)
+            return tau_r_in, yfit
+
+        else:  # 'free_monotonic'
+            # Apply monotonic regression (tau can stay same or get slower)
+            yfit = _monotonic_regression(y)
+            return tau_r_in, yfit
 
     # Variables for optional display overlays and logging
     tau_last_display = None
     amp_last_display = None
-    tau_d_vec_raw = None
+    tau_d_vec_raw = None  # Initial per-event estimates before any constraints
+    tau_d_vec_constrained = None  # After clipping/anchoring (for global mode)
 
     if fit_source == 'global':
         # Match the demo: recut + average all events then fit via curve_fit
@@ -1283,17 +1345,45 @@ def extract_metrics(
             progress_print(
                 f"[fit][global] curve_fit τr={tau_r*1000:.2f}ms τd={tau_d0*1000:.2f}ms model={event_model}"
             )
-        if dec_mode in ('linear','free_monotonic'):
-            tau_last, amp_last = _estimate_last_tau(tau_r, tau_d0)
-            tau_last_display, amp_last_display = float(tau_last), float(amp_last)
-            tau_d_vec0 = np.linspace(float(tau_d0), float(tau_last), n_pulses)
+
+        # Global fit_source: anchor global tau to middle event, then constrain per-event fits
+        if dec_mode == 'fixed':
+            # Fixed mode: use single global tau for all events
+            tau_d_vec0 = np.full(n_pulses, float(tau_d0))
+            tau_d_vec_raw = np.asarray(tau_d_vec0, float)
+            tau_d_vec_constrained = None  # No constraints applied in fixed mode
+        elif dec_mode in ('linear', 'free_monotonic'):
+            # Fit tau for each event on average trace
+            tau_per_evt, amp_per_evt = _fit_all_events_on_average(tau_r, tau_d0)
+            tau_d_vec_raw = np.asarray(tau_per_evt, float)
+
+            # Anchor global tau at middle event
+            mid_idx = n_pulses // 2
+            tau_anchor = float(tau_d0)
+
+            # Apply constraints: events before mid cannot be slower, events after cannot be faster
+            tau_constrained = np.copy(tau_per_evt)
+            for i in range(mid_idx):
+                if tau_constrained[i] > tau_anchor:
+                    tau_constrained[i] = tau_anchor
+            for i in range(mid_idx, n_pulses):
+                if tau_constrained[i] < tau_anchor:
+                    tau_constrained[i] = tau_anchor
+
+            tau_d_vec_constrained = np.asarray(tau_constrained, float)
+            tau_d_vec0 = tau_constrained
+            tau_last_display = float(tau_per_evt[-1])
+            amp_last_display = float(amp_per_evt[-1])
         else:
             tau_d_vec0 = np.full(n_pulses, float(tau_d0))
-        tau_d_vec_raw = np.asarray(tau_d_vec0, float)
-        tau_r, tau_d_vec = _apply_progression(tau_r, tau_d_vec0, tau_d0)
+            tau_d_vec_raw = np.asarray(tau_d_vec0, float)
+            tau_d_vec_constrained = None
+
+        tau_r, tau_d_vec = _apply_progression(tau_r, tau_d_vec0, tau_d0, 'global')
         if is_varying_model:
             progress_print(f"[fit] source=global | τd0={tau_d_vec[0]*1000:.2f}ms → τdN={tau_d_vec[-1]*1000:.2f}ms | mode={dec_mode}")
     elif fit_source == 'individual':
+        # Individual fit_source: fit each trial independently
         tau_rs = []
         tau_d_mat = []
         for j in range(Yd.shape[1]):
@@ -1316,24 +1406,48 @@ def extract_metrics(
             tau_d_vec0 = np.full(n_pulses, 0.010)
         tau_d0 = float(tau_d_vec0[0])
         tau_d_vec_raw = np.asarray(tau_d_vec0, float)
-        tau_r, tau_d_vec = _apply_progression(tau_r, tau_d_vec0, tau_d0)
+        tau_r, tau_d_vec = _apply_progression(tau_r, tau_d_vec0, tau_d0, 'individual')
         if is_varying_model:
             progress_print(f"[fit] source=individual | τd0={tau_d_vec[0]*1000:.2f}ms → τdN={tau_d_vec[-1]*1000:.2f}ms | mode={dec_mode}")
+
     else:  # 'average'
-        tau_r, tau_d0, slope, tau_d_vec0 = estimate_kinetics_from_average(
-            t, y_avg, stim_times,
-            taur_grid_ms=cfg['kin_taur_grid_ms'], taud0_grid_ms=cfg['kin_taud0_grid_ms'],
-            slope_grid_ms=cfg['kin_slope_grid_ms'], pre_zoom_s=cfg['pre_zoom_s'], post_zoom_s=cfg['post_zoom_s'],
-            isi=isi, weight_mode=weight_mode, weight_tau_s=weight_tau_s,
-            sg_window=cfg['sg_window'], sg_poly=cfg['sg_poly'], event_t0_s=event_t0_s,
-        )
-        # For linear/monotonic, also anchor to the last event using the average trace
-        if dec_mode in ('linear','free_monotonic'):
-            tau_last, amp_last = _estimate_last_tau(tau_r, tau_d_vec0[0])
-            tau_last_display, amp_last_display = float(tau_last), float(amp_last)
-            tau_d_vec0 = np.linspace(float(tau_d_vec0[0]), float(tau_last), n_pulses)
-        tau_d_vec_raw = np.asarray(tau_d_vec0, float)
-        tau_r, tau_d_vec = _apply_progression(tau_r, tau_d_vec0, tau_d_vec0[0])
+        # Average fit_source: fit each event on the average trace
+        if dec_mode == 'fixed':
+            # For fixed mode, use grid search for single tau
+            tau_r, tau_d0, slope, tau_d_vec0 = estimate_kinetics_from_average(
+                t, y_avg, stim_times,
+                taur_grid_ms=cfg['kin_taur_grid_ms'], taud0_grid_ms=cfg['kin_taud0_grid_ms'],
+                slope_grid_ms=cfg['kin_slope_grid_ms'], pre_zoom_s=cfg['pre_zoom_s'], post_zoom_s=cfg['post_zoom_s'],
+                isi=isi, weight_mode=weight_mode, weight_tau_s=weight_tau_s,
+                sg_window=cfg['sg_window'], sg_poly=cfg['sg_poly'], event_t0_s=event_t0_s,
+            )
+            tau_d_vec_raw = np.asarray(tau_d_vec0, float)
+        elif dec_mode in ('linear', 'free_monotonic'):
+            # Fit tau_r globally first
+            tau_r, tau_d0, slope, _ = estimate_kinetics_from_average(
+                t, y_avg, stim_times,
+                taur_grid_ms=cfg['kin_taur_grid_ms'], taud0_grid_ms=cfg['kin_taud0_grid_ms'],
+                slope_grid_ms=cfg['kin_slope_grid_ms'], pre_zoom_s=cfg['pre_zoom_s'], post_zoom_s=cfg['post_zoom_s'],
+                isi=isi, weight_mode=weight_mode, weight_tau_s=weight_tau_s,
+                sg_window=cfg['sg_window'], sg_poly=cfg['sg_poly'], event_t0_s=event_t0_s,
+            )
+            # Now fit each individual event on the average trace
+            tau_per_evt, amp_per_evt = _fit_all_events_on_average(tau_r, tau_d0)
+            tau_d_vec0 = tau_per_evt
+            tau_d_vec_raw = np.asarray(tau_per_evt, float)
+            tau_last_display = float(tau_per_evt[-1])
+            amp_last_display = float(amp_per_evt[-1])
+        else:
+            tau_r, tau_d0, slope, tau_d_vec0 = estimate_kinetics_from_average(
+                t, y_avg, stim_times,
+                taur_grid_ms=cfg['kin_taur_grid_ms'], taud0_grid_ms=cfg['kin_taud0_grid_ms'],
+                slope_grid_ms=cfg['kin_slope_grid_ms'], pre_zoom_s=cfg['pre_zoom_s'], post_zoom_s=cfg['post_zoom_s'],
+                isi=isi, weight_mode=weight_mode, weight_tau_s=weight_tau_s,
+                sg_window=cfg['sg_window'], sg_poly=cfg['sg_poly'], event_t0_s=event_t0_s,
+            )
+            tau_d_vec_raw = np.asarray(tau_d_vec0, float)
+
+        tau_r, tau_d_vec = _apply_progression(tau_r, tau_d_vec0, tau_d0, 'average')
         if is_varying_model:
             progress_print(f"[fit] source=average | τd0={tau_d_vec[0]*1000:.2f}ms → τdN={tau_d_vec[-1]*1000:.2f}ms | mode={dec_mode}")
 
@@ -1766,28 +1880,73 @@ def extract_metrics(
 
                 # τd progression panel
                 pulse_idx = np.arange(1, len(tau_d_vec) + 1, dtype=float)
+
+                # Step 1: Plot initial per-event estimates (individual measurements)
                 if tau_d_vec_raw is not None and np.size(tau_d_vec_raw) == len(tau_d_vec):
+                    # Plot as scatter points with connecting line to show structure
                     ax_tau.plot(
                         pulse_idx,
                         np.asarray(tau_d_vec_raw, float) * 1000.0,
                         marker='o',
-                        color='#9467bd',
+                        markersize=8,
+                        color='#d62728',
+                        linestyle=':',
                         linewidth=1.5,
-                        label='raw τd',
+                        alpha=0.8,
+                        zorder=3,
+                        label='initial per-event τd',
                     )
+
+                # Step 2: Plot constrained values (after clipping/anchoring for global mode)
+                if tau_d_vec_constrained is not None and np.size(tau_d_vec_constrained) == len(tau_d_vec):
+                    ax_tau.scatter(
+                        pulse_idx,
+                        np.asarray(tau_d_vec_constrained, float) * 1000.0,
+                        marker='x',
+                        s=80,
+                        color='#ff7f0e',
+                        linewidths=2,
+                        alpha=0.8,
+                        zorder=4,
+                        label='constrained τd (clipped)',
+                    )
+
+                # Step 3: Plot final progression fit
+                progression_label_map = {
+                    'fixed': 'fixed (median)',
+                    'linear': 'linear regression',
+                    'free_monotonic': 'monotonic spline'
+                }
+                progression_label = progression_label_map.get(dec_mode, dec_mode)
                 ax_tau.plot(
                     pulse_idx,
                     np.asarray(tau_d_vec, float) * 1000.0,
                     marker='s',
+                    markersize=6,
                     color='#2ca02c',
-                    linewidth=1.5,
-                    label=f"progressed τd ({dec_mode})",
+                    linewidth=2.5,
+                    alpha=0.9,
+                    zorder=5,
+                    label=f"final progression ({progression_label})",
                 )
+
+                # Add anchor point for global mode
+                if fit_source == 'global' and dec_mode in ('linear', 'free_monotonic'):
+                    mid_idx = n_pulses // 2
+                    ax_tau.axvline(
+                        mid_idx + 1,  # pulse_idx is 1-indexed
+                        color='gray',
+                        linestyle='--',
+                        alpha=0.5,
+                        linewidth=1.5,
+                        label=f'anchor (event {mid_idx + 1})'
+                    )
+
                 ax_tau.set_xlabel('Pulse #')
                 ax_tau.set_ylabel('τd (ms)')
-                ax_tau.set_title('Decay progression')
-                ax_tau.legend(loc='upper left', frameon=False, fontsize=8)
-                ax_tau.grid(True, alpha=0.2)
+                ax_tau.set_title(f'Decay progression (fit_source={fit_source}, mode={dec_mode})')
+                ax_tau.legend(loc='best', frameon=True, fontsize=8, framealpha=0.9)
+                ax_tau.grid(True, alpha=0.3)
 
                 fit_diag_figure.tight_layout()
                 try:
