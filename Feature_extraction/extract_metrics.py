@@ -1508,6 +1508,7 @@ def extract_metrics(
             tau_r = float(tr_b); tau_d0 = float(td0_b)
 
             # Prefer recut average for left panel if available
+            global_fit_params = {
                 'tau_rise': float(tau_r),
                 'tau_decay': float(tau_d0),
             }
