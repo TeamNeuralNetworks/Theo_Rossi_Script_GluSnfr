@@ -64,13 +64,16 @@ folders = [
 root_out = r"C:\\Users\\Antoine.Valera\\Desktop\\Testout"; os.makedirs(root_out, exist_ok=True)
 
 # Per-folder train_start (seconds). Default 0.998; override selected folders to 0.498
-default_start = 0.998
+default_start = 0.1
 train_start_by_folder = {
     folders[2]: 0.498,
     folders[3]: 0.498,
     folders[4]: 0.498,
     folders[5]: 0.498,
     folders[6]: 0.498,
+    folders[10]: 0.499,
+    folders[11]: 0.499,
+    folders[12]: 0.499,
 }
 
 # ISI control: default_isi applies to all unless overridden in isi_by_folder.
@@ -81,6 +84,14 @@ isi_by_folder = {
     folders[11]: 0.02,  # Theo_2_5_50Hz
     folders[12]: 0.02,  # Theo_4_50Hz
 }
+
+# add a debug skip that would select one condition and adjust isis_by_folder and train_start_by_folder accordingly, given the index to keep
+keep_expe_idx = 11
+if keep_expe_idx is not None:
+    folders = [folders[keep_expe_idx]]
+    train_start_by_folder = {folders[0]: train_start_by_folder.get(folders[0], default_start)}
+    isi_by_folder = {folders[0]: isi_by_folder.get(folders[0], default_isi)}
+
 
 summaries = {}
 per_trial_rows = []
@@ -134,7 +145,7 @@ for in_dir in folders:
                 'anchor_first_tau': False,
 
                 # === Event Model ===
-                'event_model': 'iglusnfr',
+                'event_model': 'double_exp',
                 'event_model_settings': {},
 
                 # === Recut/Averaging ===
@@ -160,7 +171,7 @@ for in_dir in folders:
                 'f0_window_s': 1.0,
 
                 # === Peak Detection ===
-                'peak_window_ms': 20.0,
+                'peak_window_ms': 19.0,
                 'peak_avg_points': 5,
                 'pre_peak_ms': 0.0,
 

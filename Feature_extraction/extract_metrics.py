@@ -894,6 +894,27 @@ def extract_metrics(
         raise ValueError("trials must have same number of samples as time")
     stim_times = float(train_start) + float(isi) * np.arange(int(n_pulses))
 
+    # ---- ISI-aware guards and defaults ----
+    isi = float(isi)
+    isi_ms = isi * 1000.0
+
+    # Peak window: auto if not user-overridden or too wide for ISI
+    if ('peak_window_ms' not in cfg) or (float(cfg['peak_window_ms']) >= isi_ms):
+        cfg['peak_window_ms'] = max(6.0, min(12.0, 0.45 * isi_ms))
+    if ('peak_avg_points' not in cfg) or (int(cfg['peak_avg_points']) > 5):
+        cfg['peak_avg_points'] = 3
+    if 'pre_peak_ms' not in cfg:
+        cfg['pre_peak_ms'] = 0.0
+
+    # Micro-shift: cap to a fraction of ISI
+    cfg['delta_max_s'] = min(float(cfg.get('delta_max_s', 0.002)), 0.25 * isi)
+
+    # Null-fit single-pulse needs some post window before next stim
+    cfg['null_min_post_zoom_s'] = min(float(cfg.get('null_min_post_zoom_s', 0.05)), 0.5 * isi)
+
+    # Recut event: keep 3 ms guard before next stimulus, never exceed 20 ms
+    _POST_EVT_MS = max(6.0, min(20.0, isi_ms - 3.0))
+
     # Preprocess trials: interpolate NaNs, optional bleach, then ΔF/F0 baseline
     baseline_mask = (t < float(train_start))
     # Fallback: if too few baseline points, use earliest 10% of the trace
@@ -1079,27 +1100,30 @@ def extract_metrics(
             )
             if need_snips:
                 t_rel, avg, snippets = build_median_recut_waveform(
-                    t, Yd, stim_times, pre_ms=5.0, post_ms=50.0,
-                    peak_win_ms=25.0, peak_search_pre_ms=0.0,
+                    t, Yd, stim_times, pre_ms=5.0, post_ms=_POST_EVT_MS,
+                    peak_win_ms=cfg['peak_window_ms'], peak_search_pre_ms=cfg['pre_peak_ms'],
                     oversample=int(cfg.get('recut_oversample', 1)),
                     projection=str(cfg.get('recut_projection', 'median')).lower(),
                     peak_recenter=peak_recenter,
                     return_snippets=True,
                 )
+
             else:
                 t_rel, avg = build_median_recut_waveform(
-                    t, Yd, stim_times, pre_ms=5.0, post_ms=50.0,
-                    peak_win_ms=25.0, peak_search_pre_ms=0.0,
+                    t, Yd, stim_times, pre_ms=5.0, post_ms=_POST_EVT_MS,
+                    peak_win_ms=cfg['peak_window_ms'], peak_search_pre_ms=cfg['pre_peak_ms'],
                     oversample=int(cfg.get('recut_oversample', 1)),
                     projection=str(cfg.get('recut_projection', 'median')).lower(),
                     peak_recenter=peak_recenter,
                 )
+                snippets = None
             if t_rel is None or avg is None:
                 raise ValueError('recut_average unavailable')
             # Capture snippets and recut outputs for outer scope plotting if returned
             nonlocal recut_snippets, recut_t_rel, recut_avg
             recut_t_rel = t_rel
-            recut_avg = avg
+            recut_avg  = avg
+            recut_snippets = snippets
             if 'snippets' in locals():
                 recut_snippets = snippets
             # Grid search on (tau_r, tau_d0) using current kernel
@@ -1439,24 +1463,37 @@ def extract_metrics(
 
     if fit_source == 'global':
         # Match the demo: recut + average all events then fit via curve_fit
-        # Determine whether downstream helpers should return snippets
         need_snips = bool(
             cfg.get('plot', {}).get('enabled', False)
             or cfg.get('recut_snippets', False)
         )
         res = fit_average_event(
             t, Yd, event_model, stim_times,
-            oversample=int(cfg.get('recut_oversample', 1)),
-            projection=str(cfg.get('recut_projection', 'median')).lower(),
+            oversample=int(cfg['recut_oversample']),
+            projection=str(cfg['recut_projection']).lower(),
             peak_recenter=peak_recenter,
             return_snippets=need_snips,
         )
-        if res is None:
-            # Fallback to recut median or average grid search.
-            # Always prefer displaying the recut-median waveform in the left
-            # event panel when the parametric fit fails so the figure still
-            # shows the correct global average event (rather than the
-            # full-trace average around the first stimulus).
+
+        fitted = None
+        if res is not None:
+            fitted, t_avg_evt, y_avg_evt = res
+
+            # Reject clearly invalid global fits for tight ISI
+            td_try = float(fitted.get('tau_decay', fitted.get('tau_decay_fast', np.inf)))
+            if (not np.isfinite(td_try)) or (td_try > 1.2 * isi):
+                fitted = None  # force fallback
+
+            # Pull recut outputs attached by helper (if any)
+            if isinstance(fitted, dict) and ('_recut' in fitted):
+                try:
+                    t_rel_s, avg_s, snippets_s = fitted.pop('_recut')
+                    recut_t_rel, recut_avg, recut_snippets = t_rel_s, avg_s, snippets_s
+                except Exception:
+                    pass
+
+        if fitted is None:
+            # ---- Fallback path: recut/grid on average ----
             tr_b, td0_b = _estimate_from_recut_average()
             if tr_b is None:
                 tr_b, td0_b, slope, tau_d_vec0 = estimate_kinetics_from_average(
@@ -1467,8 +1504,8 @@ def extract_metrics(
                     sg_window=cfg['sg_window'], sg_poly=cfg['sg_poly'], event_t0_s=event_t0_s,
                 )
             tau_r = float(tr_b); tau_d0 = float(td0_b)
-            # Use the recut average if available; otherwise fall back to the
-            # train-aligned average series.
+
+            # Prefer recut average for left panel if available
             if (recut_t_rel is not None) and (recut_avg is not None):
                 try:
                     t_avg_evt = np.asarray(recut_t_rel, float) * 1000.0
@@ -1479,56 +1516,44 @@ def extract_metrics(
             else:
                 t_avg_evt = (t - float(train_start)) * 1000.0
                 y_avg_evt = y_avg
+            event_t0_s = 0.0  # no peak shift available in fallback
         else:
-            fitted, t_avg_evt, y_avg_evt = res
-            # If the fit helper attached recut outputs to the params dict, capture them
-            try:
-                if isinstance(fitted, dict) and '_recut' in fitted:
-                    t_rel_s, avg_s, snippets_s = fitted.pop('_recut')
-                    recut_t_rel = t_rel_s
-                    recut_avg = avg_s
-                    recut_snippets = snippets_s
-            except Exception:
-                pass
+            # ---- Use parameters from fitted dict ----
             tau_r = float(fitted.get('tau_rise', np.nan))
             tau_d0 = float(fitted.get('tau_decay', np.nan))
-            event_t0_s = float(fitted.get('t_peak', 0.0)) / 1000.0
-
-            # For multi-component models, try to get the primary decay component
             if not np.isfinite(tau_d0):
-                # Try fast component first (most relevant for event decay)
                 tau_d0 = float(fitted.get('tau_decay_fast', np.nan))
                 if not np.isfinite(tau_d0):
-                    # Try slow component as fallback
                     tau_d0 = float(fitted.get('tau_decay_slow', np.nan))
-
-            # If cooperative, adopt fitted n_coop for the kernel and re-apply
             if not np.isfinite(tau_r):
                 tau_r = 0.002
             if not np.isfinite(tau_d0):
-                tau_d0 = 0.010  # Final fallback default
+                tau_d0 = 0.010
+            event_t0_s = float(fitted.get('t_peak', 0.0)) / 1000.0
+
+            # Carry over cooperative n if present (unless user forced a value)
             cfg.setdefault('event_model_settings', {})
-            if event_model == 'cooperative' and ('n_coop' in fitted):
-                if 'n_coop' not in explicit_em_settings:
-                    cfg['event_model_settings']['n_coop'] = float(fitted['n_coop'])
+            if event_model == 'cooperative' and ('n_coop' in fitted) and ('n_coop' not in explicit_em_settings):
+                cfg['event_model_settings']['n_coop'] = float(fitted['n_coop'])
             elif event_model not in varying_supported_names:
                 for k, v in fitted.items():
-                    if k not in ('amp', 't_peak') and np.isfinite(v):
-                        if k not in explicit_em_settings:
-                            cfg['event_model_settings'][k] = float(v)
+                    if k not in ('amp', 't_peak') and np.isfinite(v) and (k not in explicit_em_settings):
+                        cfg['event_model_settings'][k] = float(v)
+
+            # Optional override
             tau_decay_override = cfg['event_model_settings'].get('tau_decay')
             if tau_decay_override is not None:
                 try:
                     tau_decay_override = float(tau_decay_override)
+                    if np.isfinite(tau_decay_override):
+                        tau_d0 = tau_decay_override
                 except Exception:
-                    tau_decay_override = None
-            if tau_decay_override is not None and np.isfinite(tau_decay_override):
-                tau_d0 = float(tau_decay_override)
+                    pass
+
             ev_model_name, n_coop_effective = _apply_event_model_from_cfg()
             is_varying_model = ev_model_name in varying_supported_names
-            progress_print(
-                f"[fit][global] curve_fit τr={tau_r*1000:.2f}ms τd={tau_d0*1000:.2f}ms model={event_model}"
-            )
+            progress_print(f"[fit][global] curve_fit τr={tau_r*1000:.2f}ms τd={tau_d0*1000:.2f}ms model={event_model}")
+
 
         # Global fit_source: anchor global tau to middle event, then constrain per-event fits
         if dec_mode == 'fixed':
