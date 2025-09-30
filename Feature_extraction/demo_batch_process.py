@@ -139,7 +139,7 @@ for in_dir in folders:
                 'sg_poly': 2,
 
                 # === Kinetics Estimation ===
-                'fit_source': 'global',
+                'fit_source': 'average',
                 'decay_progression_mode': 'linear',
                 'anchor_final_tau': True,
                 'anchor_first_tau': False,

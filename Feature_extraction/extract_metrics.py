@@ -1176,6 +1176,8 @@ def extract_metrics(
 
         Fits only the decay after the event peak, focusing on the post-event window
         to minimize contamination from subsequent events in the train.
+        Returns the fast decay estimate, amplitude, and optional extra parameter
+        estimates when available.
         """
         try:
             st = stim_times[event_idx] + event_t0_s
@@ -1192,7 +1194,7 @@ def extract_metrics(
 
             if tf.size < 3:
                 # Not enough points to fit
-                return float(tau_d0_fallback), 1.0
+                return float(tau_d0_fallback), 1.0, None
 
             tau_d_grid_ms = np.array(cfg['kin_taud0_grid_ms'], float)
             tau_d_grid = tau_d_grid_ms / 1000.0
@@ -1208,26 +1210,79 @@ def extract_metrics(
                     best = (err, td, amp)
 
             tau_evt = float(best[1]); amp_evt = float(best[2])
-            return tau_evt, amp_evt
+
+            extra_params = None
+            # Attempt a richer per-event fit when progression is not fixed
+            if dec_mode in ('linear', 'free_monotonic'):
+                try:
+                    local_t_ms = (tf - st) * 1000.0
+                    if local_t_ms.size and np.isfinite(local_t_ms[0]):
+                        local_t_ms = local_t_ms - float(local_t_ms[0])
+                    fit_res = fit_average_event(
+                        local_t_ms,
+                        yf,
+                        event_model,
+                        window_ms=(0.0, float(local_t_ms[-1]) if local_t_ms.size else 50.0),
+                    )
+                    if fit_res is not None:
+                        params_dict = fit_res[0]
+                        if isinstance(params_dict, dict):
+                            extra_params = {
+                                k: float(v)
+                                for k, v in params_dict.items()
+                                if k not in {'amp', 't_peak', '_recut'}
+                            }
+                except Exception:
+                    extra_params = None
+
+            return tau_evt, amp_evt, extra_params
         except Exception:
-            return float(tau_d0_fallback), 1.0
+            return float(tau_d0_fallback), 1.0, None
 
     def _fit_all_events_on_average(tau_r_local, tau_d0_fallback):
         """Fit tau_d for each event individually on the average trace."""
         tau_vec = []
         amp_vec = []
+        param_series: Dict[str, List[float]] = {}
         for i in range(n_pulses):
-            tau_i, amp_i = _estimate_single_event_tau(i, tau_r_local, tau_d0_fallback)
+            tau_i, amp_i, extra = _estimate_single_event_tau(i, tau_r_local, tau_d0_fallback)
             tau_vec.append(tau_i)
             amp_vec.append(amp_i)
+
+            filtered_params: Dict[str, float] = {}
+            if isinstance(extra, dict):
+                for key, val in extra.items():
+                    if key in {'amp', 't_peak', '_recut'}:
+                        continue
+                    try:
+                        filtered_params[key] = float(val)
+                    except Exception:
+                        filtered_params[key] = np.nan
+
+            all_keys = set(param_series.keys()) | set(filtered_params.keys())
+            for key in all_keys:
+                param_series.setdefault(key, [])
+                series = param_series[key]
+                while len(series) < i:
+                    series.append(np.nan)
+                if key in filtered_params:
+                    val = filtered_params[key]
+                    series.append(float(val) if np.isfinite(val) else np.nan)
+                else:
+                    series.append(np.nan)
+
         tau_array = np.array(tau_vec, float)
         amp_array = np.array(amp_vec, float)
+        for key, values in list(param_series.items()):
+            while len(values) < n_pulses:
+                values.append(np.nan)
+            param_series[key] = np.array(values, float)
         try:
             tau_ms_str = ", ".join(f"{v*1000:.1f}" for v in tau_array)
             progress_print(f"[per-event fit] Individual τd (ms): [{tau_ms_str}]")
         except Exception:
             pass
-        return tau_array, amp_array
+        return tau_array, amp_array, param_series
 
     def _robust_linear_fit(x, y, max_iter=10, huber_delta=2.0):
         """Robust linear regression using IRLS with Huber weights.
@@ -1462,6 +1517,7 @@ def extract_metrics(
     amp_last_display = None
     tau_d_vec_raw = None  # Initial per-event estimates before any constraints
     tau_d_vec_constrained = None  # After clipping/anchoring (for global mode)
+    per_event_param_map: Dict[str, np.ndarray] = {}
 
     if fit_source == 'global':
         # Match the demo: recut + average all events then fit via curve_fit
@@ -1589,7 +1645,8 @@ def extract_metrics(
             tau_d_vec_constrained = None  # No constraints applied in fixed mode
         elif dec_mode in ('linear', 'free_monotonic'):
             # Fit tau for each event on average trace
-            tau_per_evt, amp_per_evt = _fit_all_events_on_average(tau_r, tau_d0)
+            tau_per_evt, amp_per_evt, param_map = _fit_all_events_on_average(tau_r, tau_d0)
+            per_event_param_map = {k: np.asarray(v, float) for k, v in param_map.items()}
             tau_d_vec_raw = np.asarray(tau_per_evt, float)
 
             # Anchor global tau at middle event
@@ -1646,6 +1703,7 @@ def extract_metrics(
             tau_d_vec0 = np.full(n_pulses, 0.010)
         tau_d0 = float(tau_d_vec0[0])
         tau_d_vec_raw = np.asarray(tau_d_vec0, float)
+        per_event_param_map = {}
         tau_r, tau_d_vec = _apply_progression(tau_r, tau_d_vec0, tau_d0, 'individual')
         if is_varying_model:
             progress_print(f"[fit] source=individual | τd0={tau_d_vec[0]*1000:.2f}ms → τdN={tau_d_vec[-1]*1000:.2f}ms | mode={dec_mode}")
@@ -1672,7 +1730,8 @@ def extract_metrics(
                 sg_window=cfg['sg_window'], sg_poly=cfg['sg_poly'], event_t0_s=event_t0_s,
             )
             # Now fit each individual event on the average trace
-            tau_per_evt, amp_per_evt = _fit_all_events_on_average(tau_r, tau_d0)
+            tau_per_evt, amp_per_evt, param_map = _fit_all_events_on_average(tau_r, tau_d0)
+            per_event_param_map = {k: np.asarray(v, float) for k, v in param_map.items()}
             tau_d_vec0 = tau_per_evt
             tau_d_vec_raw = np.asarray(tau_per_evt, float)
             tau_last_display = float(tau_per_evt[-1])
@@ -1791,6 +1850,71 @@ def extract_metrics(
             entry['anchors'] = anchors
             interpolated_settings.append(entry)
 
+        def _progress_metric_series(
+            raw_series,
+            base_value,
+            *,
+            min_value: float = 1e-4,
+            clip: Optional[Tuple[Optional[float], Optional[float]]] = None,
+        ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray]]:
+            if raw_series is None:
+                return None, None, None
+            arr_raw = np.asarray(raw_series, float)
+            if arr_raw.size != n_pulses or not np.any(np.isfinite(arr_raw)):
+                return None, None, None
+
+            finite_vals = arr_raw[np.isfinite(arr_raw)]
+            anchor_val = None
+            if base_value is not None and np.isfinite(base_value):
+                anchor_val = float(base_value)
+
+            fallback_candidates = []
+            if anchor_val is not None:
+                fallback_candidates.append(anchor_val)
+            if finite_vals.size:
+                fallback_candidates.append(float(np.nanmedian(finite_vals)))
+                fallback_candidates.append(float(finite_vals[0]))
+
+            fallback_val = None
+            for candidate in fallback_candidates:
+                if np.isfinite(candidate):
+                    fallback_val = float(candidate)
+                    break
+            if fallback_val is None:
+                fallback_val = 0.010
+
+            if min_value is not None:
+                fallback_val = max(float(min_value), float(fallback_val))
+
+            arr_clean = arr_raw.copy()
+            arr_clean[~np.isfinite(arr_clean)] = fallback_val
+            if min_value is not None:
+                arr_clean = np.maximum(arr_clean, float(min_value))
+
+            arr_constrained = arr_clean.copy()
+            if fit_source == 'global' and anchor_template['mid'] and anchor_val is not None:
+                idx = anchor_template['mid_index']
+                if 0 <= idx < n_pulses:
+                    arr_constrained[idx] = anchor_val
+            if min_value is not None:
+                arr_constrained = np.maximum(arr_constrained, float(min_value))
+
+            _, progressed = _apply_progression(tau_r, arr_constrained, fallback_val, fit_source)
+            progressed = np.asarray(progressed, float)
+
+            if clip is not None:
+                lo, hi = clip
+                if lo is not None:
+                    progressed = np.maximum(progressed, float(lo))
+                    arr_constrained = np.maximum(arr_constrained, float(lo))
+                    arr_clean = np.maximum(arr_clean, float(lo))
+                if hi is not None:
+                    progressed = np.minimum(progressed, float(hi))
+                    arr_constrained = np.minimum(arr_constrained, float(hi))
+                    arr_clean = np.minimum(arr_clean, float(hi))
+
+            return progressed, arr_clean, arr_constrained
+
         if np.isfinite(tau_r):
             global_fit_params.setdefault('tau_rise', float(tau_r))
         if np.isfinite(tau_d0):
@@ -1822,9 +1946,30 @@ def extract_metrics(
         slow_seq = None
         slow_seq_raw = None
         slow_seq_constrained = None
+        slow_from_fit = False
         slow_base = global_fit_params.get('tau_decay_slow')
+        if dec_mode in ('linear', 'free_monotonic'):
+            slow_seq, slow_seq_raw, slow_seq_constrained = _progress_metric_series(
+                per_event_param_map.get('tau_decay_slow'),
+                slow_base,
+            )
+            if slow_seq is not None:
+                slow_from_fit = True
+                _register_setting(
+                    'tau_decay_slow',
+                    slow_seq,
+                    raw=slow_seq_raw,
+                    constrained=slow_seq_constrained,
+                    label=_format_display('tau_decay_slow'),
+                    unit='ms',
+                    scale=1000.0,
+                    note='slower component (directly fitted progression)',
+                    derivation='fitted_progression',
+                )
+
         if (
-            slow_base is not None
+            slow_seq is None
+            and slow_base is not None
             and np.isfinite(slow_base)
             and fast_global is not None
             and fast_global > 0
@@ -1883,17 +2028,41 @@ def extract_metrics(
                     label=_format_display('', 'τ_slow/τ_fast'),
                     unit='',
                     scale=1.0,
-                    note='slow/fast decay ratio (global constant)',
-                    derivation='global_ratio_constant',
+                    note='slow/fast decay ratio (from fitted slow & fast progressions)' if slow_from_fit else 'slow/fast decay ratio (global constant)',
+                    derivation='derived_from_fitted_components' if slow_from_fit else 'global_ratio_constant',
                 )
 
         rise_base = global_fit_params.get('tau_rise', float(tau_r) if np.isfinite(tau_r) else np.nan)
+        rise_seq = None
+        rise_raw = None
+        rise_constrained = None
+        rise_from_fit = False
+        if dec_mode in ('linear', 'free_monotonic'):
+            rise_seq, rise_raw, rise_constrained = _progress_metric_series(
+                per_event_param_map.get('tau_rise'),
+                rise_base,
+            )
+            if rise_seq is not None:
+                rise_from_fit = True
+                _register_setting(
+                    'tau_rise',
+                    rise_seq,
+                    raw=rise_raw,
+                    constrained=rise_constrained,
+                    label=_format_display('tau_rise'),
+                    unit='ms',
+                    scale=1000.0,
+                    direction_note='lower = faster rise',
+                    note='rise component (directly fitted progression)',
+                    derivation='fitted_progression',
+                )
+
         if (
-            fast_global is not None
-            and fast_global > 0
+            rise_seq is None
             and rise_base is not None
             and np.isfinite(rise_base)
-            and rise_base > 0
+            and fast_global is not None
+            and fast_global > 0
         ):
             ratio_rise = float(rise_base) / float(fast_global)
             if np.isfinite(ratio_rise) and ratio_rise > 0:
@@ -1916,7 +2085,32 @@ def extract_metrics(
                 )
 
         frac_fast = global_fit_params.get('frac_fast')
-        if frac_fast is not None and np.isfinite(frac_fast):
+        frac_seq = None
+        frac_raw = None
+        frac_constrained = None
+        frac_from_fit = False
+        if dec_mode in ('linear', 'free_monotonic'):
+            frac_seq, frac_raw, frac_constrained = _progress_metric_series(
+                per_event_param_map.get('frac_fast'),
+                frac_fast,
+                min_value=1e-6,
+                clip=(0.0, 1.0),
+            )
+            if frac_seq is not None:
+                frac_from_fit = True
+                _register_setting(
+                    'frac_fast',
+                    frac_seq,
+                    raw=frac_raw,
+                    constrained=frac_constrained,
+                    label=_format_display('frac_fast'),
+                    unit='',
+                    scale=1.0,
+                    note='fast component weight (directly fitted progression)',
+                    derivation='fitted_progression',
+                )
+
+        if not frac_from_fit and frac_fast is not None and np.isfinite(frac_fast):
             frac_arr = np.full(n_pulses, float(frac_fast), float)
             _register_setting(
                 'frac_fast',
@@ -2367,12 +2561,31 @@ def extract_metrics(
         # Fit diagnostic figure: show immediately after average figure
         if cfg.get('fit_diagnostic_plot', False) and interpolated_settings:
             try:
-                n_cols = 1 + len(interpolated_settings)
-                fig_width = 5.5 + 3.2 * len(interpolated_settings)
-                fit_diag_figure, axes = plt.subplots(1, n_cols, figsize=(fig_width, 4.2))
-                axes_arr = np.atleast_1d(axes)
-                ax_w = axes_arr[0]
-                setting_axes = axes_arr[1:]
+                # Layout with uniform setting panels and a dedicated legend panel
+                # at the top-left of the settings grid. Weight kernel remains
+                # full-width on the first row.
+                import math
+                # Order settings (put fast decay first if present)
+                settings_ordered = list(interpolated_settings)
+                for i, info in enumerate(interpolated_settings):
+                    name_i = str(info.get('name', '')).lower()
+                    if name_i in {'tau_decay', 'tau_decay_fast'} and i != 0:
+                        settings_ordered.insert(0, settings_ordered.pop(i))
+                        break
+
+                total_panels = 1 + len(settings_ordered)  # +1 for legend
+                n_cols = min(3, total_panels) if total_panels > 0 else 1
+                n_rows = int(math.ceil(total_panels / float(n_cols)))
+
+                fig_width = 5.5 + 3.2 * n_cols
+                fit_diag_figure = plt.figure(figsize=(fig_width, 6.8))
+                height_ratios = [1.2] + [1.0] * n_rows
+                gs_fd = fit_diag_figure.add_gridspec(
+                    1 + n_rows, n_cols, height_ratios=height_ratios, hspace=0.28, wspace=0.22
+                )
+
+                # Weight kernel axis (full width)
+                ax_w = fit_diag_figure.add_subplot(gs_fd[0, :])
 
                 # Weight kernel panel
                 if weight_mode == 'savgol' and y_sg_avg is None:
@@ -2397,7 +2610,7 @@ def extract_metrics(
                     ax_w.set_title(f'Weight kernel (τ={weight_tau_s*1000:.1f} ms)')
                 else:
                     ax_w.set_title('Weight kernel')
-                ax_w.legend(loc='upper right', frameon=False, fontsize=8)
+                # No per-axis legend; a global legend is rendered separately
                 ax_w.grid(True, alpha=0.2)
 
                 anchor_styles = {
@@ -2431,7 +2644,6 @@ def extract_metrics(
                             linewidth=1.5,
                             alpha=0.8,
                             zorder=3,
-                            label=f'initial per-event {label}',
                         )
 
                     constrained_vals = info.get('constrained')
@@ -2445,7 +2657,6 @@ def extract_metrics(
                             linewidths=2,
                             alpha=0.8,
                             zorder=4,
-                            label=f'constrained {label}',
                         )
 
                     ax.plot(
@@ -2457,10 +2668,8 @@ def extract_metrics(
                         linewidth=2.5,
                         alpha=0.9,
                         zorder=5,
-                        label=f"final progression ({info.get('progression_label', 'final')})",
                     )
 
-                    legend_tags = set()
                     for anchor in info.get('anchors', []):
                         kind = anchor.get('kind')
                         style = anchor_styles.get(kind)
@@ -2474,22 +2683,12 @@ def extract_metrics(
                             continue
                         y_disp = value * scale
                         x_pos = pulses[idx]
-                        label_text = None
-                        if kind not in legend_tags:
-                            descriptor = anchor_names.get(kind, kind)
-                            unit_suffix = f" {unit}" if unit else ''
-                            if kind == 'mid':
-                                label_text = f"anchor: {descriptor} (global {label}={y_disp:.2f}{unit_suffix})"
-                            else:
-                                label_text = f"anchor: {descriptor} ({label}={y_disp:.2f}{unit_suffix})"
-                            legend_tags.add(kind)
                         ax.axvline(
                             x_pos,
                             color=style['color'],
                             linestyle=style['vline'],
                             alpha=0.6,
                             linewidth=2.0,
-                            label=label_text,
                         )
                         ax.axhline(
                             y_disp,
@@ -2513,17 +2712,41 @@ def extract_metrics(
                     ax.set_xlabel('Pulse #')
                     ylabel = label if not unit else f"{label} ({unit})"
                     ax.set_ylabel(ylabel)
-                    title = f"{label} progression (fit_source={info.get('fit_source')}, mode={info.get('decay_progression_mode')})"
-                    if info.get('direction_note'):
-                        title += f"\n{info['direction_note']}"
-                    if info.get('note'):
-                        title += f"\n{info['note']}"
-                    ax.set_title(title)
-                    ax.legend(loc='best', frameon=True, fontsize=8, framealpha=0.9)
+                    # Simplify titles: show only the parameter label
+                    ax.set_title(label)
                     ax.grid(True, alpha=0.3)
 
-                for axis, setting_info in zip(setting_axes, interpolated_settings):
-                    _plot_setting_axis(axis, setting_info)
+                # Legend panel at top-left of settings grid
+                from matplotlib.lines import Line2D
+                ax_leg = fit_diag_figure.add_subplot(gs_fd[1, 0])
+                ax_leg.axis('off')
+                handles = [
+                    Line2D([0], [0], marker='o', color='#d62728', linestyle=':', linewidth=1.5,
+                           markersize=8, label='initial per-event', markerfacecolor='#d62728'),
+                    Line2D([0], [0], marker='x', color='#ff7f0e', linestyle='None',
+                           markersize=8, markeredgewidth=2, label='constrained'),
+                    Line2D([0], [0], marker='s', color='#2ca02c', linestyle='-', linewidth=2.5,
+                           markersize=6, label='final progression'),
+                    Line2D([0], [0], marker='s', color='green', linestyle='-', linewidth=2.0,
+                           markersize=8, label='anchor: first'),
+                    Line2D([0], [0], marker='D', color='#1f77b4', linestyle='--', linewidth=2.0,
+                           markersize=8, label='anchor: mid'),
+                    Line2D([0], [0], marker='*', color='purple', linestyle='-.', linewidth=2.0,
+                           markersize=12, label='anchor: final'),
+                ]
+                ax_leg.legend(handles=handles, loc='center', ncol=3, frameon=True, fontsize=9, framealpha=0.9, title='Legend')
+
+                # Fill the remaining slots row-major, skipping the legend cell
+                idx = 0
+                for r in range(1, 1 + n_rows):
+                    for c in range(n_cols):
+                        if r == 1 and c == 0:
+                            continue  # legend cell already filled
+                        if idx >= len(settings_ordered):
+                            break
+                        ax_s = fit_diag_figure.add_subplot(gs_fd[r, c])
+                        _plot_setting_axis(ax_s, settings_ordered[idx])
+                        idx += 1
 
                 fit_diag_figure.tight_layout()
                 try:
