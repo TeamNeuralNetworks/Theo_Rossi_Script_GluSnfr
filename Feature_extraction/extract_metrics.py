@@ -1876,6 +1876,49 @@ def extract_metrics(
         if is_varying_model:
             progress_print(f"[fit] source=average | τd0={tau_d_vec[0]*1000:.2f}ms → τdN={tau_d_vec[-1]*1000:.2f}ms | mode={dec_mode}")
 
+        # Extract per-trial event snippets for visualization in average/individual mode
+        if fit_source in ('average', 'individual') and Yd.shape[1] > 0:
+            try:
+                # Extract first event from each trial for overlay visualization
+                snippets_list = []
+                pre_s = cfg.get('pre_zoom_s', 0.15)
+                post_s = min(isi, cfg.get('post_zoom_s', 0.60)) if isi > 0 else cfg.get('post_zoom_s', 0.60)
+
+                # Use first event time
+                if len(stim_times) > 0:
+                    evt_time = stim_times[0] + event_t0_s
+                    t_start = evt_time - pre_s
+                    t_end = evt_time + post_s
+
+                    # Create time masks once
+                    trial_mask = (t >= t_start) & (t <= t_end)
+                    baseline_mask = (t >= t_start) & (t < evt_time)
+
+                    if np.any(trial_mask):
+                        # Extract snippet from each trial with baseline normalization
+                        for trial_idx in range(Yd.shape[1]):
+                            y_trial = Yd[trial_mask, trial_idx]
+                            if np.isfinite(y_trial).any():
+                                # Calculate baseline from pre-stimulus period
+                                y_baseline_region = Yd[baseline_mask, trial_idx]
+                                if np.isfinite(y_baseline_region).any():
+                                    baseline = float(np.nanmean(y_baseline_region))
+                                else:
+                                    baseline = float(np.nanmean(y_trial[:max(1, len(y_trial)//10)]))
+
+                                # Baseline-normalize by subtracting baseline
+                                y_normalized = y_trial - baseline
+                                snippets_list.append(y_normalized)
+
+                        if snippets_list:
+                            # Create relative time vector
+                            recut_t_rel = t[trial_mask] - evt_time
+                            recut_snippets = snippets_list
+                            # Calculate average after baseline normalization
+                            recut_avg = np.nanmean(np.column_stack(snippets_list), axis=1) if len(snippets_list) > 1 else snippets_list[0]
+            except Exception:
+                pass
+
     # Build interpolated-setting summaries for diagnostics and downstream use
     anchor_first_cfg = bool(cfg.get('anchor_first_tau', False))
     anchor_final_cfg = bool(cfg.get('anchor_final_tau', True))
@@ -2428,7 +2471,34 @@ def extract_metrics(
             min_x = -3.0
             max_x = max(isi_ms - 3.0, 0.0)
             m0 = (t_ms_evt >= min_x) & (t_ms_evt < max_x)
-            axL.plot(t_ms_evt[m0], y_evt[m0], color='k', lw=1.5, label='Average')
+
+            # Plot behavior depends on fit_source mode
+            if fit_source in ('average', 'individual') and recut_snippets is not None:
+                # Average/individual mode: show all per-event snippets overlapping
+                try:
+                    t_rel_ms = recut_t_rel * 1000.0 if recut_t_rel is not None else t_ms_evt
+                    # Plot individual snippets in light gray
+                    for i, snippet in enumerate(recut_snippets):
+                        snippet_arr = np.asarray(snippet, float)
+                        if snippet_arr.size == t_rel_ms.size:
+                            m_snip = (t_rel_ms >= min_x) & (t_rel_ms < max_x)
+                            axL.plot(t_rel_ms[m_snip], snippet_arr[m_snip],
+                                   color='gray', alpha=0.3, lw=0.8, zorder=1)
+                    # Plot average on top in black
+                    if recut_avg is not None:
+                        avg_arr = np.asarray(recut_avg, float)
+                        if avg_arr.size == t_rel_ms.size:
+                            m_avg = (t_rel_ms >= min_x) & (t_rel_ms < max_x)
+                            axL.plot(t_rel_ms[m_avg], avg_arr[m_avg],
+                                   color='k', lw=1.8, label='Average', zorder=2)
+                    else:
+                        axL.plot(t_ms_evt[m0], y_evt[m0], color='k', lw=1.5, label='Average', zorder=2)
+                except Exception as e:
+                    # Fallback to simple average plot
+                    axL.plot(t_ms_evt[m0], y_evt[m0], color='k', lw=1.5, label='Average')
+            else:
+                # Global mode: show single averaged event (recut template)
+                axL.plot(t_ms_evt[m0], y_evt[m0], color='k', lw=1.5, label='Average')
             # Overlay best-fit library model matching current kernel choice
             try:
                 try:
@@ -2527,12 +2597,33 @@ def extract_metrics(
             axL.set_xlim(min_x, max_x)
             # Autoscale y with a small margin to avoid a squashed panel
             try:
-                y_slice = y_evt[m0]
-                ymins = np.nanmin(y_slice) if np.size(y_slice) else 0.0
-                ymaxs = np.nanmax(y_slice) if np.size(y_slice) else 1.0
+                # For average/individual mode with snippets, scale to snippet data
+                if fit_source in ('average', 'individual') and recut_snippets is not None and len(recut_snippets) > 0:
+                    # Collect all snippet values in the display window
+                    all_vals = []
+                    t_rel_ms = recut_t_rel * 1000.0 if recut_t_rel is not None else t_ms_evt
+                    m_window = (t_rel_ms >= min_x) & (t_rel_ms < max_x)
+                    for snippet in recut_snippets:
+                        snippet_arr = np.asarray(snippet, float)
+                        if snippet_arr.size == t_rel_ms.size:
+                            all_vals.extend(snippet_arr[m_window][np.isfinite(snippet_arr[m_window])])
+                    if all_vals:
+                        # Use 5th and 95th percentile to exclude outliers
+                        ymins = float(np.percentile(all_vals, 5))
+                        ymaxs = float(np.percentile(all_vals, 95))
+                    else:
+                        ymins, ymaxs = 0.0, 1.0
+                else:
+                    # Global mode: use y_evt
+                    y_slice = y_evt[m0]
+                    ymins = np.nanmin(y_slice) if np.size(y_slice) else 0.0
+                    ymaxs = np.nanmax(y_slice) if np.size(y_slice) else 1.0
+
+                # Include model fit in Y range
                 if 'yhat_ev' in locals():
                     ymins = min(ymins, float(np.nanmin(yhat_ev)))
                     ymaxs = max(ymaxs, float(np.nanmax(yhat_ev)))
+
                 span = max(1e-6, ymaxs - ymins)
                 pad = 0.1 * span
                 axL.set_ylim(ymins - pad, ymaxs + pad)
