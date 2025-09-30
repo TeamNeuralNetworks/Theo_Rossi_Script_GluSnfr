@@ -123,6 +123,7 @@ DEFAULTS = {
     #  - 'free_monotonic': interpolate between first and last τd, non-decreasing
     #  - 'linear': non-negative slope linear regression across pulses
     'decay_progression_mode': 'linear',
+    'anchor_first_tau': False,  # If True, anchor first event's tau as minimum (fastest decay)
     'anchor_final_tau': True,  # If True, anchor last event's tau as maximum (most reliable, no following events)
     # NNLS weight control
     'nnls_weight_mode': 'uniform',  # 'uniform', 'linear', 'exponential', 'savgol'
@@ -1202,6 +1203,80 @@ def extract_metrics(
             pass
         return tau_array, amp_array
 
+    def _robust_linear_fit(x, y, max_iter=10, huber_delta=2.0):
+        """Robust linear regression using IRLS with Huber weights.
+
+        Args:
+            x: Independent variable (pulse indices)
+            y: Dependent variable (tau values)
+            max_iter: Maximum IRLS iterations
+            huber_delta: Huber threshold for outlier detection
+
+        Returns:
+            (a, b): intercept and slope
+        """
+        x = np.asarray(x, float)
+        y = np.asarray(y, float)
+
+        if len(x) < 2:
+            return float(y[0]) if len(y) > 0 else 0.0, 0.0
+
+        # Initial OLS fit
+        A = np.column_stack([np.ones_like(x), x])
+        try:
+            coef, _, _, _ = np.linalg.lstsq(A, y, rcond=None)
+            a, b = float(coef[0]), float(coef[1])
+        except Exception:
+            return float(y[0]), 0.0
+
+        # IRLS iterations
+        weights = np.ones_like(y)
+        for iter_num in range(max_iter):
+            # Compute residuals
+            yfit = a + b * x
+            residuals = y - yfit
+
+            # Robust scale estimate (MAD)
+            mad = float(np.nanmedian(np.abs(residuals - np.nanmedian(residuals))))
+            if mad < 1e-10:
+                break
+            scale = 1.4826 * mad  # Scale factor for normal distribution
+
+            # Huber weights
+            normalized_resid = np.abs(residuals) / scale
+            weights = np.where(
+                normalized_resid <= huber_delta,
+                1.0,
+                huber_delta / normalized_resid
+            )
+
+            # Log outliers on first iteration
+            if iter_num == 0:
+                outlier_mask = weights < 0.95
+                if np.any(outlier_mask):
+                    outlier_indices = np.where(outlier_mask)[0]
+                    try:
+                        outlier_str = ", ".join(f"event {int(x[i])+1}(τ={y[i]*1000:.1f}ms,w={weights[i]:.2f})"
+                                               for i in outlier_indices)
+                        progress_print(f"[robust fit] Detected outliers: {outlier_str}")
+                    except Exception:
+                        pass
+
+            # Weighted least squares
+            W = np.diag(weights)
+            try:
+                coef = np.linalg.lstsq(W @ A, W @ y, rcond=None)[0]
+                a_new, b_new = float(coef[0]), float(coef[1])
+
+                # Check convergence
+                if abs(a_new - a) < 1e-6 and abs(b_new - b) < 1e-6:
+                    break
+                a, b = a_new, b_new
+            except Exception:
+                break
+
+        return a, b
+
     def _monotonic_regression(y_in):
         """Apply isotonic regression to ensure non-decreasing values."""
         from scipy.interpolate import PchipInterpolator
@@ -1233,6 +1308,7 @@ def extract_metrics(
         if y.size != n_pulses or not np.isfinite(y).any():
             y = np.full(n_pulses, float(tau_d0_in))
 
+        anchor_first = bool(cfg.get('anchor_first_tau', False))
         anchor_final = bool(cfg.get('anchor_final_tau', True))
 
         if dec_mode == 'fixed':
@@ -1244,39 +1320,38 @@ def extract_metrics(
             # Linear regression with non-negative slope
             x = np.arange(n_pulses, dtype=float)
 
-            if anchor_final and n_pulses > 1:
-                # Anchor last tau: force line to pass through last point
+            if anchor_first and anchor_final and n_pulses > 2:
+                # Both anchors: force line through first and last points
+                tau_first = float(y[0])
                 tau_final = float(y[-1])
-                # Linear fit with constraint: y = a + b*x, with y[-1] = tau_final
-                # This gives: a + b*(n-1) = tau_final
-                # Solve constrained least squares for other points
-                A = np.column_stack([np.ones(n_pulses-1), x[:-1]])
-                y_fit_points = y[:-1]
-                try:
-                    # Unconstrained fit to first n-1 points
-                    coef, _, _, _ = np.linalg.lstsq(A, y_fit_points, rcond=None)
-                    a, b = float(coef[0]), float(coef[1])
-                    # Adjust to pass through final point
-                    # a_new + b_new*(n-1) = tau_final
-                    # We keep the slope direction but adjust intercept to hit final point
-                    b = max(0.0, b)  # Ensure non-negative slope
-                    a = tau_final - b * (n_pulses - 1)
-                except Exception:
-                    # Fallback: simple line from first to last
-                    a = float(y[0])
-                    b = max(0.0, (tau_final - a) / max(1, n_pulses - 1))
-
+                # Constrained line: passes through (0, tau_first) and (n-1, tau_final)
+                b = max(0.0, (tau_final - tau_first) / max(1, n_pulses - 1))
+                a = tau_first
                 yfit = a + b * x
-                # Ensure last point is exactly at tau_final
+                yfit[0] = tau_first
                 yfit[-1] = tau_final
+            elif anchor_final and n_pulses > 1:
+                # Anchor last tau only: force line to pass through last point
+                tau_final = float(y[-1])
+                # Robust fit to first n-1 points
+                a, b = _robust_linear_fit(x[:-1], y[:-1])
+                b = max(0.0, b)  # Ensure non-negative slope
+                a = tau_final - b * (n_pulses - 1)  # Adjust to pass through final point
+                yfit = a + b * x
+                yfit[-1] = tau_final
+            elif anchor_first and n_pulses > 1:
+                # Anchor first tau only: force line to pass through first point
+                tau_first = float(y[0])
+                # Robust fit to points 2-N
+                a, b = _robust_linear_fit(x[1:], y[1:])
+                b = max(0.0, b)  # Ensure non-negative slope
+                a = tau_first  # Force through first point: a + b*0 = tau_first
+                yfit = a + b * x
+                yfit[0] = tau_first
             else:
-                # Standard linear regression without final anchor
-                A = np.column_stack([np.ones_like(x), x])
-                try:
-                    coef, _, _, _ = np.linalg.lstsq(A, y, rcond=None)
-                    a, b = float(coef[0]), max(0.0, float(coef[1]))
-                except Exception:
-                    a, b = float(y[0]), 0.0
+                # Standard robust linear regression without anchors
+                a, b = _robust_linear_fit(x, y)
+                b = max(0.0, b)  # Ensure non-negative slope
                 yfit = a + b * x
 
             # Ensure monotonic (can only get slower)
@@ -1284,17 +1359,32 @@ def extract_metrics(
             return tau_r_in, yfit
 
         else:  # 'free_monotonic'
-            if anchor_final and n_pulses > 1:
-                # Anchor final tau and apply monotonic constraint
+            if anchor_first and anchor_final and n_pulses > 2:
+                # Both anchors: interpolate between first and last with monotonic constraint
+                tau_first = float(y[0])
                 tau_final = float(y[-1])
-                # Ensure all previous taus don't exceed tau_final
-                y_clipped = np.minimum(y, tau_final)
+                # Ensure all values between first and final
+                y_clipped = np.clip(y, tau_first, tau_final)
+                y_clipped[0] = tau_first
+                y_clipped[-1] = tau_final
                 # Apply monotonic regression
                 yfit = _monotonic_regression(y_clipped)
-                # Ensure last point is exactly tau_final
+                yfit[0] = tau_first
                 yfit[-1] = tau_final
+            elif anchor_final and n_pulses > 1:
+                # Anchor final tau only
+                tau_final = float(y[-1])
+                y_clipped = np.minimum(y, tau_final)
+                yfit = _monotonic_regression(y_clipped)
+                yfit[-1] = tau_final
+            elif anchor_first and n_pulses > 1:
+                # Anchor first tau only
+                tau_first = float(y[0])
+                y_clipped = np.maximum(y, tau_first)
+                yfit = _monotonic_regression(y_clipped)
+                yfit[0] = tau_first
             else:
-                # Apply monotonic regression without final anchor
+                # Apply monotonic regression without anchors
                 yfit = _monotonic_regression(y)
             return tau_r_in, yfit
 
@@ -1974,9 +2064,15 @@ def extract_metrics(
                     'free_monotonic': 'monotonic spline'
                 }
                 progression_label = progression_label_map.get(dec_mode, dec_mode)
+                anchor_first = bool(cfg.get('anchor_first_tau', False))
                 anchor_final = bool(cfg.get('anchor_final_tau', True))
-                if anchor_final and dec_mode in ('linear', 'free_monotonic'):
-                    progression_label += ' (anchored to final)'
+                if dec_mode in ('linear', 'free_monotonic'):
+                    if anchor_first and anchor_final:
+                        progression_label += ' (anchored first & final)'
+                    elif anchor_final:
+                        progression_label += ' (anchored to final)'
+                    elif anchor_first:
+                        progression_label += ' (anchored to first)'
 
                 ax_tau.plot(
                     pulse_idx,
@@ -1992,6 +2088,42 @@ def extract_metrics(
 
                 # Add anchor points
                 anchor_lines_added = False
+                anchor_first = bool(cfg.get('anchor_first_tau', False))
+
+                # Anchor for first tau (if enabled)
+                if anchor_first and dec_mode in ('linear', 'free_monotonic'):
+                    first_tau_ms = float(np.asarray(tau_d_vec, float)[0] * 1000.0)
+
+                    # Vertical line at first event
+                    ax_tau.axvline(
+                        1,  # First pulse
+                        color='green',
+                        linestyle='-.',
+                        alpha=0.6,
+                        linewidth=2.0,
+                        label=f'anchor: first event (τd={first_tau_ms:.1f}ms)'
+                    )
+                    # Horizontal line showing first tau value
+                    ax_tau.axhline(
+                        first_tau_ms,
+                        color='green',
+                        linestyle=':',
+                        alpha=0.4,
+                        linewidth=1.5
+                    )
+                    # Highlight the first tau value with a square
+                    ax_tau.scatter(
+                        [1],
+                        [first_tau_ms],
+                        marker='s',  # Square
+                        s=250,
+                        color='green',
+                        alpha=0.7,
+                        zorder=10,
+                        edgecolors='black',
+                        linewidths=1.5
+                    )
+                    anchor_lines_added = True
 
                 # Anchor for global mode (middle event anchored to global tau)
                 if fit_source == 'global' and dec_mode in ('linear', 'free_monotonic'):

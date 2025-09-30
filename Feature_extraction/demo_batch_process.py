@@ -117,8 +117,10 @@ for in_dir in folders:
                 
                 # === Kinetics Estimation ===
                 'fit_source': 'global',  # (default: 'global') 'global'|'average'|'individual'
-                'decay_progression_mode': 'free_monotonic',  # (default: 'linear') 'fixed'|'free_monotonic'|'linear'
-                
+                'decay_progression_mode': 'linear',  # (default: 'linear') 'fixed'|'free_monotonic'|'linear'
+                'anchor_final_tau': True,  # bool (default: True) - anchor final tau in progression fitting
+                'anchor_first_tau': False,  # bool (default: False) - anchor first tau in progression fitting
+
                 # === Event Model ===
                 'event_model': 'iglusnfr',  # (default: 'double_exp') 'double_exp'|'cooperative'|'bilinear'|'single_exp'|'two_step_binding'|'alpha'|'gamma'|'binding_kinetics'|'two_component'|'desensitization'|'coop_plus_linear'|'diffusion_clearance'|'double_cooperative'|'hetero_coop'|'two_comp_coop'
                 'event_model_settings': {},  # dict (default: {}) - model-specific params - see event_models.py for details (e.g., {'n_coop': 2.0})
