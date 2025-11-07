@@ -61,15 +61,15 @@ if REPO_ROOT not in sys.path:
 
 from Feature_extraction.extract_metrics import extract_metrics
 
-xlsx_path = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Theo_4Ca\20211125_linescan1_20Hz_10pulses_4mMCa_bouton1_traces_converted.xlsx"
-#xlsx_path = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Theo_1_5Ca\20220726_linescan3_20Hz_10pulses_1.5mMCa_bouton3_traces_converted.xlsx"
+xlsx_path = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Theo_1_5_50Hz\20210722_linescan3_50Hz_10pulses_1.5mMCa_bouton3_traces_converted.xlsx"
+xlsx_path = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Theo_1_5Ca\20220726_linescan3_20Hz_10pulses_1.5mMCa_bouton3_traces_converted.xlsx"
 #xlsx_path = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\WT_Anthime\241212_Fibre2_PortionA_bouton2.xlsx"
 
 #xlsx_path = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Theo_4_50Hz\20220726_linescan5_50Hz_10pulses_4mMCa_bouton1_traces_converted.xlsx"
 #xlsx_path = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Theo_1_5Ca\20220726_linescan3_20Hz_10pulses_1.5mMCa_bouton3_traces_converted.xlsx"
 
-START = 0.5 
-#START = 0.5 + 0.5
+START = 0.498 
+# START = 0.5 + 0.5
 
 ISI = 0.05 # 20Hz
 # ISI = 0.02 # 50Hz
@@ -105,7 +105,7 @@ options_presets = {
         'event_model_settings': {},  # dict (default: {}) - model-specific params - see event_models.py for details (e.g., {'n_coop': 2.0})
         
         # === Recut/Averaging ===
-        'recut_projection': 'median',  # (default: 'median') 'mean'|'median'|'std'|'robust_mean'
+        'recut_projection': 'mean',  # (default: 'median') 'mean'|'median'|'std'|'robust_mean'
         'recut_oversample': 50,  # int ≥1 (default: 1) - interpolation factor
         'recut_peak_recenter': 0,  # int|tuple|None (default: 0) - peak realignment (0=disabled)
         'recut_snippets': True,  # bool (default: False) - return snippets for plotting
@@ -192,7 +192,6 @@ options_presets = {
     },
 }
 
-# Choose which preset to use
 # Choose which preset to use (set to the one you want to visualize)
 preset_name = 'double_exp_default'  # e.g., 'single_exp_fixed_8ms'
 options = options_presets[preset_name]
