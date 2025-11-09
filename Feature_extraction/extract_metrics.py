@@ -2743,7 +2743,7 @@ def extract_metrics(
         ax.set_xlim(z0, z1)
         ax.set_xlabel('Time (s)')
         ax.set_ylabel('ΔF/F0' if use_dff else 'ΔF')
-        ax.legend(loc='upper right', frameon=False)
+        ax.legend(loc='upper left', frameon=False)
         ax.set_title('Average trace (selected overlays)')
 
         # Residual diagnostics panel (average): place directly under the main

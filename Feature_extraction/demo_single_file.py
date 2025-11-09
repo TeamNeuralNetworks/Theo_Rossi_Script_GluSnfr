@@ -63,16 +63,17 @@ from Feature_extraction.extract_metrics import extract_metrics
 
 xlsx_path = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Theo_1_5_50Hz\20210722_linescan3_50Hz_10pulses_1.5mMCa_bouton3_traces_converted.xlsx"
 xlsx_path = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Theo_1_5Ca\20220726_linescan3_20Hz_10pulses_1.5mMCa_bouton3_traces_converted.xlsx"
-#xlsx_path = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\WT_Anthime\241212_Fibre2_PortionA_bouton2.xlsx"
+xlsx_path = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\WT_Anthime\241212_Fibre2_PortionA_bouton2.xlsx"
 
-#xlsx_path = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Theo_4_50Hz\20220726_linescan5_50Hz_10pulses_4mMCa_bouton1_traces_converted.xlsx"
+xlsx_path = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Theo_4_50Hz\20220726_linescan5_50Hz_10pulses_4mMCa_bouton1_traces_converted.xlsx"
 #xlsx_path = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Theo_1_5Ca\20220726_linescan3_20Hz_10pulses_1.5mMCa_bouton3_traces_converted.xlsx"
 
+# xlsx_path = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Theo_4_50Hz\20220727_linescan3_50Hz_10pulses_4mMCa_bouton4_traces_converted.xlsx"
 START = 0.498 
 # START = 0.5 + 0.5
 
-ISI = 0.05 # 20Hz
-# ISI = 0.02 # 50Hz
+#ISI = 0.05 # 20Hz
+ISI = 0.02 # 50Hz
 
 out_dir = r"C:\Users\Antoine.Valera\Desktop\Testout"
 

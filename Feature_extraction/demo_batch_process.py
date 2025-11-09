@@ -71,9 +71,9 @@ train_start_by_folder = {
     folders[4]: 0.498,
     folders[5]: 0.498,
     folders[6]: 0.498,
-    folders[10]: 0.499,
-    folders[11]: 0.499,
-    folders[12]: 0.499,
+    folders[10]: 0.498,
+    folders[11]: 0.498,
+    folders[12]: 0.498,
 }
 
 # ISI control: default_isi applies to all unless overridden in isi_by_folder.
@@ -131,6 +131,81 @@ for in_dir in folders:
 
         # Define option presets
         options_presets = {
+            'iglusnfr_optimized': {
+                # === Preprocessing ===
+                'normalize_dff': True,
+                'bleach': True,
+                'sg_window': 9,
+                'sg_poly': 2,
+
+                # === Kinetics Estimation ===
+                'fit_source': 'global',
+                'decay_progression_mode': 'free_monotonic',  # Allow non-linear but still monotonic progression
+                'anchor_final_tau': False,  # Don't over-constrain - let the model fit naturally
+                'anchor_first_tau': False,
+
+                # === Event Model ===
+                'event_model': 'iglusnfr',  # Specifically optimized for iGluSnFR S72A
+                'event_model_settings': {},
+
+                # === Recut/Averaging ===
+                'recut_projection': 'median',
+                'recut_oversample': 50,
+                'recut_peak_recenter': 0,
+                'recut_snippets': True,
+
+                # === NNLS Fitting ===
+                'nnls_weight_mode': 'savgol',
+                'nnls_weight_tau_s': None,
+                'fit_diagnostic_plot': False,
+                'allow_shift': True,
+                'huber_delta': 5.5,
+                'irls_iters': 20,
+                'delta_max_s': 0.002,
+                'delta_step_s': 0.00025,
+                'shift_min_s': 0.00005,
+
+                # === Time Windows ===
+                'pre_zoom_s': 0.20,
+                'post_zoom_s': 0.20,
+                'f0_window_s': 1.0,
+
+                # === Peak Detection ===
+                'peak_window_ms': 20.0,
+                'peak_avg_points': 1,  # Capture sharp peaks without averaging
+                'pre_peak_ms': 1.0,
+
+                # === Thresholding ===
+                'measurement': 'NNLS',
+                'fail_method': 'SAVGOL',
+                'threshold_mode': 'auto',
+                'null_N': 1.0,
+                'null_sim_max_points': 1000,
+                'null_min_post_zoom_s': 0.05,
+
+                # === Kinetics Grids ===
+                # Ultra-fast rise times for sharp iGluSnFR peaks
+                'kin_taur_grid_ms': [0.1, 0.2, 0.3, 0.5, 0.8, 1.0, 1.5, 2.0, 3.0],
+                # Bi-exponential decay: fast and slow components
+                'kin_taud0_grid_ms': [2.0, 4.0, 6.0, 8.0, 10.0, 15.0, 20.0, 25.0, 35.0, 50.0, 80.0, 120.0],
+                'kin_slope_grid_ms': [0.0, 0.25, 0.5, 1.0, 2.0, 3.0, 5.0],
+
+                # === Bleach Correction ===
+                'bleach_huber_delta': 3.0,
+                'bleach_tau_range_factor': (0.25, 4.0),
+                'bleach_n_tau': 25,
+
+                # === Plotting ===
+                'plot': {
+                    'enabled': True,
+                    'traces': ['raw', 'nnls'],
+                    'show_decay': True,
+                    'trials': False,
+                    'baseline': False,
+                    'residuals': True,
+                    'plot_peaks_details': True,
+                }
+            },
             'double_exp_default': {
                 # === Preprocessing ===
                 'normalize_dff': True,
@@ -172,8 +247,8 @@ for in_dir in folders:
 
                 # === Peak Detection ===
                 'peak_window_ms': 20.0,
-                'peak_avg_points': 5,
-                'pre_peak_ms': 0.0,
+                'peak_avg_points': 1,  # Reduced from 5 to capture sharp peaks better
+                'pre_peak_ms': 1.0,  # Increased from 0.0 to ensure full peak capture
 
                 # === Thresholding ===
                 'measurement': 'NNLS',
@@ -184,7 +259,7 @@ for in_dir in folders:
                 'null_min_post_zoom_s': 0.05,
 
                 # === Kinetics Grids ===
-                'kin_taur_grid_ms': [0.6, 0.8, 1.0, 1.2, 1.5, 2.0],
+                'kin_taur_grid_ms': [0.3, 0.4, 0.5, 0.6, 0.8, 1.0, 1.2, 1.5, 2.0],  # Added faster rise times
                 'kin_taud0_grid_ms': [1.6, 2.0, 2.5, 3.0, 4.0, 6.0, 8.0, 10.0, 12.5, 15.0, 18.0, 22.0, 28.0, 35.0, 45.0, 60.0],
                 'kin_slope_grid_ms': [0.0, 0.25, 0.5, 1.0, 2.0, 3.0, 5.0],
 
@@ -207,7 +282,7 @@ for in_dir in folders:
         }
 
         # Choose which preset to use
-        preset_name = 'double_exp_default'
+        preset_name = 'iglusnfr_optimized'  # Use iGluSnFR-specific model for better peak capture
         options = options_presets[preset_name]
 
         res = extract_metrics(
