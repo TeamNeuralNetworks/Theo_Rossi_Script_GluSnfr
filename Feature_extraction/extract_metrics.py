@@ -248,6 +248,16 @@ def _trim_spines(ax):
 
 def _nnls_irls_singlecol(y: np.ndarray, k: np.ndarray, *, robust: bool, huber_delta: float, iters: int) -> float:
     """Single‑column NNLS with optional Huber IRLS (amplitude ≥ 0)."""
+    # Validate inputs to catch NaN/Inf before calling nnls
+    if not np.all(np.isfinite(y)):
+        n_bad = np.sum(~np.isfinite(y))
+        raise ValueError(f"Input y contains {n_bad} NaN/Inf values (size={y.size})")
+    if not np.all(np.isfinite(k)):
+        n_bad = np.sum(~np.isfinite(k))
+        raise ValueError(f"Input k (kernel) contains {n_bad} NaN/Inf values (size={k.size})")
+    if k.size == 0 or y.size == 0:
+        return 0.0
+
     a = max(0.0, nnls(k[:, None], y)[0][0])
     if not robust:
         return a
@@ -809,6 +819,7 @@ def extract_metrics(
     isi: float,
     n_pulses: int,
     options: Optional[Dict] = None,
+    filename: Optional[str] = None,
 ) -> Dict:
     """Extract per‑pulse metrics with a minimal, explicit interface.
 
@@ -1575,6 +1586,10 @@ def extract_metrics(
             elif anchor_first and n_pulses > 1:
                 yfit[0] = float(y[0])
 
+            # CRITICAL: Ensure all tau values are positive (minimum 0.1 ms)
+            # This must be done BEFORE returning to prevent negative tau
+            yfit = np.maximum(yfit, 1e-4)
+
             return tau_r_in, yfit
 
         else:  # 'free_monotonic'
@@ -1628,28 +1643,15 @@ def extract_metrics(
             else:
                 # Apply monotonic regression without anchors
                 yfit = _monotonic_regression(y, mono_direction) if mono_direction else y.copy()
+
+            # CRITICAL: Ensure all tau values are positive (minimum 0.1 ms)
+            # This must be done BEFORE returning to prevent negative tau
+            yfit = np.maximum(yfit, 1e-4)
+
             return tau_r_in, yfit
 
-        # Final validation: ensure output is finite
-        if not np.all(np.isfinite(yfit)):
-            try:
-                progress_print(f"[warning] _apply_progression produced NaN/Inf. Using fallback.")
-            except Exception:
-                pass
-            fallback_tau = float(tau_d0_in) if np.isfinite(tau_d0_in) else 0.010
-            yfit = np.full(n_pulses, fallback_tau)
-
-        # Ensure all tau values are positive (minimum 0.1 ms)
-        yfit = np.maximum(yfit, 1e-4)
-
-        # Apply final monotonic constraint only if rule requires it (safety)
-        if progression_rule == 'monotonic_increasing':
-            yfit = np.maximum.accumulate(yfit)
-        elif progression_rule == 'monotonic_decreasing':
-            yfit = np.minimum.accumulate(yfit)
-        # 'free': no final constraint
-
-        return tau_r_in, yfit
+        # NOTE: All decay progression modes return above.
+        # No code beyond this point will execute.
 
     # Variables for optional display overlays and logging
     tau_last_display = None
@@ -1792,6 +1794,24 @@ def extract_metrics(
             tau_d_vec_constrained = None
 
         tau_r, tau_d_vec = _apply_progression(tau_r, tau_d_vec0, tau_d0, 'global')
+
+        # Validate and fix tau_d_vec: negative tau are forbidden
+        MIN_TAU_D = 0.001  # Minimum 1ms decay time
+
+        # Check for negative or zero values
+        if np.any(tau_d_vec <= 0):
+            neg_idx = np.where(tau_d_vec <= 0)[0]
+            progress_print(f"[ERROR] tau_d_vec contains {len(neg_idx)} negative/zero values at indices {neg_idx.tolist()}: {(tau_d_vec[neg_idx]*1000).tolist()} ms")
+            progress_print(f"[ERROR] Clipping to minimum {MIN_TAU_D*1000:.1f} ms")
+            tau_d_vec = np.maximum(tau_d_vec, MIN_TAU_D)
+
+        # Check for NaN/Inf
+        if not np.all(np.isfinite(tau_d_vec)):
+            bad_idx = np.where(~np.isfinite(tau_d_vec))[0]
+            progress_print(f"[ERROR] tau_d_vec contains NaN/Inf at indices {bad_idx.tolist()}: {tau_d_vec[bad_idx].tolist()}")
+            progress_print(f"[ERROR] Replacing with tau_d0={tau_d0}")
+            tau_d_vec = np.where(np.isfinite(tau_d_vec), tau_d_vec, tau_d0)
+
         if is_varying_model:
             progress_print(f"[fit] source=global | τd0={tau_d_vec[0]*1000:.2f}ms → τdN={tau_d_vec[-1]*1000:.2f}ms | mode={dec_mode}")
     elif fit_source == 'individual':
@@ -2377,6 +2397,22 @@ def extract_metrics(
         allow_shift=allow_shift, delta_max_s=cfg['delta_max_s'], delta_step_s=cfg['delta_step_s'],
         shift_min_s=cfg['shift_min_s'], event_t0_s=event_t0_s,
     )
+
+    # Diagnostic: assess NNLS fit quality
+    try:
+        # Compute RMS error in the fitting window
+        zmask = (t >= float(train_start) - cfg['pre_zoom_s']) & (t < float(train_start) + float(isi) * int(n_pulses) + cfg['post_zoom_s'])
+        if np.any(zmask):
+            residual = y_avg[zmask] - yhat_avg[zmask]
+            rms_error = np.sqrt(np.nanmean(residual**2))
+            signal_rms = np.sqrt(np.nanmean(y_avg[zmask]**2))
+            relative_error = (rms_error / signal_rms * 100) if signal_rms > 0 else np.nan
+            progress_print(f"[NNLS fit] RMS error: {rms_error:.4f}, Signal RMS: {signal_rms:.4f}, Relative error: {relative_error:.2f}%")
+            progress_print(f"[NNLS fit] Amplitudes: {[f'{a:.3f}' for a in a_avg[:min(5, len(a_avg))]]}")
+            progress_print(f"[NNLS fit] Jitter (ms): {[f'{d*1000:.2f}' for d in d_avg[:min(5, len(d_avg))]]}")
+    except Exception as e:
+        progress_print(f"[NNLS fit] Diagnostic failed: {e}")
+
     need_avg_sg = (
         ('savgol' in traces)
         or (meas == 'SAVGOL')
@@ -2435,6 +2471,10 @@ def extract_metrics(
         else:
             figure = plt.figure(figsize=(12, 5))
             gs = figure.add_gridspec(1, 2, width_ratios=[1.5, 4], wspace=0.15)
+
+        # Add filename as title if provided
+        if filename is not None:
+            figure.suptitle(filename, fontsize=11, fontweight='bold', y=0.98)
 
         resid_avg = None
         model_avg_for_resid = None
