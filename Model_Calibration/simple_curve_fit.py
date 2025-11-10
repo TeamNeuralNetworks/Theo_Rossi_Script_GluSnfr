@@ -163,8 +163,23 @@ def fit_average_event(
         try:
             if return_snippets and 'snippets' in locals() and 't_rel_s' in locals() and 'avg' in locals():
                 params['_recut'] = (t_rel_s, avg, snippets)
-        except Exception:
-            pass
+                try:
+                    from smoothing import progress_print
+                    progress_print(f"[fit_average_event] Attached {len(snippets)} snippets to params dict")
+                except Exception:
+                    pass
+            elif return_snippets:
+                try:
+                    from smoothing import progress_print
+                    progress_print(f"[fit_average_event] return_snippets={return_snippets}, but snippets not in locals")
+                except Exception:
+                    pass
+        except Exception as e:
+            try:
+                from smoothing import progress_print
+                progress_print(f"[fit_average_event] Failed to attach snippets: {e}")
+            except Exception:
+                pass
         return params, t_ms, y_avg
     except Exception:
         return None

@@ -488,6 +488,11 @@ def build_median_recut_waveform(
     t_rel = np.arange(-pre_s, post_s + 1e-12, dt_os)
     zero_idx = int(np.argmin(np.abs(t_rel)))
     n_rel = t_rel.size
+    try:
+        progress_print(f"[build_recut] Original dt={dt*1000:.4f} ms, oversampled dt={dt_os*1000:.5f} ms (factor={os_factor})")
+        progress_print(f"[build_recut] Created time grid with {n_rel} points (original would have ~{int((pre_s + post_s)/dt)} points)")
+    except Exception:
+        pass
 
     Y_all = np.atleast_2d(Y_all)
     stim_arr = np.atleast_1d(stim_times)
@@ -502,6 +507,16 @@ def build_median_recut_waveform(
 
     raw_snippets = []
     peak_indices = []
+    n_trials = Y_all.shape[1] if Y_all.ndim > 1 else 1
+    n_stims = len(stim_arr)
+    try:
+        progress_print(f"[build_recut] Extracting snippets: {n_stims} stimuli × {n_trials} trials = {n_stims * n_trials} total")
+        progress_print(f"[build_recut] Stim times (s): {stim_arr.tolist()}")
+        progress_print(f"[build_recut] Data time range: {time[0]:.3f} to {time[-1]:.3f} s")
+        progress_print(f"[build_recut] Snippet window: {-pre_s:.4f} to +{post_s:.4f} s relative to each stim")
+    except Exception:
+        pass
+
     for st in stim_arr:
         for j in range(Y_all.shape[1]):
             y = np.asarray(Y_all[:, j], float)
@@ -622,7 +637,18 @@ def build_median_recut_waveform(
             return float(np.nanmean(a_trim))
         wave = np.array([trimmed_mean(S[:, i], trim_frac=0.1) for i in range(S.shape[1])])
     else:
-        wave = np.nanmedian(S, axis=0)
+        # Use nanmean as default instead of nanmedian for better handling of edge cases
+        wave = np.nanmean(S, axis=0)
+
+    # Trim trailing NaN values to prevent interrupted plots
+    if wave.size > 0:
+        valid = np.isfinite(wave)
+        if np.any(valid):
+            last_valid = np.where(valid)[0][-1] + 1
+            t_rel = t_rel[:last_valid]
+            wave = wave[:last_valid]
+            if return_snippets and S.size > 0:
+                S = S[:, :last_valid]
 
     if return_snippets:
         return t_rel, wave, S

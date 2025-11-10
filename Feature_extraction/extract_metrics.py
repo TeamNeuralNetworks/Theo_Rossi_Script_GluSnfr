@@ -1099,6 +1099,10 @@ def extract_metrics(
     # Helper: estimate base kinetics from recut average of all trials/events
     def _estimate_from_recut_average():
         try:
+            # Use longer window for kinetics fitting (not limited by display concerns)
+            # Use at least 50ms, or ISI-5ms if larger, to capture decay kinetics
+            post_ms_fit = max(50.0, (isi * 1000.0) - 5.0)
+
             # Honor explicit top-level option 'recut_snippets'.
             need_snips = bool(
                 cfg.get('plot', {}).get('enabled', False)
@@ -1106,7 +1110,7 @@ def extract_metrics(
             )
             if need_snips:
                 t_rel, avg, snippets = build_median_recut_waveform(
-                    t, Yd, stim_times, pre_ms=5.0, post_ms=_POST_EVT_MS,
+                    t, Yd, stim_times, pre_ms=5.0, post_ms=post_ms_fit,
                     peak_win_ms=cfg['peak_window_ms'], peak_search_pre_ms=cfg['pre_peak_ms'],
                     oversample=int(cfg.get('recut_oversample', 1)),
                     projection=str(cfg.get('recut_projection', 'median')).lower(),
@@ -1116,7 +1120,7 @@ def extract_metrics(
 
             else:
                 t_rel, avg = build_median_recut_waveform(
-                    t, Yd, stim_times, pre_ms=5.0, post_ms=_POST_EVT_MS,
+                    t, Yd, stim_times, pre_ms=5.0, post_ms=post_ms_fit,
                     peak_win_ms=cfg['peak_window_ms'], peak_search_pre_ms=cfg['pre_peak_ms'],
                     oversample=int(cfg.get('recut_oversample', 1)),
                     projection=str(cfg.get('recut_projection', 'median')).lower(),
@@ -1132,6 +1136,15 @@ def extract_metrics(
             recut_snippets = snippets
             if 'snippets' in locals():
                 recut_snippets = snippets
+            # Debug: print recut information
+            try:
+                if snippets is not None:
+                    progress_print(f"[recut] Extracted {len(snippets)} snippets, time range: {t_rel[0]*1000:.1f} to {t_rel[-1]*1000:.1f} ms")
+                    # Count valid data points per snippet
+                    n_valid = [np.sum(np.isfinite(s)) for s in snippets]
+                    progress_print(f"[recut] Valid points per snippet: min={min(n_valid)}, max={max(n_valid)}, mean={np.mean(n_valid):.1f}")
+            except Exception:
+                pass
             # Grid search on (tau_r, tau_d0) using current kernel
             tau_r_grid = np.array(cfg['kin_taur_grid_ms'], float) / 1000.0
             tau_d0_grid = np.array(cfg['kin_taud0_grid_ms'], float) / 1000.0
@@ -1646,79 +1659,47 @@ def extract_metrics(
     per_event_param_map: Dict[str, np.ndarray] = {}
 
     if fit_source == 'global':
-        # Match the demo: recut + average all events then fit via curve_fit
+        # Always use fit_average_event with consistent long window for proper kinetics fitting
+        # Debug: verify stimulus times are correct
+        try:
+            expected_stims = [train_start + i * isi for i in range(n_pulses)]
+            progress_print(f"[global] Expected stim times (s): {[f'{s:.3f}' for s in expected_stims]}")
+            progress_print(f"[global] Actual stim times (s): {[f'{s:.3f}' for s in stim_times]}")
+        except Exception:
+            pass
+
+        # Use longer window for fitting (not ISI-limited) - at least 50ms to capture decay
+        post_ms_for_fit = max(50.0, (isi * 1000.0) - 5.0)
+        progress_print(f"[global] Using post_ms={post_ms_for_fit:.1f} ms for recut fitting")
+
         need_snips = bool(
             cfg.get('plot', {}).get('enabled', False)
             or cfg.get('recut_snippets', False)
         )
+
         res = fit_average_event(
             t, Yd, event_model, stim_times,
             oversample=int(cfg['recut_oversample']),
             projection=str(cfg['recut_projection']).lower(),
             peak_recenter=peak_recenter,
             return_snippets=need_snips,
+            post_ms=post_ms_for_fit,  # Use long window for fitting
         )
 
         fitted = None
         if res is not None:
             fitted, t_avg_evt, y_avg_evt = res
 
-            # Reject clearly invalid global fits for tight ISI
-            td_try = float(fitted.get('tau_decay', fitted.get('tau_decay_fast', np.inf)))
-            if (not np.isfinite(td_try)) or (td_try > 1.2 * isi):
-                fitted = None  # force fallback
-
-            # Pull recut outputs attached by helper (if any)
+            # Pull recut outputs attached by helper
             if isinstance(fitted, dict) and ('_recut' in fitted):
                 try:
                     t_rel_s, avg_s, snippets_s = fitted.pop('_recut')
                     recut_t_rel, recut_avg, recut_snippets = t_rel_s, avg_s, snippets_s
+                    progress_print(f"[global] Extracted recut data: {len(snippets_s)} snippets")
                 except Exception:
                     pass
 
-        if fitted is None:
-            # ---- Fallback path: recut/grid on average ----
-            tr_b, td0_b = _estimate_from_recut_average()
-            if tr_b is None:
-                tr_b, td0_b, slope, tau_d_vec0 = estimate_kinetics_from_average(
-                    t, y_avg, stim_times,
-                    taur_grid_ms=cfg['kin_taur_grid_ms'], taud0_grid_ms=cfg['kin_taud0_grid_ms'],
-                    slope_grid_ms=cfg['kin_slope_grid_ms'], pre_zoom_s=cfg['pre_zoom_s'], post_zoom_s=cfg['post_zoom_s'],
-                    isi=isi, weight_mode=cfg['nnls_weight_mode'], weight_tau_s=weight_tau_s,
-                    sg_window=cfg['sg_window'], sg_poly=cfg['sg_poly'], event_t0_s=event_t0_s,
-                )
-            tau_r = float(tr_b); tau_d0 = float(td0_b)
-
-            # Prefer recut average for left panel if available
-            global_fit_params = {
-                'tau_rise': float(tau_r),
-                'tau_decay': float(tau_d0),
-            }
-            # Use the recut average if available; otherwise fall back to the
-            # train-aligned average series.
-            if (recut_t_rel is not None) and (recut_avg is not None):
-                try:
-                    t_avg_evt = np.asarray(recut_t_rel, float) * 1000.0
-                    y_avg_evt = np.asarray(recut_avg, float)
-                except Exception:
-                    t_avg_evt = (t - float(train_start)) * 1000.0
-                    y_avg_evt = y_avg
-            else:
-                t_avg_evt = (t - float(train_start)) * 1000.0
-                y_avg_evt = y_avg
-            event_t0_s = 0.0  # no peak shift available in fallback
-        else:
-            # ---- Use parameters from fitted dict ----
-            fitted, t_avg_evt, y_avg_evt = res
-            # If the fit helper attached recut outputs to the params dict, capture them
-            try:
-                if isinstance(fitted, dict) and '_recut' in fitted:
-                    t_rel_s, avg_s, snippets_s = fitted.pop('_recut')
-                    recut_t_rel = t_rel_s
-                    recut_avg = avg_s
-                    recut_snippets = snippets_s
-            except Exception:
-                pass
+            # Extract parameters from fitted dict
             try:
                 global_fit_params = {
                     k: float(v)
@@ -1727,41 +1708,49 @@ def extract_metrics(
                 }
             except Exception:
                 global_fit_params = {}
-            tau_r = float(fitted.get('tau_rise', np.nan))
-            tau_d0 = float(fitted.get('tau_decay', np.nan))
-            if not np.isfinite(tau_d0):
-                tau_d0 = float(fitted.get('tau_decay_fast', np.nan))
-                if not np.isfinite(tau_d0):
-                    tau_d0 = float(fitted.get('tau_decay_slow', np.nan))
-            if not np.isfinite(tau_r):
-                tau_r = 0.002
-            if not np.isfinite(tau_d0):
-                tau_d0 = 0.010
+
+            tau_r = float(fitted.get('tau_rise', 0.002))
+            tau_d0 = float(fitted.get('tau_decay', fitted.get('tau_decay_fast', 0.010)))
             event_t0_s = float(fitted.get('t_peak', 0.0)) / 1000.0
 
-            # Carry over cooperative n if present (unless user forced a value)
+            # Carry over model-specific parameters
             cfg.setdefault('event_model_settings', {})
-            if event_model == 'cooperative' and ('n_coop' in fitted) and ('n_coop' not in explicit_em_settings):
+            if event_model == 'cooperative' and ('n_coop' in fitted):
                 cfg['event_model_settings']['n_coop'] = float(fitted['n_coop'])
             elif event_model not in varying_supported_names:
                 for k, v in fitted.items():
-                    if k not in ('amp', 't_peak') and np.isfinite(v) and (k not in explicit_em_settings):
+                    if k not in ('amp', 't_peak', '_recut') and np.isfinite(v):
                         cfg['event_model_settings'][k] = float(v)
+        else:
+            # Fallback if curve_fit completely failed
+            progress_print(f"[global] fit_average_event failed, using grid search fallback")
+            tr_b, td0_b = _estimate_from_recut_average()
+            tau_r = float(tr_b) if tr_b is not None else 0.002
+            tau_d0 = float(td0_b) if td0_b is not None else 0.010
+            global_fit_params = {'tau_rise': tau_r, 'tau_decay': tau_d0}
+            event_t0_s = 0.0
 
-            # Optional override
-            tau_decay_override = cfg['event_model_settings'].get('tau_decay')
-            if tau_decay_override is not None:
-                try:
-                    tau_decay_override = float(tau_decay_override)
-                    if np.isfinite(tau_decay_override):
-                        tau_d0 = tau_decay_override
-                except Exception:
-                    pass
+            # Use recut data for plotting
+            if (recut_t_rel is not None) and (recut_avg is not None):
+                t_avg_evt = np.asarray(recut_t_rel, float) * 1000.0
+                y_avg_evt = np.asarray(recut_avg, float)
+            else:
+                t_avg_evt = (t - float(train_start)) * 1000.0
+                y_avg_evt = y_avg
 
-            ev_model_name, n_coop_effective = _apply_event_model_from_cfg()
-            is_varying_model = ev_model_name in varying_supported_names
-            progress_print(f"[fit][global] curve_fit τr={tau_r*1000:.2f}ms τd={tau_d0*1000:.2f}ms model={event_model}")
+        # Optional override
+        tau_decay_override = cfg['event_model_settings'].get('tau_decay')
+        if tau_decay_override is not None:
+            try:
+                tau_decay_override = float(tau_decay_override)
+                if np.isfinite(tau_decay_override):
+                    tau_d0 = tau_decay_override
+            except Exception:
+                pass
 
+        ev_model_name, n_coop_effective = _apply_event_model_from_cfg()
+        is_varying_model = ev_model_name in varying_supported_names
+        progress_print(f"[fit][global] recut τr={tau_r*1000:.2f}ms τd={tau_d0*1000:.2f}ms model={event_model}")
 
         # Global fit_source: anchor global tau to middle event, then constrain per-event fits
         if dec_mode == 'fixed':
@@ -2463,8 +2452,18 @@ def extract_metrics(
         axL = figure.add_subplot(gs[0, 0])
         _trim_spines(axL)
         try:
-            t_ms_evt = t_avg_evt if 't_avg_evt' in locals() else (t - float(train_start)) * 1000.0
-            y_evt = y_avg_evt if 'y_avg_evt' in locals() else y_avg
+            # IMPORTANT: Use recut time vectors when available to ensure alignment
+            # between snippets and their time axis
+            if recut_t_rel is not None and recut_avg is not None:
+                t_ms_evt = recut_t_rel * 1000.0
+                y_evt = recut_avg
+            elif 't_avg_evt' in locals():
+                t_ms_evt = t_avg_evt
+                y_evt = y_avg_evt
+            else:
+                t_ms_evt = (t - float(train_start)) * 1000.0
+                y_evt = y_avg
+
             isi_ms = float(isi) * 1000.0
             # Display window: from -3 ms before stim to just before next stim
             # Use a 3 ms guard before the next stimulus to avoid overlap
@@ -2472,32 +2471,50 @@ def extract_metrics(
             max_x = max(isi_ms - 3.0, 0.0)
             m0 = (t_ms_evt >= min_x) & (t_ms_evt < max_x)
 
-            # Plot behavior depends on fit_source mode
-            if fit_source in ('average', 'individual') and recut_snippets is not None:
-                # Average/individual mode: show all per-event snippets overlapping
+            # Always show individual snippets if available (regardless of fit_source mode)
+            if recut_snippets is not None and len(recut_snippets) > 0:
                 try:
                     t_rel_ms = recut_t_rel * 1000.0 if recut_t_rel is not None else t_ms_evt
-                    # Plot individual snippets in light gray
+                    # Debug: print snippet information
+                    try:
+                        progress_print(f"[plot] recut_t_rel is {'None' if recut_t_rel is None else f'array of size {recut_t_rel.size}'}")
+                        progress_print(f"[plot] t_ms_evt range: {t_ms_evt[0]:.1f} to {t_ms_evt[-1]:.1f} ms, size {t_ms_evt.size}")
+                        progress_print(f"[plot] t_rel_ms (used for plotting) range: {t_rel_ms[0]:.1f} to {t_rel_ms[-1]:.1f} ms, size {t_rel_ms.size}")
+                        if t_rel_ms.size > 1:
+                            dt_plot = np.median(np.diff(t_rel_ms))
+                            progress_print(f"[plot] Time step dt = {dt_plot:.5f} ms ({1000.0/dt_plot:.1f} points per ms)")
+                        progress_print(f"[plot] Plotting {len(recut_snippets)} snippets, each of size {recut_snippets[0].size if len(recut_snippets) > 0 else 'N/A'}")
+                        # Check if sizes match
+                        if len(recut_snippets) > 0 and recut_snippets[0].size != t_rel_ms.size:
+                            progress_print(f"[plot] WARNING: Size mismatch! snippet size {recut_snippets[0].size} != t_rel_ms size {t_rel_ms.size}")
+                    except Exception as e:
+                        progress_print(f"[plot] Debug failed: {e}")
+                        pass
+                    # Plot individual snippets with low alpha
                     for i, snippet in enumerate(recut_snippets):
                         snippet_arr = np.asarray(snippet, float)
                         if snippet_arr.size == t_rel_ms.size:
                             m_snip = (t_rel_ms >= min_x) & (t_rel_ms < max_x)
                             axL.plot(t_rel_ms[m_snip], snippet_arr[m_snip],
-                                   color='gray', alpha=0.3, lw=0.8, zorder=1)
+                                   color='gray', alpha=0.1, lw=0.5, zorder=1)
                     # Plot average on top in black
                     if recut_avg is not None:
                         avg_arr = np.asarray(recut_avg, float)
                         if avg_arr.size == t_rel_ms.size:
                             m_avg = (t_rel_ms >= min_x) & (t_rel_ms < max_x)
                             axL.plot(t_rel_ms[m_avg], avg_arr[m_avg],
-                                   color='k', lw=1.8, label='Average', zorder=2)
+                                   color='k', lw=2.0, label='Average', zorder=2)
                     else:
                         axL.plot(t_ms_evt[m0], y_evt[m0], color='k', lw=1.5, label='Average', zorder=2)
                 except Exception as e:
                     # Fallback to simple average plot
+                    try:
+                        progress_print(f"[plot] Failed to plot snippets: {e}")
+                    except Exception:
+                        pass
                     axL.plot(t_ms_evt[m0], y_evt[m0], color='k', lw=1.5, label='Average')
             else:
-                # Global mode: show single averaged event (recut template)
+                # No snippets available: show single averaged event
                 axL.plot(t_ms_evt[m0], y_evt[m0], color='k', lw=1.5, label='Average')
             # Overlay best-fit library model matching current kernel choice
             try:
