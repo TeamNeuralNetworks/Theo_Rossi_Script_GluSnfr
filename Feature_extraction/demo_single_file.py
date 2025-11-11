@@ -69,11 +69,18 @@ xlsx_path = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Theo_4_50Hz\2022072
 #xlsx_path = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Theo_1_5Ca\20220726_linescan3_20Hz_10pulses_1.5mMCa_bouton3_traces_converted.xlsx"
 
 # xlsx_path = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Theo_4_50Hz\20220727_linescan3_50Hz_10pulses_4mMCa_bouton4_traces_converted.xlsx"
-START = 0.498 
-# START = 0.5 + 0.5
 
-#ISI = 0.05 # 20Hz
-ISI = 0.02 # 50Hz
+xlsx_path = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Theo_4Ca\20220726_linescan4_20Hz_10pulses_4mMCa_bouton5_traces_converted.xlsx"
+xlsx_path = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Stability_After\241212_Fibre1_PortionB_Bouton_4_bis.xlsx"
+
+
+
+
+START = 0.498 
+START = START + 0.5
+
+ISI = 0.05 # 20Hz
+# ISI = 0.02 # 50Hz
 
 out_dir = r"C:\Users\Antoine.Valera\Desktop\Testout"
 
@@ -161,6 +168,88 @@ options_presets = {
             'plot_peaks_details': True,  # bool (default: False) - show peak markers and residuals
         }
     },
+
+    'iglusnfr_optimized': {
+        # === Preprocessing ===
+        'normalize_dff': True,
+        'bleach': True,
+        'sg_window': 9,
+        'sg_poly': 2,
+
+        # === Kinetics Estimation ===
+        'fit_source': 'global',
+        'decay_progression_mode': 'none',  # Allow non-linear but still monotonic progression
+        'anchor_final_tau': False,  # Don't over-constrain - let the model fit naturally
+        'anchor_first_tau': False,
+
+        # === Event Model ===
+        'event_model': 'iglusnfr',  # Specifically optimized for iGluSnFR S72A
+        'event_model_settings': {},
+
+        # === Recut/Averaging ===
+        'recut_projection': 'mean',
+        'recut_oversample': 20,
+        'recut_peak_recenter': 0,
+        'recut_snippets': True,
+
+        # === NNLS Fitting ===
+        'nnls_weight_mode': 'savgol',
+        'nnls_weight_tau_s': None,
+        'fit_diagnostic_plot': False,
+        'allow_shift': True,
+        'huber_delta': 2.5,
+        'irls_iters': 20,
+        'delta_max_s': 0.002,
+        'delta_step_s': 0.00025,
+        'shift_min_s': 0.00005,
+
+        # === Time Windows ===
+        'pre_zoom_s': 0.20,
+        'post_zoom_s': 0.20,
+        'f0_window_s': 1.0,
+
+        # === Peak Detection ===
+        'peak_window_ms': 10.0,
+        'peak_avg_points': 1,  # Capture sharp peaks without averaging
+        'pre_peak_ms': 1.0,
+
+        # === Thresholding ===
+        'measurement': 'NNLS',
+        'fail_method': 'SAVGOL',
+        'threshold_mode': 'auto',
+        'null_N': 1.0,
+        'null_sim_max_points': 1000,
+        'null_min_post_zoom_s': 0.05,
+
+        # === Kinetics Grids ===
+        # Ultra-fast rise times for sharp iGluSnFR peaks
+        'kin_taur_grid_ms': [0.1, 0.2, 0.3, 0.5, 0.8, 1.0, 1.5, 2.0, 3.0],
+        # Bi-exponential decay: fast and slow components
+        'kin_taud0_grid_ms': [2.0, 4.0, 6.0, 8.0, 10.0, 15.0, 20.0, 25.0, 35.0, 50.0, 80.0, 120.0],
+        'kin_slope_grid_ms': [0.0, 0.25, 0.5, 1.0, 2.0, 3.0, 5.0],
+
+        # === Bleach Correction ===
+        'bleach_huber_delta': 3.0,
+        'bleach_tau_range_factor': (0.25, 4.0),
+        'bleach_n_tau': 25,
+
+        # === Plotting ===
+        'plot': {
+            'enabled': True,
+            'traces': ['raw', 'nnls'],
+            'show_decay': True,
+            'trials': False,
+            'baseline': False,
+            'residuals': True,
+            'plot_peaks_details': True,
+        },
+
+        # === Template Variants (Experimental) ===
+        # Enable multi-template NNLS: test multiple slow/fast ratios per event
+        # NNLS automatically selects best combination based on residuals
+        'use_template_variants': True,  # Set to True to enable
+        'template_variant_ratios': np.arange(0.0, 1.0, 0.1),  # Slow component fractions to test
+    },
     
     # Minimal preset showing only changed values (others use defaults)
     'default_example': {
@@ -194,7 +283,7 @@ options_presets = {
 }
 
 # Choose which preset to use (set to the one you want to visualize)
-preset_name = 'double_exp_default'  # e.g., 'single_exp_fixed_8ms'
+preset_name = 'iglusnfr_optimized'  # e.g., 'single_exp_fixed_8ms'
 options = options_presets[preset_name]
 
 res = extract_metrics(

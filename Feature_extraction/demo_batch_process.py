@@ -140,7 +140,7 @@ for in_dir in folders:
 
                 # === Kinetics Estimation ===
                 'fit_source': 'global',
-                'decay_progression_mode': 'free_monotonic',  # Allow non-linear but still monotonic progression
+                'decay_progression_mode': 'none',  # Allow non-linear but still monotonic progression
                 'anchor_final_tau': False,  # Don't over-constrain - let the model fit naturally
                 'anchor_first_tau': False,
 
@@ -149,8 +149,8 @@ for in_dir in folders:
                 'event_model_settings': {},
 
                 # === Recut/Averaging ===
-                'recut_projection': 'median',
-                'recut_oversample': 50,
+                'recut_projection': 'mean',
+                'recut_oversample': 20,
                 'recut_peak_recenter': 0,
                 'recut_snippets': True,
 
@@ -159,7 +159,7 @@ for in_dir in folders:
                 'nnls_weight_tau_s': None,
                 'fit_diagnostic_plot': False,
                 'allow_shift': True,
-                'huber_delta': 5.5,
+                'huber_delta': 2.5,
                 'irls_iters': 20,
                 'delta_max_s': 0.002,
                 'delta_step_s': 0.00025,
@@ -171,7 +171,7 @@ for in_dir in folders:
                 'f0_window_s': 1.0,
 
                 # === Peak Detection ===
-                'peak_window_ms': 20.0,
+                'peak_window_ms': 10.0,
                 'peak_avg_points': 1,  # Capture sharp peaks without averaging
                 'pre_peak_ms': 1.0,
 
@@ -204,7 +204,13 @@ for in_dir in folders:
                     'baseline': False,
                     'residuals': True,
                     'plot_peaks_details': True,
-                }
+                },
+
+                # === Template Variants (Experimental) ===
+                # Enable multi-template NNLS: test multiple slow/fast ratios per event
+                # NNLS automatically selects best combination based on residuals
+                'use_template_variants': True,  # Set to True to enable
+                'template_variant_ratios': np.arange(0.0, 1.0, 0.1),  # Slow component fractions to test
             },
             'double_exp_default': {
                 # === Preprocessing ===
@@ -285,15 +291,15 @@ for in_dir in folders:
         preset_name = 'iglusnfr_optimized'  # Use iGluSnFR-specific model for better peak capture
         options = options_presets[preset_name]
 
+        base = os.path.splitext(os.path.basename(xlsx_path))[0]
         res = extract_metrics(
             time, trials,
             train_start=train_start,  # seconds
             isi=isi,                  # seconds (per-folder override supported)
             n_pulses=n_pulses,
-            options=options
+            options=options,
+            filename=base  # Add filename for plot title
         )
-
-        base = os.path.splitext(os.path.basename(xlsx_path))[0]
         if res.get('figure') is not None:
             res['figure'].savefig(os.path.join(out_dir, f"{base}.png"), dpi=150)
 

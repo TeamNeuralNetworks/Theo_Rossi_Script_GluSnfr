@@ -129,6 +129,9 @@ DEFAULTS = {
     'nnls_weight_mode': 'uniform',  # 'uniform', 'linear', 'exponential', 'savgol'
     'nnls_weight_tau_s': None,  # Time constant for exponential or slope for linear (auto if None)
     'fit_diagnostic_plot': False,  # Display weight and decay progression diagnostics
+    # Template variants for residual-guided fitting (experimental)
+    'use_template_variants': False,  # Enable multi-template NNLS (single pass, data-driven slow component)
+    'template_variant_ratios': [0.2, 0.4, 0.6, 0.8],  # Slow component fractions to test per event
 }
 
 # Recut options: oversample factor and projection ('mean'|'median'|'std')
@@ -140,6 +143,8 @@ DEFAULTS.update({
 
 # Selected kernel (set inside extract_metrics based on options; default is iglusnfr_kernel)
 _KERNEL_FUN = iglusnfr_kernel
+# Variant kernel builder for template variants feature (set if model supports it)
+_VARIANT_KERNEL_BUILDER = None
 
 
 # -------------------------
@@ -345,6 +350,152 @@ def _fit_single_pulse_amp(
     return float(best_a), float(best_d)
 
 
+def fit_amplitudes_with_template_variants(
+    y: np.ndarray,
+    t: np.ndarray,
+    stim_times: np.ndarray,
+    tau_r_s: float,
+    tau_d_vec_s: np.ndarray,
+    *,
+    variant_ratios: List[float],
+    weight_mode: str,
+    weight_tau_s: Optional[float],
+    isi: float,
+    event_t0_s: float = 0.0,
+):
+    """Single-pass NNLS with multiple template variants per event.
+
+    Instead of one template per event, creates N variants with different slow/fast
+    component ratios. NNLS automatically selects the best combination.
+
+    Args:
+        y: Signal to fit
+        t: Time vector
+        stim_times: Stimulus times
+        tau_r_s: Rise time constant
+        tau_d_vec_s: Decay time constants per event
+        variant_ratios: List of slow component fractions (e.g., [0.1, 0.3, 0.5, 0.7])
+        weight_mode: Weighting mode for NNLS
+        weight_tau_s: Weighting time constant
+        isi: Inter-stimulus interval
+        event_t0_s: Event onset offset
+
+    Returns:
+        (amplitudes, shifts, design, reconstruction, components_list, variant_info)
+        - amplitudes: Per-event amplitudes (aggregated across variants)
+        - shifts: Zero array (no shift search with variants)
+        - design: Full kernel matrix [time, n_events * n_variants]
+        - reconstruction: Fitted signal
+        - components_list: Per-event components (aggregated)
+        - variant_info: Dict with selection diagnostics
+    """
+    n_events = len(stim_times)
+    n_variants = len(variant_ratios)
+    event_t0_s = float(event_t0_s)
+
+    # Build expanded kernel: [time_points, n_events * n_variants]
+    kernel_columns = []
+
+    for i_event in range(n_events):
+        st = float(stim_times[i_event])
+        anchor = st + event_t0_s
+        tau_d = float(tau_d_vec_s[i_event])
+
+        for frac_slow in variant_ratios:
+            # Build kernel with specific slow component fraction
+            # For iGluSnFR model: frac_fast = 1 - frac_slow
+            # For other models, this will just use the default template
+            k = _build_variant_kernel(t - anchor, tau_r_s, tau_d, frac_slow)
+            kernel_columns.append(k)
+
+    X = np.column_stack(kernel_columns) if kernel_columns else np.zeros((t.size, 0))
+
+    # Compute weights
+    weights = _calculate_nnls_weights(
+        t, stim_times, isi, weight_mode, weight_tau_s, y_ref=y
+    )
+
+    # Single NNLS solve for all variants
+    a_variants = _nnls_weighted(X, y, weights)
+
+    # Debug: check if kernel and amplitudes are reasonable
+    try:
+        from smoothing import progress_print
+        progress_print(f"[DEBUG] Kernel shape: {X.shape}, y shape: {y.shape}")
+        progress_print(f"[DEBUG] NNLS returned {len(a_variants)} amplitudes")
+        progress_print(f"[DEBUG] First 8 amplitudes (events 0-1, all variants): {a_variants[:8]}")
+        # Check kernel magnitudes for first event
+        for i_var in range(min(4, n_variants)):
+            col_idx = i_var
+            k_max = np.max(np.abs(X[:, col_idx]))
+            progress_print(f"[DEBUG] Event 0, variant {i_var}: kernel max = {k_max:.6f}, amplitude = {a_variants[col_idx]:.6f}")
+    except Exception as e:
+        try:
+            progress_print(f"[DEBUG] Diagnostic failed: {e}")
+        except:
+            pass
+
+    # Aggregate results: sum amplitudes across variants for each event
+    a_variants_2d = a_variants.reshape(n_events, n_variants)
+    a_events = np.sum(a_variants_2d, axis=1)
+
+    # Debug: check aggregated amplitudes
+    try:
+        progress_print(f"[DEBUG] Aggregated amplitudes (sum across variants): {a_events}")
+    except Exception:
+        pass
+
+    # Build reconstruction
+    yhat = X @ a_variants
+
+    # Build per-event components (aggregated across variants)
+    components = []
+    for i_event in range(n_events):
+        st = float(stim_times[i_event])
+        anchor = st + event_t0_s
+        tau_d = float(tau_d_vec_s[i_event])
+
+        # Sum contributions from all variants for this event
+        comp_event = np.zeros_like(y)
+        for i_var, frac_slow in enumerate(variant_ratios):
+            idx = i_event * n_variants + i_var
+            amp_var = a_variants[idx]
+            if amp_var > 0:
+                k = _build_variant_kernel(t - anchor, tau_r_s, tau_d, frac_slow)
+                comp_event += amp_var * k
+        components.append(comp_event)
+
+    # Diagnostic info: which variants were selected for each event
+    variant_info = {
+        'n_variants': n_variants,
+        'variant_ratios': variant_ratios,
+        'amplitudes_per_variant': a_variants_2d,  # [n_events, n_variants]
+        'dominant_variant_idx': np.argmax(a_variants_2d, axis=1),  # Which variant had most amplitude
+        'variant_distribution': a_variants_2d / (a_events[:, None] + 1e-12),  # Normalized distribution
+    }
+
+    # No shift search with variants approach
+    d_events = np.zeros(n_events, float)
+
+    return a_events, d_events, X, yhat, components, variant_info
+
+
+def _build_variant_kernel(dt: np.ndarray, tau_r: float, tau_d: float, frac_slow: float) -> np.ndarray:
+    """Build kernel with specific slow component fraction.
+
+    For iGluSnFR model with bi-exponential decay, this adjusts frac_fast parameter.
+    For other models, returns standard kernel (ignoring frac_slow).
+
+    NOTE: This function relies on module-level _VARIANT_KERNEL_BUILDER being set up.
+    """
+    global _VARIANT_KERNEL_BUILDER
+    if _VARIANT_KERNEL_BUILDER is not None:
+        return _VARIANT_KERNEL_BUILDER(dt, tau_r, tau_d, frac_slow)
+    else:
+        # Fallback: use standard kernel (no variant support)
+        return _KERNEL_FUN(dt, tau_r, tau_d)
+
+
 def fit_amplitudes_no_overlap_forward(
     y: np.ndarray,
     t: np.ndarray,
@@ -364,7 +515,7 @@ def fit_amplitudes_no_overlap_forward(
     event_t0_s: float = 0.0,
 ):
     """Forward, non‑overlap per‑pulse fitting with micro‑shifts.
-    
+
     Returns (amplitudes, shifts, design, reconstruction, components_list).
     """
     n = len(stim_times)
@@ -1082,6 +1233,58 @@ def extract_metrics(
     varying_supported_names = {"double_exp", "cooperative", "bilinear"}
     is_varying_model = ev_model_name in varying_supported_names
 
+    # Set up variant kernel builder if template variants are enabled
+    global _VARIANT_KERNEL_BUILDER
+    _VARIANT_KERNEL_BUILDER = None  # Reset to None by default
+
+    if cfg.get('use_template_variants', False):
+        # Template variants: build kernels with varying slow/fast component ratios
+        if ev_model_name == 'iglusnfr':
+            # For iGluSnFR model, we can vary frac_fast parameter
+            try:
+                try:
+                    from Model_Calibration.event_models import get_event_model
+                except Exception:
+                    from event_models import get_event_model  # type: ignore
+
+                spec_iglu = get_event_model('iglusnfr')
+                model_func = spec_iglu['func']
+
+                # Get base parameters from event_model_settings or use defaults
+                base_params = {
+                    'tau_rise': 0.003,  # 3 ms
+                    'tau_decay_fast': 0.008,  # 8 ms
+                    'tau_decay_slow': 0.035,  # 35 ms
+                }
+                base_params.update(em_settings)
+
+                def _iglusnfr_variant_builder(dt: np.ndarray, tau_r: float, tau_d: float, frac_slow: float) -> np.ndarray:
+                    """Build iGluSnFR kernel with specific slow component fraction."""
+                    dt_ms = dt * 1000.0
+                    frac_fast = 1.0 - frac_slow
+                    # Use tau_r and tau_d from global fit, but vary frac_fast
+                    params = [
+                        1.0,  # amp (will be normalized)
+                        tau_r,  # tau_rise from global fit
+                        base_params['tau_decay_fast'],  # tau_decay_fast
+                        tau_d,  # tau_decay_slow from global fit (varies per event)
+                        frac_fast,  # THIS is what varies across templates
+                        0.0,  # t_peak
+                    ]
+                    y = model_func(dt_ms, *params)
+                    # Normalize to unit peak
+                    peak_val = np.max(y) if y.size > 0 else 1.0
+                    return y / max(peak_val, 1e-12)
+
+                _VARIANT_KERNEL_BUILDER = _iglusnfr_variant_builder
+                progress_print(f"[model] Template variants enabled for iGluSnFR with ratios: {cfg.get('template_variant_ratios')}")
+            except Exception as e:
+                progress_print(f"[warning] Could not set up template variants for iGluSnFR: {e}")
+                progress_print("[warning] Falling back to standard single-template fitting")
+        else:
+            progress_print(f"[warning] Template variants requested but not supported for model '{ev_model_name}'")
+            progress_print("[warning] Currently only 'iglusnfr' model supports template variants")
+
     # No auto model selection: honor explicit event_model; otherwise use default.
 
     # Process NNLS weight configuration
@@ -1723,6 +1926,47 @@ def extract_metrics(
                 for k, v in fitted.items():
                     if k not in ('amp', 't_peak', '_recut') and np.isfinite(v):
                         cfg['event_model_settings'][k] = float(v)
+
+            # REBUILD variant kernel builder with fitted parameters
+            if cfg.get('use_template_variants', False) and event_model == 'iglusnfr':
+                try:
+                    try:
+                        from Model_Calibration.event_models import get_event_model
+                    except Exception:
+                        from event_models import get_event_model  # type: ignore
+
+                    spec_iglu = get_event_model('iglusnfr')
+                    model_func = spec_iglu['func']
+
+                    # Use FITTED parameters from global fit
+                    fitted_params = {
+                        'tau_decay_fast': float(fitted.get('tau_decay_fast', 0.008)),
+                        'tau_decay_slow': float(fitted.get('tau_decay_slow', 0.035)),
+                    }
+
+                    def _iglusnfr_variant_builder_fitted(dt: np.ndarray, tau_r: float, tau_d: float, frac_slow: float) -> np.ndarray:
+                        """Build iGluSnFR kernel with specific slow component fraction using FITTED kinetics."""
+                        dt_ms = dt * 1000.0
+                        frac_fast = 1.0 - frac_slow
+                        # Use FITTED tau values from global fit, vary only frac_fast
+                        params = [
+                            1.0,  # amp (will be normalized)
+                            tau_r,  # tau_rise from global fit
+                            fitted_params['tau_decay_fast'],  # FITTED fast decay
+                            fitted_params['tau_decay_slow'],  # FITTED slow decay (or use tau_d)
+                            frac_fast,  # THIS is what varies across templates
+                            0.0,  # t_peak
+                        ]
+                        y = model_func(dt_ms, *params)
+                        # Normalize to unit peak
+                        peak_val = np.max(y) if y.size > 0 else 1.0
+                        return y / max(peak_val, 1e-12)
+
+                    _VARIANT_KERNEL_BUILDER = _iglusnfr_variant_builder_fitted
+                    progress_print(f"[model] Updated variant kernel with FITTED params: tau_fast={fitted_params['tau_decay_fast']*1000:.2f}ms, tau_slow={fitted_params['tau_decay_slow']*1000:.2f}ms")
+                except Exception as e:
+                    progress_print(f"[warning] Failed to update variant kernel builder: {e}")
+
         else:
             # Fallback if curve_fit completely failed
             progress_print(f"[global] fit_average_event failed, using grid search fallback")
@@ -1752,7 +1996,7 @@ def extract_metrics(
 
         ev_model_name, n_coop_effective = _apply_event_model_from_cfg()
         is_varying_model = ev_model_name in varying_supported_names
-        progress_print(f"[fit][global] recut τr={tau_r*1000:.2f}ms τd={tau_d0*1000:.2f}ms model={event_model}")
+        progress_print(f"[fit][global] recut tau_r={tau_r*1000:.2f}ms tau_d={tau_d0*1000:.2f}ms model={event_model}")
 
         # Global fit_source: anchor global tau to middle event, then constrain per-event fits
         if dec_mode == 'fixed':
@@ -2390,13 +2634,47 @@ def extract_metrics(
         progress_print(f"[debug] stim_times contains {nan_count} NaN/Inf values at indices: {nan_indices.tolist()}")
 
     # Fit average trace (forward, no overlap) and measure amplitudes
-    a_avg, d_avg, X_avg, yhat_avg, comp_avg = fit_amplitudes_no_overlap_forward(
-        y_avg, t, stim_times, tau_r, tau_d_vec,
-        pre_zoom_s=cfg['pre_zoom_s'], post_zoom_s=cfg['post_zoom_s'],
-        robust=True, huber_delta=cfg['huber_delta'], irls_iters=cfg['irls_iters'],
-        allow_shift=allow_shift, delta_max_s=cfg['delta_max_s'], delta_step_s=cfg['delta_step_s'],
-        shift_min_s=cfg['shift_min_s'], event_t0_s=event_t0_s,
-    )
+    # Use template variants if enabled, otherwise use standard forward fitting
+    variant_info_avg = None
+    # Debug: check why variants might not be used
+    _use_var = cfg.get('use_template_variants', False)
+    _builder_set = _VARIANT_KERNEL_BUILDER is not None
+    try:
+        progress_print(f"[NNLS DEBUG] use_template_variants={_use_var}, _VARIANT_KERNEL_BUILDER is not None={_builder_set}")
+        if not _use_var:
+            progress_print(f"[NNLS DEBUG] 'use_template_variants' not found in cfg or False")
+        if not _builder_set:
+            progress_print(f"[NNLS DEBUG] _VARIANT_KERNEL_BUILDER is None!")
+    except Exception:
+        pass
+    if cfg.get('use_template_variants', False) and _VARIANT_KERNEL_BUILDER is not None:
+        # Use template variants approach: single NNLS with multiple templates per event
+        variant_ratios = cfg.get('template_variant_ratios', [0.2, 0.4, 0.6, 0.8])
+        progress_print(f"[NNLS] Using template variants with {len(variant_ratios)} ratios per event")
+        a_avg, d_avg, X_avg, yhat_avg, comp_avg, variant_info_avg = fit_amplitudes_with_template_variants(
+            y_avg, t, stim_times, tau_r, tau_d_vec,
+            variant_ratios=variant_ratios,
+            weight_mode=weight_mode,
+            weight_tau_s=weight_tau_s,
+            isi=isi,
+            event_t0_s=event_t0_s,
+        )
+        # Report which variants were selected
+        try:
+            dominant_idx = variant_info_avg['dominant_variant_idx']
+            dominant_ratios = [variant_ratios[i] for i in dominant_idx]
+            progress_print(f"[NNLS] Dominant slow fractions per event: {[f'{r:.1f}' for r in dominant_ratios]}")
+        except Exception:
+            pass
+    else:
+        # Standard forward fitting with single template per event
+        a_avg, d_avg, X_avg, yhat_avg, comp_avg = fit_amplitudes_no_overlap_forward(
+            y_avg, t, stim_times, tau_r, tau_d_vec,
+            pre_zoom_s=cfg['pre_zoom_s'], post_zoom_s=cfg['post_zoom_s'],
+            robust=True, huber_delta=cfg['huber_delta'], irls_iters=cfg['irls_iters'],
+            allow_shift=allow_shift, delta_max_s=cfg['delta_max_s'], delta_step_s=cfg['delta_step_s'],
+            shift_min_s=cfg['shift_min_s'], event_t0_s=event_t0_s,
+        )
 
     # Diagnostic: assess NNLS fit quality
     try:
