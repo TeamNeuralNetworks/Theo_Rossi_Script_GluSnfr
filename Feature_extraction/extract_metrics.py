@@ -1262,19 +1262,21 @@ def extract_metrics(
                     """Build iGluSnFR kernel with specific slow component fraction."""
                     dt_ms = dt * 1000.0
                     frac_fast = 1.0 - frac_slow
-                    # Use tau_r and tau_d from global fit, but vary frac_fast
+                    # Use fixed tau_decay values from base_params, only vary frac_fast
                     params = [
                         1.0,  # amp (will be normalized)
                         tau_r,  # tau_rise from global fit
-                        base_params['tau_decay_fast'],  # tau_decay_fast
-                        tau_d,  # tau_decay_slow from global fit (varies per event)
+                        base_params['tau_decay_fast'],  # tau_decay_fast (fixed: 8ms)
+                        base_params['tau_decay_slow'],  # tau_decay_slow (fixed: 35ms, NOT tau_d which can be wrong)
                         frac_fast,  # THIS is what varies across templates
                         0.0,  # t_peak
                     ]
                     y = model_func(dt_ms, *params)
-                    # Normalize to unit peak
-                    peak_val = np.max(y) if y.size > 0 else 1.0
-                    return y / max(peak_val, 1e-12)
+                    # Normalize by area (integrate in milliseconds to match model_func input units)
+                    tp_ms = np.maximum(dt_ms, 0.0)
+                    support = tp_ms <= 200.0  # First 200ms
+                    area = np.trapz(y[support], dt_ms[support]) if np.any(support) else 1.0
+                    return y / max(area, 1e-12)
 
                 _VARIANT_KERNEL_BUILDER = _iglusnfr_variant_builder
                 progress_print(f"[model] Template variants enabled for iGluSnFR with ratios: {cfg.get('template_variant_ratios')}")
@@ -1313,9 +1315,12 @@ def extract_metrics(
     # Helper: estimate base kinetics from recut average of all trials/events
     def _estimate_from_recut_average():
         try:
-            # Use longer window for kinetics fitting (not limited by display concerns)
-            # Use at least 50ms, or ISI-5ms if larger, to capture decay kinetics
-            post_ms_fit = max(50.0, (isi * 1000.0) - 5.0)
+            # Use ISI-aware window: avoid capturing next pulse at high frequencies
+            isi_ms = isi * 1000.0
+            if isi_ms < 30.0:
+                post_ms_fit = max(12.0, isi_ms * 0.75)  # Limit to 75% of ISI for fast stim
+            else:
+                post_ms_fit = min(50.0, isi_ms - 5.0)  # Standard window for slow stim
 
             # Honor explicit top-level option 'recut_snippets'.
             need_snips = bool(
@@ -1873,9 +1878,15 @@ def extract_metrics(
         except Exception:
             pass
 
-        # Use longer window for fitting (not ISI-limited) - at least 50ms to capture decay
-        post_ms_for_fit = max(50.0, (isi * 1000.0) - 5.0)
-        progress_print(f"[global] Using post_ms={post_ms_for_fit:.1f} ms for recut fitting")
+        # Use ISI-aware window for fitting: avoid capturing next pulse at high frequencies
+        # For fast stimulation (ISI<30ms), limit to 75% of ISI to prevent contamination
+        # For slower stimulation, use standard 50ms window
+        isi_ms = isi * 1000.0
+        if isi_ms < 30.0:
+            post_ms_for_fit = max(12.0, isi_ms * 0.75)  # Use 75% of ISI, min 12ms
+        else:
+            post_ms_for_fit = min(50.0, isi_ms - 5.0)  # Standard: 50ms or ISI-5ms
+        progress_print(f"[global] Using post_ms={post_ms_for_fit:.1f} ms for recut fitting (ISI={isi_ms:.1f}ms)")
 
         need_snips = bool(
             cfg.get('plot', {}).get('enabled', False)
@@ -1958,9 +1969,11 @@ def extract_metrics(
                             0.0,  # t_peak
                         ]
                         y = model_func(dt_ms, *params)
-                        # Normalize to unit peak
-                        peak_val = np.max(y) if y.size > 0 else 1.0
-                        return y / max(peak_val, 1e-12)
+                        # Normalize by area (integrate in milliseconds to match model_func input units)
+                        tp_ms = np.maximum(dt_ms, 0.0)
+                        support = tp_ms <= 200.0  # First 200ms
+                        area = np.trapz(y[support], dt_ms[support]) if np.any(support) else 1.0
+                        return y / max(area, 1e-12)
 
                     _VARIANT_KERNEL_BUILDER = _iglusnfr_variant_builder_fitted
                     progress_print(f"[model] Updated variant kernel with FITTED params: tau_fast={fitted_params['tau_decay_fast']*1000:.2f}ms, tau_slow={fitted_params['tau_decay_slow']*1000:.2f}ms")

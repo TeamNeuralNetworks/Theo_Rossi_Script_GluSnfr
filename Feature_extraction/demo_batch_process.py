@@ -11,6 +11,16 @@ Notes:
  - Use `event_model` in the `options` dict.
  - Some models accept extra model-specific settings (e.g. `n_coop` for cooperative models).
 
+ISI-Aware Parameters (IMPORTANT for 50Hz and fast stimulation):
+ - This script automatically adjusts critical parameters based on ISI to prevent
+   capturing overlapping events during single-event analysis (template fitting).
+ - Set ISI in isi_by_folder or default_isi and the following are computed per-file:
+   * peak_window_ms: Limited to ~60% of ISI for fast stim (avoids next pulse)
+   * post_zoom_s: Plotting window scaled to show ~5 pulses
+   * Recut window for template fitting: Automatically limited by extract_metrics.py
+ - These adjustments prevent template contamination at 50Hz while preserving
+   accuracy at 20Hz and slower stimulation frequencies.
+
 Decay progression modes (options['decay_progression_mode']):
  - 'fixed'         : a single tau_d applied to whole train (median)
  - 'free_monotonic': interpolate per-pulse tau_d non-decreasingly
@@ -77,7 +87,12 @@ train_start_by_folder = {
 }
 
 # ISI control: default_isi applies to all unless overridden in isi_by_folder.
-# Example: last entry gets ISI=0.02 instead of default 0.05
+# The ISI automatically adjusts critical parameters (peak_window, post_zoom, recut_window)
+# to prevent capturing overlapping events at high frequencies (50Hz).
+# Example ISI values:
+#   0.05 = 20Hz (default for most datasets)
+#   0.02 = 50Hz (high frequency, uses shorter analysis windows)
+#   0.01 = 100Hz (ultra-high frequency)
 default_isi = 0.05
 isi_by_folder = {
     folders[10]: 0.02,  # Theo_1_5_50Hz
@@ -129,6 +144,28 @@ for in_dir in folders:
         time = t_raw[ok]
         trials = X[ok, :]
 
+        # === ISI-Dependent Parameter Calculation ===
+        # Automatically adjust critical parameters based on ISI to prevent
+        # capturing overlapping events during template fitting and peak detection
+        ISI_MS = isi * 1000.0  # Convert to milliseconds
+
+        # Peak detection window: should be < ISI to avoid next pulse
+        # Use 60% of ISI for fast stim, capped at 25ms for slow stim
+        if ISI_MS < 30.0:
+            PEAK_WINDOW_MS = max(8.0, ISI_MS * 0.6)  # 60% of ISI, min 8ms
+        else:
+            PEAK_WINDOW_MS = min(25.0, ISI_MS * 0.7)  # Standard window for slow stim
+
+        # Zoom windows for plotting and analysis
+        # For fast stim: limit to avoid excessive overlap visualization
+        # For slow stim: use standard windows
+        if ISI_MS < 30.0:
+            POST_ZOOM_S = max(0.10, isi * 5)  # Show ~5 pulses or 100ms minimum
+        else:
+            POST_ZOOM_S = 0.20  # Standard 200ms post-train window
+
+        PRE_ZOOM_S = 0.20  # Pre-train window (constant)
+
         # Define option presets
         options_presets = {
             'iglusnfr_optimized': {
@@ -165,13 +202,13 @@ for in_dir in folders:
                 'delta_step_s': 0.00025,
                 'shift_min_s': 0.00005,
 
-                # === Time Windows ===
-                'pre_zoom_s': 0.20,
-                'post_zoom_s': 0.20,
+                # === Time Windows (ISI-aware) ===
+                'pre_zoom_s': PRE_ZOOM_S,  # Computed above based on ISI
+                'post_zoom_s': POST_ZOOM_S,  # Automatically adjusted for fast/slow stim
                 'f0_window_s': 1.0,
 
-                # === Peak Detection ===
-                'peak_window_ms': 10.0,
+                # === Peak Detection (ISI-aware) ===
+                'peak_window_ms': PEAK_WINDOW_MS,  # Automatically scaled to avoid next pulse
                 'peak_avg_points': 1,  # Capture sharp peaks without averaging
                 'pre_peak_ms': 1.0,
 
@@ -246,13 +283,13 @@ for in_dir in folders:
                 'delta_step_s': 0.00025,
                 'shift_min_s': 0.00005,
 
-                # === Time Windows ===
-                'pre_zoom_s': 0.20,
-                'post_zoom_s': 0.20,
+                # === Time Windows (ISI-aware) ===
+                'pre_zoom_s': PRE_ZOOM_S,  # Computed above based on ISI
+                'post_zoom_s': POST_ZOOM_S,  # Automatically adjusted for fast/slow stim
                 'f0_window_s': 1.0,
 
-                # === Peak Detection ===
-                'peak_window_ms': 20.0,
+                # === Peak Detection (ISI-aware) ===
+                'peak_window_ms': PEAK_WINDOW_MS,  # Automatically scaled to avoid next pulse
                 'peak_avg_points': 1,  # Reduced from 5 to capture sharp peaks better
                 'pre_peak_ms': 1.0,  # Increased from 0.0 to ensure full peak capture
 

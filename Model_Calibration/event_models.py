@@ -34,7 +34,7 @@ FIT_LIMITS: Dict[str, Tuple[float, float]] = {
     't_peak': (0.0, 10.0),
     'tau': (0.001, 0.200),
     'tau_primary': (0.0005, 0.020),
-    'tau_secondary': (0.010, 1.000),
+    'tau_secondary': (0.010, 0.150),  # Tightened from 1.000s to 150ms for iGluSnFR
 }
 
 
@@ -581,7 +581,7 @@ def get_event_model(name: str) -> Dict:
                 0.008,                                   # tau_decay_fast: 8 ms
                 0.035,                                   # tau_decay_slow: 35 ms
                 0.6,                                     # frac_fast: 60%
-                float(t[np.nanargmax(y)])               # t_peak
+                float(np.clip(t[np.nanargmax(y)], 0, 10))  # t_peak (clipped to bounds for robustness)
             ],
             'complexity': 6,
             # Per-parameter progression rules for train dynamics

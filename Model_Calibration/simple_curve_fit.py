@@ -181,5 +181,12 @@ def fit_average_event(
             except Exception:
                 pass
         return params, t_ms, y_avg
-    except Exception:
+    except Exception as e:
+        try:
+            from smoothing import progress_print
+            import traceback
+            progress_print(f"[fit_average_event] FAILED with error: {type(e).__name__}: {e}")
+            progress_print(f"[fit_average_event] Traceback: {traceback.format_exc()}")
+        except Exception:
+            pass
         return None

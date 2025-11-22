@@ -12,6 +12,16 @@ Notes:
  - Use `event_model` in the `options` dict.
  - Some models accept extra model-specific settings (e.g. `n_coop` for cooperative models).
 
+ISI-Aware Parameters (IMPORTANT for 50Hz and fast stimulation):
+ - This script automatically adjusts critical parameters based on ISI to prevent
+   capturing overlapping events during single-event analysis (template fitting).
+ - Set ISI variable (in seconds) and the following are computed:
+   * peak_window_ms: Limited to ~60% of ISI for fast stim (avoids next pulse)
+   * post_zoom_s: Plotting window scaled to show ~5 pulses
+   * Recut window for template fitting: Automatically limited by extract_metrics.py
+ - These adjustments prevent template contamination at 50Hz while preserving
+   accuracy at 20Hz and slower stimulation frequencies.
+
 Decay progression modes (options['decay_progression_mode']):
  - 'fixed'         : a single tau_d applied to whole train (median)
  - 'free_monotonic': monotonic spline through per-pulse tau_d (non-decreasing)
@@ -73,16 +83,44 @@ xlsx_path = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Theo_4_50Hz\2022072
 xlsx_path = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Theo_4Ca\20220726_linescan4_20Hz_10pulses_4mMCa_bouton5_traces_converted.xlsx"
 xlsx_path = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Stability_After\241212_Fibre1_PortionB_Bouton_4_bis.xlsx"
 
+xlsx_path = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Theo_1_5_50Hz\20210721_linescan2_50Hz_10pulses_1.5mMCa_bouton2_traces_converted.xlsx"
 
 
+START = 0.498
+# START = START + 0.5
 
-START = 0.498 
-START = START + 0.5
-
-ISI = 0.05 # 20Hz
-# ISI = 0.02 # 50Hz
+# === Inter-Stimulus Interval (ISI) ===
+# Set this based on your stimulation frequency:
+# ISI = 0.05  # 20Hz stimulation
+# ISI = 0.02  # 50Hz stimulation
+# ISI = 0.01  # 100Hz stimulation
+ISI = 0.02  # Current: 50Hz
 
 out_dir = r"C:\Users\Antoine.Valera\Desktop\Testout"
+
+# === ISI-Dependent Parameter Calculation ===
+# The following parameters are automatically adjusted based on ISI to prevent
+# capturing overlapping events during template fitting and peak detection.
+ISI_MS = ISI * 1000.0  # Convert to milliseconds
+
+# Peak detection window: should be < ISI to avoid next pulse
+# Use 50-70% of ISI for fast stim, capped at 25ms for slow stim
+if ISI_MS < 30.0:
+    PEAK_WINDOW_MS = max(8.0, ISI_MS * 0.6)  # 60% of ISI, min 8ms
+else:
+    PEAK_WINDOW_MS = min(25.0, ISI_MS * 0.7)  # Standard window for slow stim
+
+# Zoom windows for plotting and analysis
+# For fast stim: limit to avoid excessive overlap visualization
+# For slow stim: use standard windows
+if ISI_MS < 30.0:
+    POST_ZOOM_S = max(0.10, ISI * 5)  # Show ~5 pulses or 100ms minimum
+else:
+    POST_ZOOM_S = 0.20  # Standard 200ms post-train window
+
+PRE_ZOOM_S = 0.20  # Pre-train window (constant)
+
+print(f"[ISI-aware] ISI={ISI_MS:.1f}ms, peak_window={PEAK_WINDOW_MS:.1f}ms, post_zoom={POST_ZOOM_S:.3f}s")
 
 os.makedirs(out_dir, exist_ok=True)
 df = pd.read_excel(xlsx_path, sheet_name=0, engine="openpyxl")
@@ -203,13 +241,13 @@ options_presets = {
         'delta_step_s': 0.00025,
         'shift_min_s': 0.00005,
 
-        # === Time Windows ===
-        'pre_zoom_s': 0.20,
-        'post_zoom_s': 0.20,
+        # === Time Windows (ISI-aware) ===
+        'pre_zoom_s': PRE_ZOOM_S,  # Computed above based on ISI
+        'post_zoom_s': POST_ZOOM_S,  # Automatically adjusted for fast/slow stim
         'f0_window_s': 1.0,
 
-        # === Peak Detection ===
-        'peak_window_ms': 10.0,
+        # === Peak Detection (ISI-aware) ===
+        'peak_window_ms': PEAK_WINDOW_MS,  # Automatically scaled to avoid next pulse
         'peak_avg_points': 1,  # Capture sharp peaks without averaging
         'pre_peak_ms': 1.0,
 
