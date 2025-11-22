@@ -26,6 +26,8 @@ def fit_average_event(
     projection: str = 'mean',
     peak_recenter=0,
     return_snippets: bool = False,
+    onset_method: str = 'inflection',
+    onset_baseline_threshold: float = 0.15,
 ) -> Optional[Tuple[Dict[str, float], np.ndarray, np.ndarray]]:
     """Recut trials, average, and fit an event model.
 
@@ -53,6 +55,16 @@ def fit_average_event(
     peak_recenter : int | tuple | None, optional
         Maximum number of samples permitted when shifting snippet peaks prior to
         averaging; pass 0/None to keep stimulus-aligned windows.
+    onset_method : str, optional
+        Method for onset detection to exclude contaminated baseline:
+        - 'inflection': Find inflection point (minimum derivative) and exclude points before it
+        - 'baseline_threshold': Exclude all points below baseline + threshold * (peak - baseline)
+        - 'none': No onset masking
+        Default is 'inflection'.
+    onset_baseline_threshold : float, optional
+        Threshold factor for baseline_threshold method. Points below
+        baseline + threshold * (peak - baseline) are excluded. Default is 0.15
+        (15% of peak amplitude above baseline).
 
     Returns
     -------
@@ -107,6 +119,57 @@ def fit_average_event(
             return None
         tf = t_ms[mask]
         yf = y_avg[mask]
+
+        # Onset detection to exclude contaminated baseline at high frequencies
+        onset_idx = 0
+        method = str(onset_method).lower()
+
+        if method == 'inflection' and len(yf) > 5:
+            # Find inflection point (minimum derivative) - where signal starts rising
+            dy = np.gradient(yf, tf)
+            # Smooth derivative to reduce noise
+            from scipy.ndimage import uniform_filter1d
+            dy_smooth = uniform_filter1d(dy, size=min(5, len(dy)))
+            # Find first local minimum in derivative (where rise starts)
+            # Look in first 30% of window where onset should occur
+            search_len = max(5, int(len(dy_smooth) * 0.3))
+            onset_idx = int(np.argmin(dy_smooth[:search_len]))
+            # Validate: only exclude if there's actually a dip/notch (dy is negative)
+            if dy_smooth[onset_idx] >= 0:
+                onset_idx = 0  # No contamination detected, use full window
+
+        elif method == 'baseline_threshold' and len(yf) > 5:
+            # Exclude ALL points below baseline + threshold * (peak - baseline)
+            # This is more aggressive than inflection detection
+            # Estimate baseline from first few points (up to 20% of window or first 5 points)
+            baseline_len = max(3, min(5, int(len(yf) * 0.2)))
+            baseline = float(np.median(yf[:baseline_len]))
+            # Find peak
+            peak = float(np.nanmax(yf))
+            # Compute threshold level
+            threshold_level = baseline + onset_baseline_threshold * (peak - baseline)
+            # Find first point that crosses threshold
+            above_threshold = yf >= threshold_level
+            if np.any(above_threshold):
+                onset_idx = int(np.argmax(above_threshold))
+            else:
+                onset_idx = 0  # All points below threshold, keep everything
+            try:
+                from smoothing import progress_print
+                progress_print(f"[fit_average_event] Baseline: {baseline:.3f}, Peak: {peak:.3f}, Threshold: {threshold_level:.3f}")
+            except Exception:
+                pass
+
+        # Apply onset masking
+        if onset_idx > 0:
+            tf = tf[onset_idx:]
+            yf = yf[onset_idx:]
+            try:
+                from smoothing import progress_print
+                progress_print(f"[fit_average_event] [{method}] Detected onset at t={tf[0]:.2f}ms, excluded {onset_idx} pre-onset points")
+            except Exception:
+                pass
+
         p0 = spec['p0_func'](yf, tf)
         # Robust seeding for two_step_binding: quick coarse grid search
         # to avoid local minima/stagnation at defaults.

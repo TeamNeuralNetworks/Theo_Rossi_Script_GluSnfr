@@ -191,6 +191,14 @@ for in_dir in folders:
                 'recut_peak_recenter': 0,
                 'recut_snippets': True,
 
+                # === Onset Detection for High-Frequency Trains ===
+                # Method for excluding contaminated pre-onset baseline:
+                # - 'inflection': Find inflection point (minimum derivative) - default
+                # - 'baseline_threshold': Exclude all points below baseline + threshold * peak
+                # - 'none': No onset masking
+                'onset_method': 'baseline_threshold',  # Use aggressive baseline masking for 50Hz
+                'onset_baseline_threshold': 0.15,  # 15% above baseline (adjustable 0.1-0.3)
+
                 # === NNLS Fitting ===
                 'nnls_weight_mode': 'savgol',
                 'nnls_weight_tau_s': None,
@@ -271,6 +279,14 @@ for in_dir in folders:
                 'recut_oversample': 50,
                 'recut_peak_recenter': 0,
                 'recut_snippets': True,
+
+                # === Onset Detection for High-Frequency Trains ===
+                # Method for excluding contaminated pre-onset baseline:
+                # - 'inflection': Find inflection point (minimum derivative) - default
+                # - 'baseline_threshold': Exclude all points below baseline + threshold * peak
+                # - 'none': No onset masking
+                'onset_method': 'inflection',  # Use default inflection method for 20Hz
+                'onset_baseline_threshold': 0.15,  # 15% above baseline (adjustable 0.1-0.3)
 
                 # === NNLS Fitting ===
                 'nnls_weight_mode': 'savgol',

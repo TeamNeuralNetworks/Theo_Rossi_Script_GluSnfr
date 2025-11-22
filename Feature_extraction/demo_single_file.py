@@ -71,19 +71,8 @@ if REPO_ROOT not in sys.path:
 
 from Feature_extraction.extract_metrics import extract_metrics
 
-xlsx_path = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Theo_1_5_50Hz\20210722_linescan3_50Hz_10pulses_1.5mMCa_bouton3_traces_converted.xlsx"
-xlsx_path = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Theo_1_5Ca\20220726_linescan3_20Hz_10pulses_1.5mMCa_bouton3_traces_converted.xlsx"
-xlsx_path = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\WT_Anthime\241212_Fibre2_PortionA_bouton2.xlsx"
-
+# Test on the specific problematic 50Hz file
 xlsx_path = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Theo_4_50Hz\20220726_linescan5_50Hz_10pulses_4mMCa_bouton1_traces_converted.xlsx"
-#xlsx_path = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Theo_1_5Ca\20220726_linescan3_20Hz_10pulses_1.5mMCa_bouton3_traces_converted.xlsx"
-
-# xlsx_path = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Theo_4_50Hz\20220727_linescan3_50Hz_10pulses_4mMCa_bouton4_traces_converted.xlsx"
-
-xlsx_path = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Theo_4Ca\20220726_linescan4_20Hz_10pulses_4mMCa_bouton5_traces_converted.xlsx"
-xlsx_path = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Stability_After\241212_Fibre1_PortionB_Bouton_4_bis.xlsx"
-
-xlsx_path = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Theo_1_5_50Hz\20210721_linescan2_50Hz_10pulses_1.5mMCa_bouton2_traces_converted.xlsx"
 
 
 START = 0.498
@@ -222,13 +211,25 @@ options_presets = {
 
         # === Event Model ===
         'event_model': 'iglusnfr',  # Specifically optimized for iGluSnFR S72A
-        'event_model_settings': {},
+        # For 50Hz: use fixed kinetics instead of fitting from contaminated recut
+        'event_model_settings': {
+            'tau_decay_fast': 0.008,  # 8ms fixed (prevents fitting nonsense from overlap)
+            'tau_decay_slow': 0.035,  # 35ms fixed
+        },
 
         # === Recut/Averaging ===
         'recut_projection': 'mean',
         'recut_oversample': 20,
         'recut_peak_recenter': 0,
         'recut_snippets': True,
+
+        # === Onset Detection for High-Frequency Trains ===
+        # Method for excluding contaminated pre-onset baseline:
+        # - 'inflection': Find inflection point (minimum derivative) - default
+        # - 'baseline_threshold': Exclude all points below baseline + threshold * peak
+        # - 'none': No onset masking
+        'onset_method': 'baseline_threshold',  # Use aggressive baseline masking for 50Hz
+        'onset_baseline_threshold': 0.15,  # 15% above baseline (adjustable 0.1-0.3)
 
         # === NNLS Fitting ===
         'nnls_weight_mode': 'savgol',

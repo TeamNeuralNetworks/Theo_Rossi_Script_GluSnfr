@@ -141,6 +141,12 @@ DEFAULTS.update({
     'recut_peak_recenter': 0,
 })
 
+# Onset detection for high-frequency trains (exclude contaminated baseline)
+DEFAULTS.update({
+    'onset_method': 'inflection',  # 'inflection', 'baseline_threshold', or 'none'
+    'onset_baseline_threshold': 0.15,  # Threshold for baseline_threshold method (0.1-0.3)
+})
+
 # Selected kernel (set inside extract_metrics based on options; default is iglusnfr_kernel)
 _KERNEL_FUN = iglusnfr_kernel
 # Variant kernel builder for template variants feature (set if model supports it)
@@ -1459,6 +1465,8 @@ def extract_metrics(
                         yf,
                         event_model,
                         window_ms=(0.0, float(local_t_ms[-1]) if local_t_ms.size else 50.0),
+                        onset_method=str(cfg.get('onset_method', 'inflection')),
+                        onset_baseline_threshold=float(cfg.get('onset_baseline_threshold', 0.15)),
                     )
                     if fit_res is not None:
                         params_dict = fit_res[0]
@@ -1900,6 +1908,8 @@ def extract_metrics(
             peak_recenter=peak_recenter,
             return_snippets=need_snips,
             post_ms=post_ms_for_fit,  # Use long window for fitting
+            onset_method=str(cfg.get('onset_method', 'inflection')),
+            onset_baseline_threshold=float(cfg.get('onset_baseline_threshold', 0.15)),
         )
 
         fitted = None
@@ -1929,14 +1939,15 @@ def extract_metrics(
             tau_d0 = float(fitted.get('tau_decay', fitted.get('tau_decay_fast', 0.010)))
             event_t0_s = float(fitted.get('t_peak', 0.0)) / 1000.0
 
-            # Carry over model-specific parameters
+            # Carry over model-specific parameters (only if not explicitly set by user)
             cfg.setdefault('event_model_settings', {})
             if event_model == 'cooperative' and ('n_coop' in fitted):
-                cfg['event_model_settings']['n_coop'] = float(fitted['n_coop'])
+                cfg['event_model_settings'].setdefault('n_coop', float(fitted['n_coop']))
             elif event_model not in varying_supported_names:
                 for k, v in fitted.items():
                     if k not in ('amp', 't_peak', '_recut') and np.isfinite(v):
-                        cfg['event_model_settings'][k] = float(v)
+                        # Only set if user didn't explicitly provide this parameter
+                        cfg['event_model_settings'].setdefault(k, float(v))
 
             # REBUILD variant kernel builder with fitted parameters
             if cfg.get('use_template_variants', False) and event_model == 'iglusnfr':
@@ -1949,10 +1960,11 @@ def extract_metrics(
                     spec_iglu = get_event_model('iglusnfr')
                     model_func = spec_iglu['func']
 
-                    # Use FITTED parameters from global fit
+                    # Use FITTED parameters from global fit, but respect explicit overrides from event_model_settings
+                    em_settings = cfg.get('event_model_settings', {})
                     fitted_params = {
-                        'tau_decay_fast': float(fitted.get('tau_decay_fast', 0.008)),
-                        'tau_decay_slow': float(fitted.get('tau_decay_slow', 0.035)),
+                        'tau_decay_fast': float(em_settings.get('tau_decay_fast', fitted.get('tau_decay_fast', 0.008))),
+                        'tau_decay_slow': float(em_settings.get('tau_decay_slow', fitted.get('tau_decay_slow', 0.035))),
                     }
 
                     def _iglusnfr_variant_builder_fitted(dt: np.ndarray, tau_r: float, tau_d: float, frac_slow: float) -> np.ndarray:
@@ -1976,7 +1988,8 @@ def extract_metrics(
                         return y / max(area, 1e-12)
 
                     _VARIANT_KERNEL_BUILDER = _iglusnfr_variant_builder_fitted
-                    progress_print(f"[model] Updated variant kernel with FITTED params: tau_fast={fitted_params['tau_decay_fast']*1000:.2f}ms, tau_slow={fitted_params['tau_decay_slow']*1000:.2f}ms")
+                    override_msg = " (OVERRIDDEN)" if ('tau_decay_fast' in em_settings or 'tau_decay_slow' in em_settings) else ""
+                    progress_print(f"[model] Updated variant kernel with params{override_msg}: tau_fast={fitted_params['tau_decay_fast']*1000:.2f}ms, tau_slow={fitted_params['tau_decay_slow']*1000:.2f}ms")
                 except Exception as e:
                     progress_print(f"[warning] Failed to update variant kernel builder: {e}")
 
