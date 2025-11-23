@@ -434,32 +434,16 @@ def fit_amplitudes_with_template_variants(
     # Single NNLS solve for all variants
     a_variants = _nnls_weighted(X, y, weights)
 
-    # Debug: check if kernel and amplitudes are reasonable
-    try:
-        from smoothing import progress_print
-        progress_print(f"[DEBUG] Kernel shape: {X.shape}, y shape: {y.shape}")
-        progress_print(f"[DEBUG] NNLS returned {len(a_variants)} amplitudes")
-        progress_print(f"[DEBUG] First 8 amplitudes (events 0-1, all variants): {a_variants[:8]}")
-        # Check kernel magnitudes for first event
-        for i_var in range(min(4, n_variants)):
-            col_idx = i_var
-            k_max = np.max(np.abs(X[:, col_idx]))
-            progress_print(f"[DEBUG] Event 0, variant {i_var}: kernel max = {k_max:.6f}, amplitude = {a_variants[col_idx]:.6f}")
-    except Exception as e:
-        try:
-            progress_print(f"[DEBUG] Diagnostic failed: {e}")
-        except:
-            pass
-
     # Aggregate results: sum amplitudes across variants for each event
     a_variants_2d = a_variants.reshape(n_events, n_variants)
     a_events = np.sum(a_variants_2d, axis=1)
 
-    # Debug: check aggregated amplitudes
-    try:
-        progress_print(f"[DEBUG] Aggregated amplitudes (sum across variants): {a_events}")
-    except Exception:
-        pass
+    # Debug: aggregated amplitudes (commented out - enable if needed for debugging)
+    # try:
+    #     from smoothing import progress_print
+    #     progress_print(f"[DEBUG] Aggregated amplitudes (sum across variants): {a_events}")
+    # except Exception:
+    #     pass
 
     # Build reconstruction
     yhat = X @ a_variants
@@ -1184,7 +1168,7 @@ def extract_metrics(
     # Store model spec for progression rules
     model_spec = None
     # Helper to set kernel from current cfg and return effective (event_model, n_coop|None)
-    def _apply_event_model_from_cfg() -> Tuple[str, Optional[float]]:
+    def _apply_event_model_from_cfg(verbose: bool = True) -> Tuple[str, Optional[float]]:
         nonlocal event_model, coop_n_default, em_settings, model_spec
         # τ‑varying supported directly
         varying_supported = {'double_exp', 'cooperative', 'bilinear'}
@@ -1207,7 +1191,8 @@ def extract_metrics(
                 def _map(tau_r, tau_d):
                     return [1.0, float(tau_r), float(tau_d), float(coop_n_default), 0.0]
                 _KERNEL_FUN = make_var(_map)
-                progress_print(f"[model] Using event model 'cooperative' (τ‑varying), n_coop={coop_n_default}")
+                if verbose:
+                    progress_print(f"[model] Using event model 'cooperative' (τ‑varying), n_coop={coop_n_default}")
                 event_model = evm
                 return evm, coop_n_default
             if em_settings:
@@ -1216,14 +1201,16 @@ def extract_metrics(
                 def _map(tau_r, tau_d):
                     return [1.0, float(tau_r), float(tau_d), 0.0]
                 _KERNEL_FUN = make_var(_map)
-                progress_print("[model] Using event model 'double_exp' (τ‑varying)")
+                if verbose:
+                    progress_print("[model] Using event model 'double_exp' (τ‑varying)")
                 event_model = evm
                 return evm, None
             # bilinear
             def _map(tau_r, tau_d):
                 return [1.0, float(tau_r) * 1000.0, float(tau_d) * 1000.0, 0.0]
             _KERNEL_FUN = make_var(_map)
-            progress_print("[model] Using event model 'bilinear' (τ‑varying)")
+            if verbose:
+                progress_print("[model] Using event model 'bilinear' (τ‑varying)")
             event_model = evm
             return evm, None
         else:
@@ -1240,7 +1227,8 @@ def extract_metrics(
             # Fit missing params on the average event (placeholder; uses y_avg later if needed)
             # For fixed-template, kernel ignores tau_r/tau_d and uses fitted params
             _KERNEL_FUN = make_fixed({k: float(v) for k, v in em_settings.items() if k in allowed})
-            progress_print(f"[model] Using fixed-template '{lib_name}' (amplitude-only per pulse).")
+            if verbose:
+                progress_print(f"[model] Using fixed-template '{lib_name}' (amplitude-only per pulse).")
             event_model = lib_name
             return lib_name, None
 
@@ -1413,9 +1401,9 @@ def extract_metrics(
         'freed_monotonic': 'free_monotonic',
     }
     dec_mode = _mode_map.get(raw_mode, raw_mode)
-    if dec_mode not in {'fixed', 'free_monotonic', 'linear'}:
+    if dec_mode not in {'fixed', 'free_monotonic', 'linear', 'none'}:
         try:
-            progress_print(f"[warn] Unknown decay_progression_mode='{raw_mode}', falling back to 'linear'. Allowed: fixed|free_monotonic|linear")
+            progress_print(f"[warn] Unknown decay_progression_mode='{raw_mode}', falling back to 'linear'. Allowed: fixed|free_monotonic|linear|none")
         except Exception:
             pass
         dec_mode = 'linear'
@@ -2047,7 +2035,7 @@ def extract_metrics(
             except Exception:
                 pass
 
-        ev_model_name, n_coop_effective = _apply_event_model_from_cfg()
+        ev_model_name, n_coop_effective = _apply_event_model_from_cfg(verbose=False)  # Suppress duplicate message
         is_varying_model = ev_model_name in varying_supported_names
         progress_print(f"[fit][global] recut tau_r={tau_r*1000:.2f}ms tau_d={tau_d0*1000:.2f}ms model={event_model}")
 
@@ -2847,20 +2835,20 @@ def extract_metrics(
                 try:
                     t_rel_ms = recut_t_rel * 1000.0 if recut_t_rel is not None else t_ms_evt
                     # Debug: print snippet information
-                    try:
-                        progress_print(f"[plot] recut_t_rel is {'None' if recut_t_rel is None else f'array of size {recut_t_rel.size}'}")
-                        progress_print(f"[plot] t_ms_evt range: {t_ms_evt[0]:.1f} to {t_ms_evt[-1]:.1f} ms, size {t_ms_evt.size}")
-                        progress_print(f"[plot] t_rel_ms (used for plotting) range: {t_rel_ms[0]:.1f} to {t_rel_ms[-1]:.1f} ms, size {t_rel_ms.size}")
-                        if t_rel_ms.size > 1:
-                            dt_plot = np.median(np.diff(t_rel_ms))
-                            progress_print(f"[plot] Time step dt = {dt_plot:.5f} ms ({1000.0/dt_plot:.1f} points per ms)")
-                        progress_print(f"[plot] Plotting {len(recut_snippets)} snippets, each of size {recut_snippets[0].size if len(recut_snippets) > 0 else 'N/A'}")
-                        # Check if sizes match
-                        if len(recut_snippets) > 0 and recut_snippets[0].size != t_rel_ms.size:
-                            progress_print(f"[plot] WARNING: Size mismatch! snippet size {recut_snippets[0].size} != t_rel_ms size {t_rel_ms.size}")
-                    except Exception as e:
-                        progress_print(f"[plot] Debug failed: {e}")
-                        pass
+                    # Plot debug messages (commented out - enable if needed for debugging)
+                    # try:
+                    #     progress_print(f"[plot] recut_t_rel is {'None' if recut_t_rel is None else f'array of size {recut_t_rel.size}'}")
+                    #     progress_print(f"[plot] t_ms_evt range: {t_ms_evt[0]:.1f} to {t_ms_evt[-1]:.1f} ms, size {t_ms_evt.size}")
+                    #     progress_print(f"[plot] t_rel_ms (used for plotting) range: {t_rel_ms[0]:.1f} to {t_rel_ms[-1]:.1f} ms, size {t_rel_ms.size}")
+                    #     if t_rel_ms.size > 1:
+                    #         dt_plot = np.median(np.diff(t_rel_ms))
+                    #         progress_print(f"[plot] Time step dt = {dt_plot:.5f} ms ({1000.0/dt_plot:.1f} points per ms)")
+                    #     progress_print(f"[plot] Plotting {len(recut_snippets)} snippets, each of size {recut_snippets[0].size if len(recut_snippets) > 0 else 'N/A'}")
+                    #     if len(recut_snippets) > 0 and recut_snippets[0].size != t_rel_ms.size:
+                    #         progress_print(f"[plot] WARNING: Size mismatch! snippet size {recut_snippets[0].size} != t_rel_ms size {t_rel_ms.size}")
+                    # except Exception as e:
+                    #     progress_print(f"[plot] Debug failed: {e}")
+                    #     pass
                     # Plot individual snippets with low alpha
                     for i, snippet in enumerate(recut_snippets):
                         snippet_arr = np.asarray(snippet, float)
@@ -3073,14 +3061,14 @@ def extract_metrics(
                     linewidth=1.0,
                     alpha=0.6 - p * 0.04,  # Fade with each pulse
                 )
-        # If anchored (linear/monotonic), show the last-event pre-refit fit as an additional red overlay
-        try:
-            if dec_mode in ('linear','free_monotonic') and (tau_last_display is not None) and (amp_last_display is not None):
-                last_st = float(stim_times[-1]) + event_t0_s
-                k_last = _KERNEL_FUN(tz - last_st, tau_r, float(tau_last_display))
-                ax.plot(tz, float(amp_last_display) * k_last, color='crimson', linestyle='--', linewidth=1.4, alpha=0.9, label='last fit (pre-refit)')
-        except Exception:
-            pass
+        # Last-event pre-refit fit overlay (commented out - removed per user request)
+        # try:
+        #     if dec_mode in ('linear','free_monotonic') and (tau_last_display is not None) and (amp_last_display is not None):
+        #         last_st = float(stim_times[-1]) + event_t0_s
+        #         k_last = _KERNEL_FUN(tz - last_st, tau_r, float(tau_last_display))
+        #         ax.plot(tz, float(amp_last_display) * k_last, color='crimson', linestyle='--', linewidth=1.4, alpha=0.9, label='last fit (pre-refit)')
+        # except Exception:
+        #     pass
 
         # Optional: overlay peak markers and residual-at-peak triangles
         if plot_peaks_details:

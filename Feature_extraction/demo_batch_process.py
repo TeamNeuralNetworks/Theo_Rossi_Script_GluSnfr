@@ -184,7 +184,7 @@ for in_dir in folders:
                 # === Event Model ===
                 'event_model': 'iglusnfr',  # Specifically optimized for iGluSnFR S72A
                 'event_model_settings': {},
-                'max_tau_decay_slow': 0.030,  # Cap tau_decay_slow at 30ms max (None = no cap)
+                'max_tau_decay_slow': 0.050,  # Cap tau_decay_slow at 30ms max (None = no cap)
 
                 # === Recut/Averaging ===
                 'recut_projection': 'mean',

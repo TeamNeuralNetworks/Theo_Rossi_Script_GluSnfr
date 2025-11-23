@@ -154,21 +154,23 @@ def fit_average_event(
                 onset_idx = int(np.argmax(above_threshold))
             else:
                 onset_idx = 0  # All points below threshold, keep everything
-            try:
-                from smoothing import progress_print
-                progress_print(f"[fit_average_event] Baseline: {baseline:.3f}, Peak: {peak:.3f}, Threshold: {threshold_level:.3f}")
-            except Exception:
-                pass
+            # Onset detection debug messages (commented out - enable if needed for debugging)
+            # try:
+            #     from smoothing import progress_print
+            #     progress_print(f"[fit_average_event] Baseline: {baseline:.3f}, Peak: {peak:.3f}, Threshold: {threshold_level:.3f}")
+            # except Exception:
+            #     pass
 
         # Apply onset masking
         if onset_idx > 0:
             tf = tf[onset_idx:]
             yf = yf[onset_idx:]
-            try:
-                from smoothing import progress_print
-                progress_print(f"[fit_average_event] [{method}] Detected onset at t={tf[0]:.2f}ms, excluded {onset_idx} pre-onset points")
-            except Exception:
-                pass
+            # Onset masking debug messages (commented out - enable if needed for debugging)
+            # try:
+            #     from smoothing import progress_print
+            #     progress_print(f"[fit_average_event] [{method}] Detected onset at t={tf[0]:.2f}ms, excluded {onset_idx} pre-onset points")
+            # except Exception:
+            #     pass
 
         p0 = spec['p0_func'](yf, tf)
         # Robust seeding for two_step_binding: quick coarse grid search
