@@ -72,7 +72,7 @@ if REPO_ROOT not in sys.path:
 from Feature_extraction.extract_metrics import extract_metrics
 
 # Test on the specific problematic 50Hz file
-xlsx_path = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Theo_4_50Hz\20220726_linescan5_50Hz_10pulses_4mMCa_bouton1_traces_converted.xlsx"
+xlsx_path = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Theo_4_50Hz\20210722_linescan3_50Hz_10pulses_4mMCa_bouton3_traces_converted.xlsx"
 
 
 START = 0.498
@@ -331,12 +331,16 @@ options_presets = {
 preset_name = 'iglusnfr_optimized'  # e.g., 'single_exp_fixed_8ms'
 options = options_presets[preset_name]
 
+# Extract base filename for display
+base = os.path.splitext(os.path.basename(xlsx_path))[0]
+
 res = extract_metrics(
     time, trials,
     train_start=START,   # seconds
     isi=ISI,          # seconds
     n_pulses=10,
-    options=options
+    options=options,
+    filename=base
 )
 
 
@@ -351,7 +355,6 @@ print("PPR (NNLS, peak-baseline):", ppr_avg)
 print("A1 thresholds per trial:", res['threshold_amp1'])
 print("A1 p-values per trial:", res['pval_amp1'])
 
-base = os.path.splitext(os.path.basename(xlsx_path))[0]
 row = {'measurement': 'NNLS', 'ID': base}
 amp = amp_avg
 ppr = ppr_avg

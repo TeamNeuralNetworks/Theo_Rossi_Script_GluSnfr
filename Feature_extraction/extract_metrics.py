@@ -2783,8 +2783,10 @@ def extract_metrics(
     figure = None
     fit_diag_figure = None
     if want_plot:
-        # If residual diagnostics requested, allocate an extra bottom row
-        if plot_residuals:
+        # If showing only average (no trials, no baseline), use single row even with residuals
+        # Residuals will be shown in a small inset instead of a separate row
+        need_second_row = plot_residuals and (plot_trials or baseline_figs)
+        if need_second_row:
             figure = plt.figure(figsize=(12, 9.2))
             gs = figure.add_gridspec(2, 2, height_ratios=[2.4, 1.4], width_ratios=[1.5, 4], wspace=0.15, hspace=0.28)
         else:
@@ -3126,57 +3128,98 @@ def extract_metrics(
         # average panel and show a small inset histogram (no separate figure).
         if plot_residuals and (resid_avg is not None) and (model_avg_for_resid is not None):
             try:
-                # Bottom-right: residual trace aligned with the top-right panel
-                axR = figure.add_subplot(gs[1, 1], sharex=ax)
-                axR.plot(tz, resid_avg[zmask], color='tab:purple', lw=1.2, label='residual (avg − model)')
-                axR.axvline(float(train_start), color='k', ls=':', lw=0.8, alpha=0.6)
-                axR.set_xlim(z0, z1)
-                axR.set_xlabel('Time (s)')
-                axR.set_ylabel('ΔF/F0' if use_dff else 'ΔF')
-                axR.set_title('Residuals (average)')
-                axR.legend(loc='upper right', frameon=False, fontsize=8)
-                _trim_spines(axR)
+                if need_second_row:
+                    # Bottom-right: residual trace aligned with the top-right panel
+                    axR = figure.add_subplot(gs[1, 1], sharex=ax)
+                    axR.plot(tz, resid_avg[zmask], color='tab:purple', lw=1.2, label='residual (avg − model)')
+                    axR.axvline(float(train_start), color='k', ls=':', lw=0.8, alpha=0.6)
+                    axR.set_xlim(z0, z1)
+                    axR.set_xlabel('Time (s)')
+                    axR.set_ylabel('ΔF/F0' if use_dff else 'ΔF')
+                    axR.set_title('Residuals (average)')
+                    axR.legend(loc='upper right', frameon=False, fontsize=8)
+                    _trim_spines(axR)
 
-                # Inset histogram of residuals in the zoom window with fixed bins and Gaussian fit
-                try:
-                    ax_in = axR.inset_axes([0.70, 0.55, 0.28, 0.4])
-                    rv = np.asarray(resid_avg[zmask], float)
-                    rv = rv[np.isfinite(rv)]
-                    if rv.size:
-                        bin_w = (0.01 if use_dff else 10.0)
-                        lo = float(np.nanmin(rv))
-                        hi = float(np.nanmax(rv))
-                        if not np.isfinite(lo):
-                            lo = 0.0
-                        if not np.isfinite(hi) or hi <= lo:
-                            hi = lo + bin_w
-                        edges = np.arange(lo, hi + bin_w, bin_w)
-                        ax_in.hist(rv, bins=edges, color='#d8c7e8', edgecolor='#6b4fa3')
-                        # Gaussian fit overlay across full inset range
-                        try:
-                            mu = float(np.nanmean(rv))
-                            sigma = float(np.nanstd(rv))
-                        except Exception:
-                            mu, sigma = float('nan'), float('nan')
-                        if np.isfinite(sigma) and sigma > 0:
-                            x0, x1 = ax_in.get_xlim()
-                            x = np.linspace(x0, x1, 400)
-                            pdf = (1.0 / (np.sqrt(2.0 * np.pi) * sigma)) * np.exp(-0.5 * ((x - mu) / sigma) ** 2)
-                            N = rv.size
-                            y = N * bin_w * pdf
-                            ax_in.plot(x, y, color='#26457a', linewidth=1.4, label='fit')
-                    ax_in.set_title('residual', fontsize=8)
-                    ax_in.tick_params(labelsize=7)
-                except Exception:
-                    pass
+                    # Inset histogram of residuals in the zoom window with fixed bins and Gaussian fit
+                    try:
+                        ax_in = axR.inset_axes([0.70, 0.55, 0.28, 0.4])
+                        rv = np.asarray(resid_avg[zmask], float)
+                        rv = rv[np.isfinite(rv)]
+                        if rv.size:
+                            bin_w = (0.01 if use_dff else 10.0)
+                            lo = float(np.nanmin(rv))
+                            hi = float(np.nanmax(rv))
+                            if not np.isfinite(lo):
+                                lo = 0.0
+                            if not np.isfinite(hi) or hi <= lo:
+                                hi = lo + bin_w
+                            edges = np.arange(lo, hi + bin_w, bin_w)
+                            ax_in.hist(rv, bins=edges, color='#d8c7e8', edgecolor='#6b4fa3')
+                            # Gaussian fit overlay across full inset range
+                            try:
+                                mu = float(np.nanmean(rv))
+                                sigma = float(np.nanstd(rv))
+                            except Exception:
+                                mu, sigma = float('nan'), float('nan')
+                            if np.isfinite(sigma) and sigma > 0:
+                                x0, x1 = ax_in.get_xlim()
+                                x = np.linspace(x0, x1, 400)
+                                pdf = (1.0 / (np.sqrt(2.0 * np.pi) * sigma)) * np.exp(-0.5 * ((x - mu) / sigma) ** 2)
+                                N = rv.size
+                                y = N * bin_w * pdf
+                                ax_in.plot(x, y, color='#26457a', linewidth=1.4, label='fit')
+                        ax_in.set_title('residual', fontsize=8)
+                        ax_in.tick_params(labelsize=7)
+                    except Exception:
+                        pass
 
-                # Add an empty placeholder under the left event-fit panel to
-                # keep the grid balanced.
-                try:
-                    ax_placeholder = figure.add_subplot(gs[1, 0])
-                    ax_placeholder.axis('off')
-                except Exception:
-                    pass
+                    # Add an empty placeholder under the left event-fit panel to
+                    # keep the grid balanced.
+                    try:
+                        ax_placeholder = figure.add_subplot(gs[1, 0])
+                        ax_placeholder.axis('off')
+                    except Exception:
+                        pass
+                else:
+                    # When showing only average, add small inset at bottom-left of main plot
+                    try:
+                        # Smaller inset at bottom-left [left, bottom, width, height]
+                        ax_in = ax.inset_axes([0.02, 0.02, 0.18, 0.22])
+                        rv = np.asarray(resid_avg[zmask], float)
+                        rv = rv[np.isfinite(rv)]
+                        if rv.size:
+                            bin_w = (0.01 if use_dff else 10.0)
+                            lo = float(np.nanmin(rv))
+                            hi = float(np.nanmax(rv))
+                            if not np.isfinite(lo):
+                                lo = 0.0
+                            if not np.isfinite(hi) or hi <= lo:
+                                hi = lo + bin_w
+                            edges = np.arange(lo, hi + bin_w, bin_w)
+                            ax_in.hist(rv, bins=edges, color='#d8c7e8', edgecolor='#6b4fa3')
+                            # Gaussian fit overlay
+                            try:
+                                mu = float(np.nanmean(rv))
+                                sigma = float(np.nanstd(rv))
+                            except Exception:
+                                mu, sigma = float('nan'), float('nan')
+                            if np.isfinite(sigma) and sigma > 0:
+                                x0, x1 = ax_in.get_xlim()
+                                x = np.linspace(x0, x1, 400)
+                                pdf = (1.0 / (np.sqrt(2.0 * np.pi) * sigma)) * np.exp(-0.5 * ((x - mu) / sigma) ** 2)
+                                N = rv.size
+                                y = N * bin_w * pdf
+                                ax_in.plot(x, y, color='#26457a', linewidth=1.4)
+                        ax_in.set_title('residuals', fontsize=7)
+                        ax_in.tick_params(labelsize=6)
+                        # Remove top and right spines
+                        ax_in.spines['top'].set_visible(False)
+                        ax_in.spines['right'].set_visible(False)
+                        # Set transparent background
+                        ax_in.patch.set_facecolor('none')
+                        ax_in.patch.set_alpha(0.0)
+                    except Exception:
+                        pass
             except Exception:
                 pass
 
