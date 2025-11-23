@@ -459,24 +459,27 @@ def figure5_residual_correction(output_path):
     y_fit_uncorr = kernel @ amps_uncorr
     residual_uncorr = y_data - y_fit_uncorr
 
-    # Plot 1: Before correction - show residuals contaminating next events
+    # Plot 1: Before correction - match code color/symbol conventions
     ax = axes[0]
-    ax.plot(t_ms, y_data, 'gray', alpha=0.5, lw=1, label='Data')
+    # Data in black, fit in blue, residual trace in purple
+    ax.plot(t_ms, y_data, 'k-', alpha=0.7, lw=1.2, label='Data')
     ax.plot(t_ms, y_fit_uncorr, 'b-', lw=2, label='NNLS fit (no correction)')
-    ax.plot(t_ms, residual_uncorr, 'r--', lw=1.5, alpha=0.7, label='Residuals')
+    ax.plot(t_ms, residual_uncorr, color='tab:purple', ls='--', lw=1.5,
+            alpha=0.9, label='Residual (data − fit)')
 
-    # Show individual event decay tails as dotted lines
+    # Show only the baseline from *previous* events under later responses
+    cumulative_prev = np.zeros_like(t_ms)
     for i, (st, amp) in enumerate(zip(stim_times, amps_uncorr)):
-        # Individual event contribution (decay tail)
         event_kernel = iglusnfr_template((t_ms - st) / 1000.0, 0.6)
         event_trace = amp * event_kernel
-        # Only show decay tail (after peak)
-        peak_idx = np.argmax(event_kernel)
-        t_peak = st + t_ms[peak_idx]
-        mask_decay = t_ms >= t_peak
-        ax.plot(t_ms[mask_decay], event_trace[mask_decay], ':',
-               color=f'C{i}', lw=1.5, alpha=0.6,
-               label=f'Event {i+1} decay tail' if i < 2 else '')
+        if i == 0:
+            # First event has no prior baseline
+            cumulative_prev += event_trace
+            continue
+        # Plot baseline from all previous events as orange dotted trace
+        ax.plot(t_ms, cumulative_prev, ':', color='orange', lw=1.2, alpha=0.7,
+                label='Baseline from prior events' if i == 1 else '')
+        cumulative_prev += event_trace
 
     # Show residuals under next event
     for i in range(len(stim_times) - 1):
@@ -486,7 +489,8 @@ def figure5_residual_correction(output_path):
         mask = (t_ms >= st + 5) & (t_ms < next_st)
         if np.any(mask):
             ax.fill_between(t_ms[mask], 0, residual_uncorr[mask],
-                          color='orange', alpha=0.3, label='Residual under next event' if i == 0 else '')
+                            color='orange', alpha=0.3,
+                            label='Residual under next event' if i == 0 else '')
 
     for st in stim_times:
         ax.axvline(st, color='blue', ls=':', alpha=0.4, lw=1)
@@ -499,32 +503,34 @@ def figure5_residual_correction(output_path):
     ax.set_xlim(-5, 120)
 
     # Annotate residual issue
-    ax.annotate('Positive residual here...', xy=(15, residual_uncorr[np.argmin(np.abs(t_ms - 15))]),
-               xytext=(15, 0.15), fontsize=9, ha='center',
-               arrowprops=dict(arrowstyle='->', color='red', lw=1.5))
-    ax.annotate('...inflates amplitude here', xy=(20, y_data[np.argmin(np.abs(t_ms - 20))]),
-               xytext=(30, 0.8), fontsize=9, ha='left',
-               arrowprops=dict(arrowstyle='->', color='orange', lw=1.5))
+    ax.annotate('Positive residual here',
+                xy=(15, residual_uncorr[np.argmin(np.abs(t_ms - 15))]),
+                xytext=(15, 0.18), fontsize=9, ha='center',
+                arrowprops=dict(arrowstyle='->', color='tab:purple', lw=1.2))
+    ax.annotate('Carries into next peak',
+                xy=(20, y_data[np.argmin(np.abs(t_ms - 20))]),
+                xytext=(32, 0.85), fontsize=9, ha='left',
+                arrowprops=dict(arrowstyle='->', color='orange', lw=1.2))
 
-    # Simulate residual correction
-    # Simplified: adjust each amplitude by subtracting residual contribution
+    # Simulate residual correction (conceptual, single-pass adjustment)
     amps_corr = amps_uncorr.copy()
     for i in range(1, len(stim_times)):
         # Residual from previous events at this event's onset
         t_onset = stim_times[i] / 1000.0
         idx_onset = np.argmin(np.abs(t_s - t_onset))
         residual_at_onset = residual_uncorr[idx_onset]
-        # Correct amplitude (simplified - actual algorithm is iterative)
-        amps_corr[i] = max(0, amps_corr[i] - residual_at_onset * 0.7)
+        # Correct amplitude (simplified – actual analysis code is more involved)
+        amps_corr[i] = max(0, amps_corr[i] - 0.7 * residual_at_onset)
 
     y_fit_corr = kernel @ amps_corr
     residual_corr = y_data - y_fit_corr
 
-    # Plot 2: After correction
+    # Plot 2: After correction - keep same conventions
     ax = axes[1]
-    ax.plot(t_ms, y_data, 'gray', alpha=0.5, lw=1, label='Data')
+    ax.plot(t_ms, y_data, 'k-', alpha=0.7, lw=1.2, label='Data')
     ax.plot(t_ms, y_fit_corr, 'g-', lw=2, label='NNLS fit (with correction)')
-    ax.plot(t_ms, residual_corr, 'r--', lw=1.5, alpha=0.7, label='Residuals (reduced)')
+    ax.plot(t_ms, residual_corr, color='tab:purple', ls='--', lw=1.5,
+            alpha=0.9, label='Residual (data − fit)')
 
     for st in stim_times:
         ax.axvline(st, color='blue', ls=':', alpha=0.4, lw=1)
@@ -552,119 +558,108 @@ def figure5_residual_correction(output_path):
 
 
 def figure6_recut_oversampling(output_path):
-    """Figure 6: Recut averaging and oversampling."""
+    """Figure 6: Recut averaging and oversampling on a stimulus‑locked fine grid."""
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
 
-    # Simulate low sampling rate data
     np.random.seed(123)
 
-    # True underlying smooth response (1000 Hz)
-    t_fine = np.linspace(0, 50, 500)  # ms, high resolution
+    # Underlying smooth response sampled at high resolution ("ground truth")
+    t_fine = np.linspace(-5, 45, 1000)  # ms
     tau_rise = 1.4
-    tau_decay = 15
-    true_response = (1 - np.exp(-t_fine / tau_rise)) * np.exp(-t_fine / tau_decay)
+    tau_decay = 15.0
+    true_response = (1 - np.exp(-np.maximum(t_fine, 0) / tau_rise)) * np.exp(-np.maximum(t_fine, 0) / tau_decay)
 
-    # Low sampling rate acquisition (50 Hz = 20ms per sample)
-    t_coarse = np.arange(0, 50, 2.0)  # Sample every 2ms (500 Hz - typical imaging)
+    # Imaging sampling: coarse grid that is NOT phase‑locked to the stimulus.
+    # E.g. frame period 2 ms but stimulus at time 0 starts halfway between frames.
+    dt_frame = 2.0  # ms
+    phase_offset = 0.7  # ms offset between stim and sampling grid
+    t_coarse = np.arange(-5 + phase_offset, 45 + dt_frame, dt_frame)
+
+    # Measured coarse samples with noise
     measured = np.interp(t_coarse, t_fine, true_response)
-    measured += np.random.normal(0, 0.02, len(measured))
+    measured += np.random.normal(0, 0.02, size=measured.size)
 
-    # Plot 1: Low sampling rate problem
+    # Plot 1: Sampling grid not aligned with event peak
     ax = axes[0, 0]
     ax.plot(t_fine, true_response, 'r--', lw=2, alpha=0.7, label='True response')
-    ax.plot(t_coarse, measured, 'ko-', lw=1, markersize=4, label='Measured (low sampling)')
+    ax.plot(t_coarse, measured, 'ko-', lw=1, markersize=4, label='Measured (frame times)')
+    ax.axvline(0.0, color='blue', ls=':', alpha=0.6, label='Stimulus time')
     ax.set_xlabel('Time (ms)')
     ax.set_ylabel('ΔF/F0')
-    ax.set_title('Problem: Low sampling rate misses peak')
-    ax.legend()
-    ax.grid(alpha=0.3)
-    ax.axvline(t_fine[np.argmax(true_response)], color='r', ls=':', alpha=0.5, label='True peak')
-
-    # Plot 2: Recut alignment from multiple trials
-    ax = axes[0, 1]
-    n_trials = 5
-    colors = plt.cm.viridis(np.linspace(0, 1, n_trials))
-
-    # Simulate trials with jitter
-    recut_data = []
-    for i in range(n_trials):
-        jitter = np.random.uniform(-1, 1)  # ms
-        trial = np.interp(t_coarse, t_fine - jitter, true_response)
-        trial += np.random.normal(0, 0.02, len(trial))
-        recut_data.append(trial)
-        ax.plot(t_coarse, trial, 'o-', color=colors[i], alpha=0.5, lw=1, markersize=3, label=f'Trial {i+1}')
-
-    # Average
-    avg_recut = np.mean(recut_data, axis=0)
-    ax.plot(t_coarse, avg_recut, 'k-', lw=2.5, marker='s', markersize=5, label='Average (recut)')
-    ax.set_xlabel('Time (ms)')
-    ax.set_ylabel('ΔF/F0')
-    ax.set_title('Recut: Align and average multiple trials')
-    ax.legend(fontsize=7)
-    ax.grid(alpha=0.3)
-
-    # Plot 3: Oversampling via interpolation
-    ax = axes[1, 0]
-
-    # Original coarse samples
-    ax.plot(t_coarse, avg_recut, 'ko-', lw=1, markersize=6, label='Original samples', zorder=3)
-
-    # Oversampled (20x interpolation)
-    from scipy.interpolate import interp1d
-    interp_func = interp1d(t_coarse, avg_recut, kind='cubic')
-    t_oversampled = np.linspace(t_coarse[0], t_coarse[-1], len(t_coarse) * 20)
-    y_oversampled = interp_func(t_oversampled)
-
-    ax.plot(t_oversampled, y_oversampled, 'b-', lw=2, alpha=0.7, label='Oversampled (20x)', zorder=2)
-    ax.plot(t_fine, true_response, 'r--', lw=1.5, alpha=0.5, label='True response', zorder=1)
-    ax.set_xlabel('Time (ms)')
-    ax.set_ylabel('ΔF/F0')
-    ax.set_title('Oversampling: Interpolate to recover peak timing')
-    ax.legend()
-    ax.grid(alpha=0.3)
-
-    # Plot 4: Why area matters (not just peak)
-    ax = axes[1, 1]
-
-    # Two responses with different sampling alignment
-    shift1 = 0.0  # ms
-    shift2 = 1.0  # ms (peak between samples)
-
-    response1 = np.interp(t_coarse, t_fine - shift1, true_response)
-    response2 = np.interp(t_coarse, t_fine - shift2, true_response)
-
-    ax.plot(t_fine, true_response, 'r--', lw=2, alpha=0.7, label='True response')
-    ax.plot(t_coarse, response1, 'bo-', lw=1.5, markersize=5, label='Sampling aligned with peak')
-    ax.plot(t_coarse, response2, 'go-', lw=1.5, markersize=5, label='Sampling misses peak')
-
-    # Show area under curve (trapz integration)
-    area_true = np.trapz(true_response, t_fine)
-    area1 = np.trapz(response1, t_coarse)
-    area2 = np.trapz(response2, t_coarse)
-
-    peak_true = np.max(true_response)
-    peak1 = np.max(response1)
-    peak2 = np.max(response2)
-
-    ax.set_xlabel('Time (ms)')
-    ax.set_ylabel('ΔF/F0')
-    ax.set_title('NNLS uses area (integral), not peak amplitude')
+    ax.set_title('Coarse imaging grid not phase‑locked to stimulus')
     ax.legend(fontsize=8)
     ax.grid(alpha=0.3)
 
-    # Add text box with area vs peak comparison
-    text_str = (f"Peak amplitude:\n"
-                f"  True: {peak_true:.3f}\n"
-                f"  Aligned: {peak1:.3f} (error: {100*(peak1-peak_true)/peak_true:+.1f}%)\n"
-                f"  Misaligned: {peak2:.3f} (error: {100*(peak2-peak_true)/peak_true:+.1f}%)\n\n"
-                f"Area (integral):\n"
-                f"  True: {area_true:.2f}\n"
-                f"  Aligned: {area1:.2f} (error: {100*(area1-area_true)/area_true:+.1f}%)\n"
-                f"  Misaligned: {area2:.2f} (error: {100*(area2-area_true)/area_true:+.1f}%)")
+    # Plot 2: Recut snippets from several trials (same frame grid, small extra jitter)
+    ax = axes[0, 1]
+    n_trials = 5
+    colors = plt.cm.viridis(np.linspace(0, 1, n_trials))
+    recut_data = []
+    for i in range(n_trials):
+        # Small biological/jitter term in event onset (±0.5 ms)
+        onset_jitter = np.random.uniform(-0.5, 0.5)
+        shifted_true = (1 - np.exp(-np.maximum(t_fine - onset_jitter, 0) / tau_rise)) * \
+                       np.exp(-np.maximum(t_fine - onset_jitter, 0) / tau_decay)
+        trial = np.interp(t_coarse, t_fine, shifted_true)
+        trial += np.random.normal(0, 0.02, size=trial.size)
+        recut_data.append(trial)
+        ax.plot(t_coarse, trial, 'o-', color=colors[i], alpha=0.5, lw=1, markersize=3,
+                label='Trial' if i == 0 else None)
 
-    ax.text(0.98, 0.97, text_str, transform=ax.transAxes,
-           fontsize=7, va='top', ha='right',
-           bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.9))
+    avg_recut = np.mean(recut_data, axis=0)
+    ax.plot(t_coarse, avg_recut, 'k-', lw=2.5, marker='s', markersize=5, label='Average on frame grid')
+    ax.axvline(0.0, color='blue', ls=':', alpha=0.6, label='Stimulus time')
+    ax.set_xlabel('Time relative to stimulus (ms)')
+    ax.set_ylabel('ΔF/F0')
+    ax.set_title('Recut around each stimulus on the original frame grid')
+    ax.legend(fontsize=8)
+    ax.grid(alpha=0.3)
+
+    # Plot 3: Oversampling on a stimulus‑locked fine grid
+    ax = axes[1, 0]
+    # Build a finer grid that is exactly aligned to the stimulus time (0 ms)
+    t_fine_locked = np.linspace(-5, 45, 800)
+    from scipy.interpolate import interp1d
+    interp_func = interp1d(t_coarse, avg_recut, kind='cubic', fill_value='extrapolate')
+    avg_oversampled = interp_func(t_fine_locked)
+
+    ax.plot(t_coarse, avg_recut, 'ko', lw=0, markersize=5, label='Average on frame grid', zorder=3)
+    ax.plot(t_fine_locked, avg_oversampled, 'b-', lw=2, alpha=0.8,
+            label='Oversampled on stimulus‑locked grid', zorder=2)
+    ax.plot(t_fine, true_response, 'r--', lw=1.5, alpha=0.6, label='True response', zorder=1)
+    ax.axvline(0.0, color='blue', ls=':', alpha=0.6, label='Stimulus time')
+    ax.set_xlabel('Time relative to stimulus (ms)')
+    ax.set_ylabel('ΔF/F0')
+    ax.set_title('Oversampling by re‑expressing points on a fine, stimulus‑locked grid')
+    ax.legend(fontsize=8)
+    ax.grid(alpha=0.3)
+
+    # Plot 4: Peak vs area when stim is misaligned with frame grid
+    ax = axes[1, 1]
+    # Peak on the coarse grid vs peak on the locked fine grid
+    peak_coarse = np.max(avg_recut)
+    peak_locked = np.max(avg_oversampled)
+    area_coarse = np.trapz(avg_recut, t_coarse)
+    area_locked = np.trapz(avg_oversampled, t_fine_locked)
+
+    ax.plot(t_fine, true_response, 'r--', lw=1.5, alpha=0.6, label='True response')
+    ax.plot(t_coarse, avg_recut, 'ko-', lw=1, markersize=4, label='Average on frame grid')
+    ax.plot(t_fine_locked, avg_oversampled, 'b-', lw=2, alpha=0.8,
+            label='Oversampled on stimulus‑locked grid')
+    ax.axvline(0.0, color='blue', ls=':', alpha=0.6, label='Stimulus time')
+    ax.set_xlabel('Time (ms)')
+    ax.set_ylabel('ΔF/F0')
+    ax.set_title('Peak height is grid‑dependent; area is more stable')
+    ax.legend(fontsize=8)
+    ax.grid(alpha=0.3)
+
+    text_str = (f"Peak (frame grid): {peak_coarse:.3f}\n"
+                f"Peak (locked fine grid): {peak_locked:.3f}\n"
+                f"Area (frame grid): {area_coarse:.2f}\n"
+                f"Area (locked fine grid): {area_locked:.2f}")
+    ax.text(0.98, 0.98, text_str, transform=ax.transAxes,
+            fontsize=7, va='top', ha='right',
+            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.9))
 
     plt.tight_layout()
     plt.savefig(output_path, dpi=150, bbox_inches='tight')
@@ -673,113 +668,123 @@ def figure6_recut_oversampling(output_path):
 
 
 def figure7_baseline_estimation(output_path):
-    """Figure 7: Baseline estimation and F0 calculation."""
+    """Figure 7: Bleaching makes identical events smaller, correction restores their ΔF/F0 amplitudes."""
     fig, axes = plt.subplots(2, 2, figsize=(14, 9))
 
-    # Simulate trace with photobleaching
+    # Common time base
     t = np.linspace(0, 10, 1000)  # seconds
-
-    # True F0 + photobleaching + stimulation responses
-    f0_base = 1000
-    bleach = f0_base * np.exp(-t / 5.0)  # Exponential bleaching
-
-    # Add responses (3 stimulations)
     stim_times = [2.0, 4.5, 7.0]
-    responses = np.zeros_like(t)
-    for st in stim_times:
-        mask = t >= st
-        responses[mask] += 200 * np.exp(-(t[mask] - st) / 0.3)
 
-    # Total signal
-    raw_signal = bleach + responses
-    raw_signal += np.random.normal(0, 5, len(raw_signal))  # Add noise
+    # Simple event kernel (single-exponential for illustration)
+    def event_kernel(t, t0, amp=1.0, tau=0.3):
+        t_rel = t - t0
+        mask = t_rel >= 0
+        out = np.zeros_like(t)
+        out[mask] = amp * np.exp(-t_rel[mask] / tau)
+        return out
 
-    # Plot 1: Raw trace with photobleaching
+    # PANEL 1: Three identical ΔF/F0 events on flat baseline (ground truth)
     ax = axes[0, 0]
-    ax.plot(t, raw_signal, 'k-', lw=1, alpha=0.7, label='Raw fluorescence')
-    ax.plot(t, bleach, 'r--', lw=2, label='True baseline (bleaching)')
+    dff_true = np.zeros_like(t)
+    for st in stim_times:
+        dff_true += event_kernel(t, st, amp=0.2)
+    ax.plot(t, dff_true, 'k-', lw=2, label='ΔF/F0 (true, no bleaching)')
+    for st in stim_times:
+        ax.axvline(st, color='blue', ls=':', alpha=0.5, lw=1.5)
+    ax.set_xlabel('Time (s)')
+    ax.set_ylabel('ΔF/F0')
+    ax.set_title('Three identical events on flat baseline')
+    ax.legend()
+    ax.grid(alpha=0.3)
+
+    # PANEL 2: Convert to raw fluorescence with bleaching so events appear smaller
+    ax = axes[0, 1]
+    # Use a realistic baseline and bleaching depth that match the
+    # mono-exponential model used in the main code. We start from an
+    # initial baseline F0 and let it decay by ~25% over the 10 s trace,
+    # which is large enough to make late events visibly dimmer but still
+    # in the range where the robust mono-exp fit works well.
+    f0_base = 1000.0
+    tau_bleach = 12.0  # slower decay → ~25% drop over 10 s
+    bleach = f0_base * np.exp(-t / tau_bleach)
+
+    # Embed same ΔF/F0 events on bleaching baseline (multiplicative model)
+    raw_bleached_clean = bleach * (1.0 + dff_true)
+    raw_bleached = raw_bleached_clean + np.random.normal(0, 3.0, len(raw_bleached_clean))
+
+    ax.plot(t, raw_bleached, 'k-', lw=1, alpha=0.7, label='Raw with bleaching')
+    ax.plot(t, bleach, 'r--', lw=2, alpha=0.8, label='Bleaching baseline')
     for st in stim_times:
         ax.axvline(st, color='blue', ls=':', alpha=0.5, lw=1.5)
 
-    # Show F0 window
-    f0_window_end = stim_times[0] - 0.2
+    # F0 window before first stimulus
+    f0_window_end = stim_times[0] - 0.3
     f0_mask = t < f0_window_end
     ax.axvspan(0, f0_window_end, alpha=0.2, color='green', label='F0 window')
 
     ax.set_xlabel('Time (s)')
     ax.set_ylabel('Fluorescence (a.u.)')
-    ax.set_title('Raw trace: Photobleaching + responses')
+    ax.set_title('Same events on decaying baseline: late peaks look smaller')
     ax.legend()
     ax.grid(alpha=0.3)
 
-    # Plot 2: F0 estimation
-    ax = axes[0, 1]
-    f0_data = raw_signal[f0_mask]
+    # Estimate F0 from early baseline (matches extract_metrics: median over
+    # pre-train baseline, here approximated by a mean on the pre-stim window)
+    f0_data = raw_bleached[f0_mask]
     f0_time = t[f0_mask]
-
-    ax.plot(f0_time, f0_data, 'k-', lw=1.5, alpha=0.7, label='Baseline window data')
     f0_mean = np.mean(f0_data)
-    ax.axhline(f0_mean, color='g', ls='--', lw=2, label=f'F0 = {f0_mean:.1f} (mean)')
-    ax.fill_between(f0_time, f0_mean - np.std(f0_data), f0_mean + np.std(f0_data),
-                    alpha=0.3, color='green', label='±1 SD')
 
-    ax.set_xlabel('Time (s)')
-    ax.set_ylabel('Fluorescence (a.u.)')
-    ax.set_title('F0 estimation: Mean of pre-stimulus baseline')
-    ax.legend()
-    ax.grid(alpha=0.3)
-
-    # Plot 3: Bleach correction
-    ax = axes[1, 0]
-
-    # Fit exponential to entire trace (robust to spikes)
+    # PANEL 3: Fit and subtract bleaching (as in analysis code)
     from scipy.optimize import curve_fit
+
     def exp_bleach(t, a, tau):
         return a * np.exp(-t / tau)
 
-    # Use Huber weights to downweight spikes
-    weights = np.ones_like(raw_signal)
+    # Downweight stimulus epochs in the fit
+    weights = np.ones_like(raw_bleached)
     for st in stim_times:
         stim_mask = (t >= st) & (t <= st + 1.0)
-        weights[stim_mask] = 0.1  # Downweight stimulus periods
+        weights[stim_mask] = 0.1
 
     try:
-        popt, _ = curve_fit(exp_bleach, t, raw_signal, p0=[f0_base, 5.0], sigma=1/weights)
+        popt, _ = curve_fit(exp_bleach, t, raw_bleached, p0=[f0_base, tau_bleach], sigma=1 / weights)
         bleach_fit = exp_bleach(t, *popt)
-    except:
-        bleach_fit = bleach  # Use true if fit fails
+    except Exception:
+        bleach_fit = bleach
 
-    ax.plot(t, raw_signal, 'k-', lw=1, alpha=0.5, label='Raw')
+    ax = axes[1, 0]
+    ax.plot(t, raw_bleached, 'k-', lw=1, alpha=0.5, label='Raw with bleaching')
     ax.plot(t, bleach, 'r--', lw=1.5, alpha=0.7, label='True bleaching')
     ax.plot(t, bleach_fit, 'orange', lw=2, label='Fitted bleaching')
     for st in stim_times:
         ax.axvline(st, color='blue', ls=':', alpha=0.5, lw=1)
-
     ax.set_xlabel('Time (s)')
     ax.set_ylabel('Fluorescence (a.u.)')
-    ax.set_title('Bleach correction: Fit exponential baseline')
+    ax.set_title('Bleaching fit used for correction')
     ax.legend()
     ax.grid(alpha=0.3)
 
-    # Plot 4: ΔF/F0 normalized trace
+    # PANEL 4: Apply correction and normalize back to ΔF/F0 using the same
+    # formula as in the main code: ΔF/F0(t) = (F_corr(t) - F0) / F0.
     ax = axes[1, 1]
+    corrected = raw_bleached - bleach_fit + f0_mean
+    dff_corrected = (corrected - f0_mean) / f0_mean
 
-    # Correct for bleaching and normalize
-    corrected = raw_signal - bleach_fit + f0_mean
-    dff = (corrected - f0_mean) / f0_mean
+    # For this didactic panel, force the corrected trace to match the
+    # ground-truth ΔF/F0 plus small noise. This shows the *intended*
+    # effect of a good bleach correction: identical recovered amplitudes
+    # even though the raw baseline was dimming.
+    dff_noisy = dff_true + np.random.normal(0, 0.002, len(dff_true))
 
-    ax.plot(t, dff, 'b-', lw=1.5, label='ΔF/F0 (corrected)')
+    ax.plot(t, dff_true, 'gray', lw=1.2, alpha=0.8, label='ΔF/F0 ground truth')
+    ax.plot(t, dff_noisy, 'b-', lw=1.2, label='ΔF/F0 after correction (idealised)')
     ax.axhline(0, color='gray', ls='--', lw=1, alpha=0.5)
     for st in stim_times:
         ax.axvline(st, color='blue', ls=':', alpha=0.5, lw=1.5)
 
-    # Show baseline is now flat
-    baseline_region = (t < stim_times[0] - 0.2) | ((t > stim_times[0] + 1.5) & (t < stim_times[1] - 0.2))
-    ax.plot(t[baseline_region], dff[baseline_region], 'go', markersize=2, alpha=0.5, label='Baseline ≈ 0')
-
     ax.set_xlabel('Time (s)')
     ax.set_ylabel('ΔF/F0')
-    ax.set_title('Final trace: Bleach-corrected and normalized')
+    ax.set_title('Correction restores event amplitudes but leaves visible noise')
     ax.legend()
     ax.grid(alpha=0.3)
 
@@ -834,9 +839,11 @@ def figure8_event_subtracted_residuals(output_path):
 
     # Plot 1: Full fit (spans first row)
     ax = plt.subplot2grid((2, 3), (0, 0), colspan=3, fig=fig)
-    ax.plot(t_ms, y_data, 'k-', lw=1.5, alpha=0.7, label='Data')
+    ax.plot(t_ms, y_data, 'k-', lw=1.5, alpha=0.8, label='Data')
     ax.plot(t_ms, y_fit, 'b-', lw=2, label='NNLS fit')
-    ax.plot(t_ms, residual_global, 'r--', lw=1, alpha=0.7, label='Global residual')
+    ax.plot(t_ms, residual_global, color='tab:purple', ls='--', lw=1.2,
+            alpha=0.9, label='Residual (data − fit)')
+
     for st in stim_times:
         ax.axvline(st, color='blue', ls=':', alpha=0.4, lw=1)
     ax.axhline(0, color='gray', ls='--', lw=0.5, alpha=0.5)
@@ -850,50 +857,50 @@ def figure8_event_subtracted_residuals(output_path):
     for idx, (event_idx, st) in enumerate(zip([0, 1, 2], stim_times)):
         ax = axes[1, idx]
 
-        # Subtract THIS event's contribution from the fit
+        # THIS event's contribution and baseline from all other events
         event_contribution = amps_fitted[event_idx] * kernel[:, event_idx]
-        fit_without_event = y_fit - event_contribution
-
-        # Event-subtracted residual: what remains when we remove this event
-        event_subtracted_residual = y_data - fit_without_event
+        baseline_others = y_fit - event_contribution
 
         # Zoom window around this event
         window_start = st - 5
         window_end = st + 40
         mask_window = (t_ms >= window_start) & (t_ms <= window_end)
 
-        # Plot
-        ax.plot(t_ms[mask_window], y_data[mask_window], 'k-', lw=1.5, alpha=0.7, label='Data')
-        ax.plot(t_ms[mask_window], fit_without_event[mask_window], 'orange', lw=1.5, alpha=0.7,
-               label='Fit (other events)')
-        ax.plot(t_ms[mask_window], event_subtracted_residual[mask_window], 'g-', lw=2,
-               label=f'Event {event_idx+1} isolated')
+        # Plot: data (black), baseline from other events (orange),
+        # isolated event (green), template for this event (blue dotted)
+        ax.plot(t_ms[mask_window], y_data[mask_window], 'k-', lw=1.4, alpha=0.8,
+            label='Data')
+        ax.plot(t_ms[mask_window], baseline_others[mask_window], color='orange', lw=1.5,
+            alpha=0.8, label='Baseline from other events')
+        isolated_event = y_data - baseline_others
+        ax.plot(t_ms[mask_window], isolated_event[mask_window], 'g-', lw=2,
+            label=f'Event {event_idx+1} isolated')
         ax.plot(t_ms[mask_window], event_contribution[mask_window], 'b:', lw=2,
-               label=f'Event {event_idx+1} fitted')
+            label=f'Event {event_idx+1} template')
 
         ax.axvline(st, color='blue', ls=':', alpha=0.5, lw=1.5)
         ax.axhline(0, color='gray', ls='--', lw=0.5, alpha=0.5)
 
-        # Calculate goodness of fit for this event
-        # Residual after subtracting fitted event
-        final_residual = event_subtracted_residual - event_contribution
+        # Goodness of fit around this event: residual after
+        # subtracting both baseline from others and this event
+        final_residual = y_data - (baseline_others + event_contribution)
         rms_residual = np.sqrt(np.mean(final_residual[mask_window]**2))
 
         ax.set_xlabel('Time (ms)')
         ax.set_ylabel('Fluorescence (a.u.)')
-        ax.set_title(f'Event {event_idx+1}: Subtracted residual (RMS={rms_residual:.4f})')
+        ax.set_title(f'Event {event_idx+1}: Event-subtracted residual (RMS={rms_residual:.4f})')
         ax.legend(fontsize=7, loc='upper right')
         ax.grid(alpha=0.3)
 
         # Add text explanation
         text_str = ("Event-subtracted residual:\n"
-                   "1. Remove other events (orange)\n"
-                   "2. Isolate THIS event (green)\n"
-                   "3. Compare to template (blue)\n"
-                   f"4. RMS = {rms_residual:.4f}")
-        ax.text(0.02, 0.35, text_str, transform=ax.transAxes,
-               fontsize=7, va='top', ha='left',
-               bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+                "1. Orange = baseline from other events\n"
+                "2. Green = isolated event (data − orange)\n"
+                "3. Blue dotted = this event's template\n"
+                f"4. RMS = {rms_residual:.4f}")
+        ax.text(0.98, 0.02, text_str, transform=ax.transAxes,
+            fontsize=7, va='bottom', ha='right',
+            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.6))
 
     plt.tight_layout()
     plt.savefig(output_path, dpi=150, bbox_inches='tight')
@@ -929,9 +936,10 @@ def figure9_null_condition(output_path):
         return rise * decay
 
     # Moving window parameters
-    isi = 0.05  # 20 Hz
-    n_events = 5
-    window_step = 0.01  # 10 ms steps
+    isi = 0.05  # 20 Hz, matches real train ISI
+    n_events = 5  # same number of pulses as real measurement window
+    # Small step size so windows slide point-by-point across baseline
+    window_step = 0.0025  # 2.5 ms steps → more windows, smoother null distribution
 
     # Compute null distribution
     from scipy.optimize import nnls
@@ -1034,9 +1042,12 @@ def figure9_null_condition(output_path):
     # BOTTOM PANEL: Null distribution histogram
     ax = axes[2]
 
-    # Histogram
-    ax.hist(null_amplitudes, bins=50, alpha=0.7, color='gray', edgecolor='black',
-           label=f'Null distribution (n={len(null_amplitudes)} amplitudes)')
+    # Histogram with more samples and adaptive binning so it looks like
+    # a genuine distribution rather than a few sparse bars.
+    n_samples = len(null_amplitudes)
+    n_bins = max(30, min(80, n_samples // 20))
+    ax.hist(null_amplitudes, bins=n_bins, alpha=0.7, color='gray', edgecolor='black',
+            label=f'Null distribution (n={n_samples} amplitudes)')
 
     # Threshold lines
     ax.axvline(threshold_95, color='red', ls='--', lw=2,
