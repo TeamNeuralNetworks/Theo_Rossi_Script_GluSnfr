@@ -147,6 +147,16 @@ DEFAULTS.update({
     'onset_baseline_threshold': 0.15,  # Threshold for baseline_threshold method (0.1-0.3)
 })
 
+# PPR safety: floor amplitudes to noise threshold to prevent division by near-zero values
+DEFAULTS.update({
+    'amplitude_floor_to_noise': False,  # If True, floor amplitudes < threshold to threshold before PPR calc
+})
+
+# Kinetics capping: prevent unrealistically slow decay components
+DEFAULTS.update({
+    'max_tau_decay_slow': None,  # Maximum allowed tau_decay_slow in seconds (None = no cap)
+})
+
 # Selected kernel (set inside extract_metrics based on options; default is iglusnfr_kernel)
 _KERNEL_FUN = iglusnfr_kernel
 # Variant kernel builder for template variants feature (set if model supports it)
@@ -1925,6 +1935,13 @@ def extract_metrics(
                 except Exception:
                     pass
 
+            # Apply cap to fitted tau_decay_slow if specified
+            if isinstance(fitted, dict) and 'tau_decay_slow' in fitted:
+                max_tau_slow = cfg.get('max_tau_decay_slow', None)
+                if max_tau_slow is not None and fitted['tau_decay_slow'] > max_tau_slow:
+                    progress_print(f"[global] Capping tau_decay_slow from {fitted['tau_decay_slow']*1000:.2f}ms to {max_tau_slow*1000:.2f}ms")
+                    fitted['tau_decay_slow'] = float(max_tau_slow)
+
             # Extract parameters from fitted dict
             try:
                 global_fit_params = {
@@ -1962,9 +1979,19 @@ def extract_metrics(
 
                     # Use FITTED parameters from global fit, but respect explicit overrides from event_model_settings
                     em_settings = cfg.get('event_model_settings', {})
+
+                    # Get fitted/override values
+                    tau_fast = float(em_settings.get('tau_decay_fast', fitted.get('tau_decay_fast', 0.008)))
+                    tau_slow = float(em_settings.get('tau_decay_slow', fitted.get('tau_decay_slow', 0.035)))
+
+                    # Apply cap to tau_decay_slow if specified (prevents unrealistically slow components)
+                    max_tau_slow = cfg.get('max_tau_decay_slow', None)
+                    if max_tau_slow is not None and tau_slow > max_tau_slow:
+                        tau_slow = float(max_tau_slow)
+
                     fitted_params = {
-                        'tau_decay_fast': float(em_settings.get('tau_decay_fast', fitted.get('tau_decay_fast', 0.008))),
-                        'tau_decay_slow': float(em_settings.get('tau_decay_slow', fitted.get('tau_decay_slow', 0.035))),
+                        'tau_decay_fast': tau_fast,
+                        'tau_decay_slow': tau_slow,
                     }
 
                     def _iglusnfr_variant_builder_fitted(dt: np.ndarray, tau_r: float, tau_d: float, frac_slow: float) -> np.ndarray:
@@ -3479,6 +3506,15 @@ def extract_metrics(
         p2 = float(pfun(a_for_p[1])) if (a_for_p.size >= 2 and np.isfinite(a_for_p[1])) else np.nan
         p3 = float(pfun(a_for_p[2])) if (a_for_p.size >= 3 and np.isfinite(a_for_p[2])) else np.nan
 
+        # Floor amplitudes to noise threshold before PPR calculation (prevents div by near-zero)
+        if cfg.get('amplitude_floor_to_noise', False):
+            amp_raw = np.maximum(amp_raw, thr1)
+            amp_raw_corr = np.maximum(amp_raw_corr, thr1)
+            amp_sg = np.maximum(amp_sg, thr1)
+            amp_sg_corr = np.maximum(amp_sg_corr, thr1)
+            amp_nn = np.maximum(amp_nn, thr1)
+            amp_nn_corr = np.maximum(amp_nn_corr, thr1)
+
         per_trial.append({
             'amp_raw': amp_raw,
             'amp_raw_corr': amp_raw_corr,
@@ -3826,6 +3862,20 @@ def extract_metrics(
             except Exception:
                 pass
             figures_trials.append(fig_t)
+
+    # Floor average amplitudes to noise threshold if option enabled (prevents div by near-zero in PPR)
+    if cfg.get('amplitude_floor_to_noise', False) and len(thr_list) > 0:
+        # Use median threshold across all trials as the floor for average data
+        median_threshold = float(np.median(thr_list))
+        amp_raw_avg = np.maximum(amp_raw_avg, median_threshold)
+        amp_raw_corr_avg = np.maximum(amp_raw_corr_avg, median_threshold)
+        amp_sg_avg = np.maximum(amp_sg_avg, median_threshold)
+        amp_sg_corr_avg = np.maximum(amp_sg_corr_avg, median_threshold)
+        amp_nnls_avg = np.maximum(amp_nnls_avg, median_threshold)
+        amp_nnls_corr_avg = np.maximum(amp_nnls_corr_avg, median_threshold)
+        # Recalculate PPR with floored amplitudes
+        ppr_nnls_avg = _norm(amp_nnls_avg)
+        ppr_nnls_corr_avg = _norm(amp_nnls_corr_avg)
 
     return {
         'tau_r_s': float(tau_r),

@@ -216,6 +216,7 @@ options_presets = {
             'tau_decay_fast': 0.008,  # 8ms fixed (prevents fitting nonsense from overlap)
             'tau_decay_slow': 0.035,  # 35ms fixed
         },
+        'max_tau_decay_slow': 0.030,  # Cap tau_decay_slow at 30ms max (None = no cap)
 
         # === Recut/Averaging ===
         'recut_projection': 'mean',
@@ -230,6 +231,11 @@ options_presets = {
         # - 'none': No onset masking
         'onset_method': 'baseline_threshold',  # Use aggressive baseline masking for 50Hz
         'onset_baseline_threshold': 0.15,  # 15% above baseline (adjustable 0.1-0.3)
+
+        # === PPR Safety ===
+        # Floor amplitudes to noise threshold before PPR calculation
+        # Prevents division by near-zero values and unrealistic PPR ratios
+        'amplitude_floor_to_noise': True,  # Set to True for iGluSnFR to prevent giant PPR values
 
         # === NNLS Fitting ===
         'nnls_weight_mode': 'savgol',
