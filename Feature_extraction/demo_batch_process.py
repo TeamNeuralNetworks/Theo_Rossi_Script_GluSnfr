@@ -183,8 +183,16 @@ for in_dir in folders:
 
                 # === Event Model ===
                 'event_model': 'iglusnfr',  # Specifically optimized for iGluSnFR S72A
-                'event_model_settings': {},
-                'max_tau_decay_slow': 0.050,  # Cap tau_decay_slow at 30ms max (None = no cap)
+
+                # === Parameter Bounds (NEW - replaces event_model_settings + max_tau_decay_slow) ===
+                # Format: {'param_name': (lower, upper)}
+                # - Use (value, value) to force a fixed value
+                # - Use (np.nan, np.nan) or None for unconstrained
+                'parameter_bounds': {
+                    'tau_decay_fast': (0.001, 0.010),  # Reasonable range for fast component
+                    'tau_decay_slow': (0.010, 0.050),  # Cap slow component at 50ms max
+                    'tau_rise': (np.nan, np.nan),       # Unconstrained
+                },
 
                 # === Recut/Averaging ===
                 'recut_projection': 'mean',

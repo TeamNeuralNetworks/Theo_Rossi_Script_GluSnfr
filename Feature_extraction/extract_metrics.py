@@ -152,9 +152,15 @@ DEFAULTS.update({
     'amplitude_floor_to_noise': False,  # If True, floor amplitudes < threshold to threshold before PPR calc
 })
 
-# Kinetics capping: prevent unrealistically slow decay components
+# Parameter bounds: classical upper/lower limits for all fitted parameters
+# Format: 'parameter_bounds': {'param_name': (lower, upper), ...}
+# - Use (value, value) to force a fixed value
+# - Use (np.nan, np.nan), (np.inf, np.inf), or None for unconstrained
+# - Applies to: tau_rise, tau_decay_fast, tau_decay_slow, frac_fast, n_coop, etc.
+# Example: {'tau_decay_fast': (0.006, 0.010), 'tau_decay_slow': (0.025, 0.035)}
+# Example (fixed): {'tau_decay_fast': (0.008, 0.008)}
 DEFAULTS.update({
-    'max_tau_decay_slow': None,  # Maximum allowed tau_decay_slow in seconds (None = no cap)
+    'parameter_bounds': {},  # Dict of {param_name: (lower, upper)} constraints
 })
 
 # Selected kernel (set inside extract_metrics based on options; default is iglusnfr_kernel)
@@ -166,6 +172,67 @@ _VARIANT_KERNEL_BUILDER = None
 # -------------------------
 # Small utilities
 # -------------------------
+
+def apply_parameter_bounds(fitted_params: Dict[str, float], bounds: Dict[str, tuple]) -> Dict[str, float]:
+    """Apply upper/lower bounds to fitted parameters.
+
+    Args:
+        fitted_params: Dict of fitted parameter values {param_name: value}
+        bounds: Dict of bounds {param_name: (lower, upper)}
+                - (value, value): forces fixed value
+                - (np.nan, np.nan), (np.inf, np.inf), or None: unconstrained
+                - (lower, upper): clips to range
+
+    Returns:
+        Dict with constrained parameter values
+    """
+    result = dict(fitted_params)
+
+    for param_name, value in fitted_params.items():
+        if param_name not in bounds:
+            continue
+
+        bound = bounds[param_name]
+        if bound is None:
+            continue
+
+        if not isinstance(bound, (tuple, list)) or len(bound) != 2:
+            continue
+
+        lower, upper = float(bound[0]), float(bound[1])
+
+        # Check if unconstrained (NaN or Inf)
+        if (not np.isfinite(lower) and not np.isfinite(upper)):
+            continue
+
+        # Force fixed value when lower == upper
+        if np.isfinite(lower) and np.isfinite(upper) and abs(lower - upper) < 1e-12:
+            if abs(value - lower) > 1e-12:
+                try:
+                    from smoothing import progress_print
+                    progress_print(f"[bounds] Forcing {param_name} = {lower:.6f} (was {value:.6f})")
+                except Exception:
+                    pass
+            result[param_name] = lower
+            continue
+
+        # Apply bounds
+        original_value = value
+        if np.isfinite(lower):
+            value = max(value, lower)
+        if np.isfinite(upper):
+            value = min(value, upper)
+
+        if abs(value - original_value) > 1e-12:
+            try:
+                from smoothing import progress_print
+                progress_print(f"[bounds] Clipping {param_name} from {original_value:.6f} to {value:.6f}")
+            except Exception:
+                pass
+        result[param_name] = value
+
+    return result
+
 
 def _calculate_nnls_weights(
     t: np.ndarray,
@@ -1280,13 +1347,29 @@ def extract_metrics(
                 spec_iglu = get_event_model('iglusnfr')
                 model_func = spec_iglu['func']
 
-                # Get base parameters from event_model_settings or use defaults
-                base_params = {
-                    'tau_rise': 0.003,  # 3 ms
-                    'tau_decay_fast': 0.008,  # 8 ms
-                    'tau_decay_slow': 0.035,  # 35 ms
-                }
-                base_params.update(em_settings)
+                # Get base parameters: use middle of bounds if specified, otherwise defaults
+                param_bounds = cfg.get('parameter_bounds', {})
+                base_params = {}
+
+                for param_name, default_value in [
+                    ('tau_rise', 0.003),  # 3 ms
+                    ('tau_decay_fast', 0.008),  # 8 ms
+                    ('tau_decay_slow', 0.035),  # 35 ms
+                ]:
+                    bound = param_bounds.get(param_name)
+                    if bound and isinstance(bound, (tuple, list)) and len(bound) == 2:
+                        lower, upper = float(bound[0]), float(bound[1])
+                        if np.isfinite(lower) and np.isfinite(upper):
+                            # Use mid-point if bounded, or fixed value if lower == upper
+                            base_params[param_name] = (lower + upper) / 2.0
+                        else:
+                            base_params[param_name] = default_value
+                    else:
+                        base_params[param_name] = default_value
+
+                # Backward compatibility: allow event_model_settings to override
+                if em_settings:
+                    base_params.update(em_settings)
 
                 def _iglusnfr_variant_builder(dt: np.ndarray, tau_r: float, tau_d: float, frac_slow: float) -> np.ndarray:
                     """Build iGluSnFR kernel with specific slow component fraction."""
@@ -1949,12 +2032,11 @@ def extract_metrics(
                 except Exception:
                     pass
 
-            # Apply cap to fitted tau_decay_slow if specified
-            if isinstance(fitted, dict) and 'tau_decay_slow' in fitted:
-                max_tau_slow = cfg.get('max_tau_decay_slow', None)
-                if max_tau_slow is not None and fitted['tau_decay_slow'] > max_tau_slow:
-                    progress_print(f"[global] Capping tau_decay_slow from {fitted['tau_decay_slow']*1000:.2f}ms to {max_tau_slow*1000:.2f}ms")
-                    fitted['tau_decay_slow'] = float(max_tau_slow)
+            # Apply parameter bounds to fitted values
+            if isinstance(fitted, dict):
+                param_bounds = cfg.get('parameter_bounds', {})
+                if param_bounds:
+                    fitted = apply_parameter_bounds(fitted, param_bounds)
 
             # Extract parameters from fitted dict
             try:

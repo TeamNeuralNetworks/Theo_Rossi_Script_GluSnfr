@@ -212,12 +212,17 @@ options_presets = {
 
         # === Event Model ===
         'event_model': 'iglusnfr',  # Specifically optimized for iGluSnFR S72A
-        # For 50Hz: use fixed kinetics instead of fitting from contaminated recut
-        'event_model_settings': {
-            'tau_decay_fast': 0.008,  # 8ms fixed (prevents fitting nonsense from overlap)
-            'tau_decay_slow': 0.035,  # 35ms fixed
+
+        # === Parameter Bounds (NEW - replaces event_model_settings + max_tau_decay_slow) ===
+        # Format: {'param_name': (lower, upper)}
+        # - Use (value, value) to force a fixed value
+        # - Use (np.nan, np.nan) or None for unconstrained
+        # For 50Hz: fix kinetics instead of fitting from contaminated recut
+        'parameter_bounds': {
+            'tau_decay_fast': (0.008, 0.008),  # Force 8ms (prevents fitting nonsense from overlap)
+            'tau_decay_slow': (0.025, 0.030),  # Constrain 25-30ms range
+            'tau_rise': (np.nan, np.nan),      # Unconstrained (let it fit)
         },
-        'max_tau_decay_slow': 0.030,  # Cap tau_decay_slow at 30ms max (None = no cap)
 
         # === Recut/Averaging ===
         'recut_projection': 'mean',
