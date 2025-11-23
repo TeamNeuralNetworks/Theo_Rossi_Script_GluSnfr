@@ -149,12 +149,8 @@ options_presets = {
         'nnls_weight_mode': 'savgol',  # (default: 'uniform') 'uniform'|'linear'|'exponential'|'savgol'
         'nnls_weight_tau_s': None,  # float|None (default: None=auto) - time constant (for linear or exponential modes)
         'fit_diagnostic_plot': True,  # bool (default: False) - weight + τd diagnostics
-        'allow_shift': True,  # bool (default: True) - enable per-pulse micro-shifts
         'huber_delta': 5.5,  # float (default: 5.5) - robust fitting threshold
         'irls_iters': 20,  # int (default: 6) - IRLS iterations
-        'delta_max_s': 0.002,  # float (default: 0.002) - max shift in seconds
-        'delta_step_s': 0.00025,  # float (default: 0.00025) - shift step size in seconds
-        'shift_min_s': 0.00005,  # float (default: 0.00005) - minimum shift in seconds
         
         # === Time Windows ===
         'pre_zoom_s': 0.20,  # float (default: 0.15) - pre-train window
@@ -193,7 +189,12 @@ options_presets = {
             'baseline': True,  # bool (default: False) - show baseline diagnostics
             'residuals': True,  # bool (default: False) - show residual analysis
             'plot_peaks_details': True,  # bool (default: False) - show peak markers and residuals
-        }
+        },
+
+        # === Jitter Variants (Optional) ===
+        # For grid search of temporal shifts in milliseconds
+        # Set to None to disable jitter search
+        'jitter_variant_ms': None,  # Example: np.arange(-1.0, 1.1, 0.2)
     },
 
     'iglusnfr_optimized': {
@@ -241,12 +242,8 @@ options_presets = {
         'nnls_weight_mode': 'savgol',
         'nnls_weight_tau_s': None,
         'fit_diagnostic_plot': False,
-        'allow_shift': True,
         'huber_delta': 2.5,
         'irls_iters': 20,
-        'delta_max_s': 0.002,
-        'delta_step_s': 0.00025,
-        'shift_min_s': 0.00005,
 
         # === Time Windows (ISI-aware) ===
         'pre_zoom_s': PRE_ZOOM_S,  # Computed above based on ISI
@@ -294,6 +291,12 @@ options_presets = {
         # NNLS automatically selects best combination based on residuals
         'use_template_variants': True,  # Set to True to enable
         'template_variant_ratios': np.arange(0.0, 1.0, 0.1),  # Slow component fractions to test
+
+        # === Jitter Variants (NEW) ===
+        # Enable temporal jitter search in milliseconds (more intuitive than delta_max_s, etc.)
+        # Can be used alone OR combined with template variants for full grid search
+        # Example: np.arange(-2.0, 2.1, 0.2) tests jitters from -2ms to +2ms in 0.2ms steps
+        'jitter_variant_ms': np.arange(-1.0, 1.1, 0.25),  # Set to None to disable jitter search
     },
     
     # Minimal preset showing only changed values (others use defaults)
@@ -324,6 +327,17 @@ options_presets = {
             'baseline': True,
             'residuals': True,
         }
+    },
+
+    # Example: Using jitter variants WITHOUT template variants
+    # (for models that don't need template ratio search)
+    'jitter_only_example': {
+        'normalize_dff': True,
+        'bleach': True,
+        'event_model': 'double_exp',
+        'use_template_variants': False,  # Disable template variants
+        'jitter_variant_ms': np.arange(-2.0, 2.1, 0.2),  # Only search temporal jitter
+        'plot': {'enabled': True}
     },
 }
 

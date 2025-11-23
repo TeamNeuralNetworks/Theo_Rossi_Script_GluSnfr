@@ -378,11 +378,13 @@ def fit_amplitudes_with_template_variants(
     weight_tau_s: Optional[float],
     isi: float,
     event_t0_s: float = 0.0,
+    jitter_variant_ms: Optional[np.ndarray] = None,
 ):
     """Single-pass NNLS with multiple template variants per event.
 
     Instead of one template per event, creates N variants with different slow/fast
-    component ratios. NNLS automatically selects the best combination.
+    component ratios and optionally temporal jitters. NNLS automatically selects
+    the best combination.
 
     Args:
         y: Signal to fit
@@ -395,34 +397,45 @@ def fit_amplitudes_with_template_variants(
         weight_tau_s: Weighting time constant
         isi: Inter-stimulus interval
         event_t0_s: Event onset offset
+        jitter_variant_ms: Optional array of temporal shifts in milliseconds
+                          (e.g., np.arange(-2.0, 2.0, 0.2) for ±2ms range)
+                          If None, uses [0.0] (no jitter search)
 
     Returns:
         (amplitudes, shifts, design, reconstruction, components_list, variant_info)
         - amplitudes: Per-event amplitudes (aggregated across variants)
-        - shifts: Zero array (no shift search with variants)
-        - design: Full kernel matrix [time, n_events * n_variants]
+        - shifts: Per-event dominant jitter values in seconds
+        - design: Full kernel matrix [time, n_events * n_template_variants * n_jitter_variants]
         - reconstruction: Fitted signal
         - components_list: Per-event components (aggregated)
-        - variant_info: Dict with selection diagnostics
+        - variant_info: Dict with selection diagnostics (includes jitter info)
     """
     n_events = len(stim_times)
-    n_variants = len(variant_ratios)
+    n_template_variants = len(variant_ratios)
+
+    # Setup jitter variants (in seconds)
+    if jitter_variant_ms is None:
+        jitter_variant_s = np.array([0.0])
+    else:
+        jitter_variant_s = np.asarray(jitter_variant_ms, float) / 1000.0
+    n_jitter_variants = len(jitter_variant_s)
+
     event_t0_s = float(event_t0_s)
 
-    # Build expanded kernel: [time_points, n_events * n_variants]
+    # Build expanded kernel: [time_points, n_events * n_template_variants * n_jitter_variants]
+    # Order: for each event, iterate through (template_variant, jitter_variant) pairs
     kernel_columns = []
 
     for i_event in range(n_events):
         st = float(stim_times[i_event])
-        anchor = st + event_t0_s
         tau_d = float(tau_d_vec_s[i_event])
 
         for frac_slow in variant_ratios:
-            # Build kernel with specific slow component fraction
-            # For iGluSnFR model: frac_fast = 1 - frac_slow
-            # For other models, this will just use the default template
-            k = _build_variant_kernel(t - anchor, tau_r_s, tau_d, frac_slow)
-            kernel_columns.append(k)
+            for jitter_s in jitter_variant_s:
+                # Combined template variant + temporal jitter
+                anchor = st + event_t0_s + jitter_s
+                k = _build_variant_kernel(t - anchor, tau_r_s, tau_d, frac_slow)
+                kernel_columns.append(k)
 
     X = np.column_stack(kernel_columns) if kernel_columns else np.zeros((t.size, 0))
 
@@ -434,48 +447,61 @@ def fit_amplitudes_with_template_variants(
     # Single NNLS solve for all variants
     a_variants = _nnls_weighted(X, y, weights)
 
-    # Aggregate results: sum amplitudes across variants for each event
-    a_variants_2d = a_variants.reshape(n_events, n_variants)
-    a_events = np.sum(a_variants_2d, axis=1)
+    # Reshape to 3D: [n_events, n_template_variants, n_jitter_variants]
+    a_variants_3d = a_variants.reshape(n_events, n_template_variants, n_jitter_variants)
 
-    # Debug: aggregated amplitudes (commented out - enable if needed for debugging)
-    # try:
-    #     from smoothing import progress_print
-    #     progress_print(f"[DEBUG] Aggregated amplitudes (sum across variants): {a_events}")
-    # except Exception:
-    #     pass
+    # Aggregate results: sum amplitudes across all variant dimensions for each event
+    a_events = np.sum(a_variants_3d, axis=(1, 2))
+
+    # Find dominant template variant and jitter for each event
+    # Flatten last two dimensions to find overall max
+    a_variants_2d_flat = a_variants_3d.reshape(n_events, -1)
+    dominant_flat_idx = np.argmax(a_variants_2d_flat, axis=1)
+    dominant_template_idx = dominant_flat_idx // n_jitter_variants
+    dominant_jitter_idx = dominant_flat_idx % n_jitter_variants
+
+    # Extract dominant jitter values
+    d_events = np.array([jitter_variant_s[j_idx] for j_idx in dominant_jitter_idx], dtype=float)
 
     # Build reconstruction
     yhat = X @ a_variants
 
-    # Build per-event components (aggregated across variants)
+    # Build per-event components (aggregated across all variants)
     components = []
     for i_event in range(n_events):
         st = float(stim_times[i_event])
-        anchor = st + event_t0_s
         tau_d = float(tau_d_vec_s[i_event])
 
-        # Sum contributions from all variants for this event
+        # Sum contributions from all template and jitter variants for this event
         comp_event = np.zeros_like(y)
-        for i_var, frac_slow in enumerate(variant_ratios):
-            idx = i_event * n_variants + i_var
-            amp_var = a_variants[idx]
-            if amp_var > 0:
-                k = _build_variant_kernel(t - anchor, tau_r_s, tau_d, frac_slow)
-                comp_event += amp_var * k
+        for i_template, frac_slow in enumerate(variant_ratios):
+            for i_jitter, jitter_s in enumerate(jitter_variant_s):
+                idx = i_event * (n_template_variants * n_jitter_variants) + i_template * n_jitter_variants + i_jitter
+                amp_var = a_variants[idx]
+                if amp_var > 0:
+                    anchor = st + event_t0_s + jitter_s
+                    k = _build_variant_kernel(t - anchor, tau_r_s, tau_d, frac_slow)
+                    comp_event += amp_var * k
         components.append(comp_event)
 
     # Diagnostic info: which variants were selected for each event
-    variant_info = {
-        'n_variants': n_variants,
-        'variant_ratios': variant_ratios,
-        'amplitudes_per_variant': a_variants_2d,  # [n_events, n_variants]
-        'dominant_variant_idx': np.argmax(a_variants_2d, axis=1),  # Which variant had most amplitude
-        'variant_distribution': a_variants_2d / (a_events[:, None] + 1e-12),  # Normalized distribution
-    }
+    # Sum over jitter dimension to get template variant distribution
+    template_variant_sums = np.sum(a_variants_3d, axis=2)  # [n_events, n_template_variants]
+    dominant_template_ratio = np.array([variant_ratios[idx] for idx in dominant_template_idx], dtype=float)
+    dominant_jitter_ms = d_events * 1000.0
 
-    # No shift search with variants approach
-    d_events = np.zeros(n_events, float)
+    variant_info = {
+        'n_template_variants': n_template_variants,
+        'n_jitter_variants': n_jitter_variants,
+        'variant_ratios': variant_ratios,
+        'jitter_variant_ms': jitter_variant_s * 1000.0,  # Convert back to ms for display
+        'amplitudes_3d': a_variants_3d,  # [n_events, n_template_variants, n_jitter_variants]
+        'template_variant_sums': template_variant_sums,  # [n_events, n_template_variants]
+        'dominant_template_idx': dominant_template_idx,
+        'dominant_template_ratio': dominant_template_ratio,
+        'dominant_jitter_idx': dominant_jitter_idx,
+        'dominant_jitter_ms': dominant_jitter_ms,
+    }
 
     return a_events, d_events, X, yhat, components, variant_info
 
@@ -2688,10 +2714,56 @@ def extract_metrics(
             progress_print(f"[NNLS DEBUG] _VARIANT_KERNEL_BUILDER is None!")
     except Exception:
         pass
-    if cfg.get('use_template_variants', False) and _VARIANT_KERNEL_BUILDER is not None:
+    # Check if we should use the variant-based fitting approach
+    use_variants_approach = cfg.get('use_template_variants', False) and _VARIANT_KERNEL_BUILDER is not None
+    jitter_variant_ms = cfg.get('jitter_variant_ms', None)
+
+    # Also use variants approach if jitter_variant_ms is specified (even without template variants)
+    if jitter_variant_ms is not None and not use_variants_approach:
+        use_variants_approach = True
+
+    if use_variants_approach:
         # Use template variants approach: single NNLS with multiple templates per event
-        variant_ratios = cfg.get('template_variant_ratios', [0.2, 0.4, 0.6, 0.8])
-        progress_print(f"[NNLS] Using template variants with {len(variant_ratios)} ratios per event")
+        if cfg.get('use_template_variants', False) and _VARIANT_KERNEL_BUILDER is not None:
+            variant_ratios = cfg.get('template_variant_ratios', [0.2, 0.4, 0.6, 0.8])
+        else:
+            # Jitter-only mode: determine optimal template ratio first if needed
+            # For iGluSnFR, quickly test a few ratios to find the best one for this data
+            if _VARIANT_KERNEL_BUILDER is not None and jitter_variant_ms is not None:
+                # Quick ratio search on average trace (coarse grid)
+                test_ratios = [0.0, 0.3, 0.5, 0.7, 1.0]
+                best_ratio = 0.5
+                best_error = float('inf')
+                weights_test = _calculate_nnls_weights(t, stim_times, isi, weight_mode, weight_tau_s, y_ref=y_avg)
+                for ratio in test_ratios:
+                    kernel_cols = []
+                    for i_event, st in enumerate(stim_times):
+                        anchor = st + event_t0_s
+                        k = _build_variant_kernel(t - anchor, tau_r, tau_d_vec[i_event], ratio)
+                        kernel_cols.append(k)
+                    X_test = np.column_stack(kernel_cols) if kernel_cols else np.zeros((t.size, 0))
+                    a_test = _nnls_weighted(X_test, y_avg, weights_test)
+                    yhat_test = X_test @ a_test
+                    error = np.sqrt(np.nanmean((y_avg - yhat_test)**2))
+                    if error < best_error:
+                        best_error = error
+                        best_ratio = ratio
+                variant_ratios = [best_ratio]
+                progress_print(f"[NNLS] Jitter-only mode: determined optimal template ratio = {best_ratio:.1f}")
+            else:
+                # Non-variant model: ratio doesn't matter
+                variant_ratios = [0.5]
+
+        # Report configuration
+        if cfg.get('use_template_variants', False) and jitter_variant_ms is not None:
+            jitter_arr = np.asarray(jitter_variant_ms, float)
+            progress_print(f"[NNLS] Using template variants ({len(variant_ratios)} ratios) + jitter variants ({len(jitter_arr)} shifts)")
+        elif cfg.get('use_template_variants', False):
+            progress_print(f"[NNLS] Using template variants with {len(variant_ratios)} ratios per event")
+        elif jitter_variant_ms is not None:
+            jitter_arr = np.asarray(jitter_variant_ms, float)
+            progress_print(f"[NNLS] Using jitter variants with {len(jitter_arr)} shifts per event")
+
         a_avg, d_avg, X_avg, yhat_avg, comp_avg, variant_info_avg = fit_amplitudes_with_template_variants(
             y_avg, t, stim_times, tau_r, tau_d_vec,
             variant_ratios=variant_ratios,
@@ -2699,12 +2771,24 @@ def extract_metrics(
             weight_tau_s=weight_tau_s,
             isi=isi,
             event_t0_s=event_t0_s,
+            jitter_variant_ms=jitter_variant_ms,
         )
         # Report which variants were selected
         try:
-            dominant_idx = variant_info_avg['dominant_variant_idx']
-            dominant_ratios = [variant_ratios[i] for i in dominant_idx]
-            progress_print(f"[NNLS] Dominant slow fractions per event: {[f'{r:.1f}' for r in dominant_ratios]}")
+            if 'dominant_template_ratio' in variant_info_avg:
+                # New format with jitter support
+                dominant_ratios = variant_info_avg['dominant_template_ratio']
+                dominant_jitters = variant_info_avg['dominant_jitter_ms']
+                if cfg.get('use_template_variants', False):
+                    progress_print(f"[NNLS] Dominant slow fractions per event: {[f'{r:.1f}' for r in dominant_ratios]}")
+                if jitter_variant_ms is not None:
+                    progress_print(f"[NNLS] Dominant jitter (ms) per event: {[f'{j:.2f}' for j in dominant_jitters]}")
+            else:
+                # Old format (backward compatibility)
+                dominant_idx = variant_info_avg.get('dominant_variant_idx', [])
+                if len(dominant_idx):
+                    dominant_ratios = [variant_ratios[i] for i in dominant_idx]
+                    progress_print(f"[NNLS] Dominant slow fractions per event: {[f'{r:.1f}' for r in dominant_ratios]}")
         except Exception:
             pass
     else:
