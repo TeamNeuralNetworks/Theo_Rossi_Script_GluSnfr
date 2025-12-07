@@ -1,0 +1,21 @@
+Basé sur le code fourni dans le notebook, voici la comparaison entre ces deux cellules d'analyse "Bootstrap" (probablement la cellule I.7 et la cellule suivante marquée Cell 7 ou (NEW)) :
+
+Les deux cellules effectuent une analyse "Bootstrap" (tirage de paires aléatoires) pour estimer la probabilité d'obtenir une paire "stable" par pur hasard. Cependant, elles utilisent deux définitions différentes de l'appartenance à un cluster, ce qui explique la différence de valeurs.
+
+1. Cellule 140 (Bootstrap Standard - I.7)
+Cette cellule utilise les assignations strictes issues du clustering hiérarchique (fcluster).
+
+Méthode : Elle vérifie si wt_clusters[i] == wt_clusters[j].
+Logique : C'est une partition stricte ("Hard clustering"). Chaque bouton appartient à un seul et unique cluster. Il n'y a aucun chevauchement.
+Conséquence : La probabilité qu'une paire aléatoire soit "stable" dépend uniquement de la taille relative des clusters dans la population totale.
+2. Cellule 141 (Bootstrap Géométrique - Cell 7 / NEW)
+Cette cellule utilise les modèles d'Ellipses avec une zone de tolérance (_label_all avec thr_tol).
+
+Méthode : Elle vérifie si l'intersection des clusters possibles pour le point A et le point B n'est pas vide (intersection(...) > 0).
+Logique : C'est une approche géométrique avec chevauchement. À cause de la zone de tolérance (ELLIPSE_TOL), un bouton situé à la frontière peut appartenir mathématiquement à plusieurs ellipses en même temps (ex: Cluster 1 ET Cluster 2).
+Conséquence : Cette méthode est plus "permissive". Comme les ellipses gonflées se chevauchent, il est plus facile pour deux points aléatoires d'avoir au moins un cluster en commun.
+Résumé
+Les valeurs sont différentes car la Cellule 141 est plus permissive.
+
+Cellule 140 : "Est-ce qu'ils ont exactement la même étiquette unique ?" (Plus strict, valeur plus basse).
+Cellule 141 : "Est-ce que leurs zones de tolérance se touchent ?" (Plus souple à cause des chevauchements d'ellipses, valeur généralement plus haute).
