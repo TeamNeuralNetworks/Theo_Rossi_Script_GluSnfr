@@ -4118,11 +4118,15 @@ def export_folders_to_excel(paths,
                             train_start: float,
                             isi: float,
                             n_pulses: int,
-                            options: Optional[Dict] = None):
+                            options: Optional[Dict] = None,
+                            save_traces: bool = True):
     """Process all .xlsx files in each folder and write a multi-sheet Excel.
 
     - One sheet per input folder (sheet named after the folder's basename)
     - Each sheet: one row per file with AMP1..AMPn, PPR2/1.., optional %Fail1..3
+    - If save_traces=True (default), also writes a companion file 
+      `<out_file_stem>_traces.xlsx` containing preprocessed average traces
+      with one sheet per condition (columns: Time, ID1, ID2, ...)
 
     Options follow extract_metrics; 'measurement' selects the amplitude series
     used for export; 'fail_method' controls failure classification.
@@ -4144,6 +4148,9 @@ def export_folders_to_excel(paths,
     meas = str(cfg.get('measurement', 'NNLS')).strip().upper()
     failm = str((cfg.get('fail_method') or meas)).strip().upper()
 
+    # Store traces for companion file: {sheet_name: {id: (time, y_avg)}}
+    traces_by_sheet: Dict[str, Dict[str, Tuple[np.ndarray, np.ndarray]]] = {}
+
     with pd.ExcelWriter(out_file) as writer:
         wrote_any = False
         for folder in paths:
@@ -4151,6 +4158,9 @@ def export_folders_to_excel(paths,
             if not files:
                 continue
             rows = []
+            sheet = os.path.basename(os.path.normpath(folder))[:31]
+            traces_by_sheet[sheet] = {}
+
             for fp in files:
                 try:
                     df = pd.read_excel(fp, sheet_name=0)
@@ -4217,6 +4227,14 @@ def export_folders_to_excel(paths,
                         row[f"%Fail{k+1}"] = round((n_fail[k] / n_valid[k]) * 100.0, 2) if n_valid[k] else float('nan')
 
                     rows.append(row)
+
+                    # Store average trace for companion file
+                    if save_traces:
+                        y_avg = res['average'].get('y_avg')
+                        time_s = res.get('time_s')
+                        if y_avg is not None and time_s is not None:
+                            traces_by_sheet[sheet][base] = (np.asarray(time_s, float), np.asarray(y_avg, float))
+
                 except Exception:
                     continue
 
@@ -4229,7 +4247,6 @@ def export_folders_to_excel(paths,
                     if c not in df_out.columns:
                         df_out[c] = float('nan')
                 df_out = df_out[cols]
-                sheet = os.path.basename(os.path.normpath(folder))[:31]
                 df_out.to_excel(writer, sheet_name=sheet, index=False)
                 wrote_any = True
 
@@ -4237,3 +4254,25 @@ def export_folders_to_excel(paths,
             # Placeholder sheet
             import pandas as _pd
             _pd.DataFrame({"info": ["No valid data found"]}).to_excel(writer, sheet_name="Summary", index=False)
+
+    # Write companion traces file if requested
+    if save_traces and traces_by_sheet:
+        out_stem = os.path.splitext(out_file)[0]
+        traces_file = f"{out_stem}_traces.xlsx"
+        with pd.ExcelWriter(traces_file) as trace_writer:
+            wrote_traces = False
+            for sheet_name, id_traces in traces_by_sheet.items():
+                if not id_traces:
+                    continue
+                # Build DataFrame: Time column + one column per bouton ID
+                # All traces should share the same time vector; use the first one
+                first_id = next(iter(id_traces))
+                time_vec = id_traces[first_id][0]
+                trace_df = pd.DataFrame({'Time': time_vec})
+                for bid, (_, y_avg) in sorted(id_traces.items()):
+                    trace_df[bid] = y_avg
+                trace_df.to_excel(trace_writer, sheet_name=sheet_name[:31], index=False)
+                wrote_traces = True
+            if not wrote_traces:
+                pd.DataFrame({"info": ["No traces found"]}).to_excel(trace_writer, sheet_name="Summary", index=False)
+        progress_print(f"[export] Saved average traces to: {traces_file}")

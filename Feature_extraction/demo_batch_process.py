@@ -57,21 +57,21 @@ def _safe_sheet_name(name: str) -> str:
 
 # Input listed above
 folders = [
-    r"C:\\Users\\Antoine.Valera\\Desktop\\PPR_DATA_FINAL\\Stability_Before",
-    r"C:\\Users\\Antoine.Valera\\Desktop\\PPR_DATA_FINAL\\Stability_After",
-    r"C:\\Users\\Antoine.Valera\\Desktop\\PPR_DATA_FINAL\\Stability_Before_05",
-    r"C:\\Users\\Antoine.Valera\\Desktop\\PPR_DATA_FINAL\\Stability_After_05",
-    r"C:\\Users\\Antoine.Valera\\Desktop\\PPR_DATA_FINAL\\Theo_4Ca",
-    r"C:\\Users\\Antoine.Valera\\Desktop\\PPR_DATA_FINAL\\Theo_1_5Ca",
-    r"C:\\Users\\Antoine.Valera\\Desktop\\PPR_DATA_FINAL\\WT_Theo",
-    r"C:\\Users\\Antoine.Valera\\Desktop\\PPR_DATA_FINAL\\WT_Theo_1scd",
-    r"C:\\Users\\Antoine.Valera\\Desktop\\PPR_DATA_FINAL\\WT_Anthime",
-    r"C:\\Users\\Antoine.Valera\\Desktop\\PPR_DATA_FINAL\\SynII",
-    r"C:\\Users\\Antoine.Valera\\Desktop\\PPR_DATA_FINAL\\Theo_1_5_50Hz",
-    r"C:\\Users\\Antoine.Valera\\Desktop\\PPR_DATA_FINAL\\Theo_2_5_50Hz",
-    r"C:\\Users\\Antoine.Valera\\Desktop\\PPR_DATA_FINAL\\Theo_4_50Hz",
+    r"C:\\Users\\Anthime.PERROT\\PPR_DATA_AND_CODE\\Stability_After_temp_t_delete_later\\Stability_Before",
+    r"C:\\Users\\Anthime.PERROT\\PPR_DATA_AND_CODE\\Stability_After_temp_t_delete_later\\Stability_After",
+    r"C:\\Users\\Anthime.PERROT\\PPR_DATA_AND_CODE\\Stability_After_temp_t_delete_later\\Stability_Before_05",
+    r"C:\\Users\\Anthime.PERROT\\PPR_DATA_AND_CODE\\Stability_After_temp_t_delete_later\\Stability_After_05",
+    r"C:\\Users\\Anthime.PERROT\\PPR_DATA_AND_CODE\\Stability_After_temp_t_delete_later\\Theo_4Ca",
+    r"C:\\Users\\Anthime.PERROT\\PPR_DATA_AND_CODE\\Stability_After_temp_t_delete_later\\Theo_1_5Ca",
+    r"C:\\Users\\Anthime.PERROT\\PPR_DATA_AND_CODE\\Stability_After_temp_t_delete_later\\WT_Theo",
+    r"C:\\Users\\Anthime.PERROT\\PPR_DATA_AND_CODE\\Stability_After_temp_t_delete_later\\WT_Theo_1scd",
+    r"C:\\Users\\Anthime.PERROT\\PPR_DATA_AND_CODE\\Stability_After_temp_t_delete_later\\WT_Anthime",
+    r"C:\\Users\\Anthime.PERROT\\PPR_DATA_AND_CODE\\Stability_After_temp_t_delete_later\\SynII",
+    r"C:\\Users\\Anthime.PERROT\\PPR_DATA_AND_CODE\\Stability_After_temp_t_delete_later\\Theo_1_5_50Hz",
+    r"C:\\Users\\Anthime.PERROT\\PPR_DATA_AND_CODE\\Stability_After_temp_t_delete_later\\Theo_2_5_50Hz",
+    r"C:\\Users\\Anthime.PERROT\\PPR_DATA_AND_CODE\\Stability_After_temp_t_delete_later\\Theo_4_50Hz",
 ]
-root_out = r"C:\\Users\\Antoine.Valera\\Desktop\\Testout"; os.makedirs(root_out, exist_ok=True)
+root_out = r"C:\\Users\\Anthime.PERROT\\PPR_DATA_AND_CODE\\Stability_After_temp_t_delete_later\\Testout"; os.makedirs(root_out, exist_ok=True)
 
 # Per-folder train_start (seconds). Default 0.998; override selected folders to 0.498
 default_start = 0.998
@@ -110,6 +110,7 @@ if keep_expe_idx is not None:
 
 summaries = {}
 per_trial_rows = []
+traces_by_folder = {}  # Store average traces for companion file
 
 for in_dir in folders:
     out_dir = os.path.join(root_out, os.path.basename(in_dir))
@@ -416,6 +417,15 @@ for in_dir in folders:
                 row[f'%Fail{p}'] = round((n_fail / n_valid) * 100.0, 2)
         rows.append(row)
 
+        # Store average trace for companion traces file
+        y_avg = res['average'].get('y_avg')
+        time_s = res.get('time_s')
+        if y_avg is not None and time_s is not None:
+            folder_name = os.path.basename(in_dir)
+            if folder_name not in traces_by_folder:
+                traces_by_folder[folder_name] = {}
+            traces_by_folder[folder_name][base] = (np.asarray(time_s, float), np.asarray(y_avg, float))
+
     # Save per-folder summary and collect for global workbook
     df_rows = pd.DataFrame(rows)
     ordered = [f'AMP{i}' for i in range(1, n_pulses + 1)] \
@@ -435,3 +445,28 @@ with pd.ExcelWriter(main_out) as writer:
         df.to_excel(writer, sheet_name=_safe_sheet_name(folder_name), index=False)
 if per_trial_rows:
     pd.DataFrame(per_trial_rows).to_excel(os.path.splitext(main_out)[0] + "_trials.xlsx", index=False)
+
+# Save companion traces file with preprocessed average traces
+traces_out = os.path.splitext(main_out)[0] + "_traces.xlsx"
+with pd.ExcelWriter(traces_out) as trace_writer:
+    wrote_traces = False
+    for folder_name, id_traces in traces_by_folder.items():
+        if not id_traces:
+            continue
+        # Build DataFrame: Time column + one column per bouton ID
+        # All traces in a folder may have different lengths due to different dt
+        # Use the longest time vector as reference and interpolate others
+        all_times = [t for t, _ in id_traces.values()]
+        ref_time = max(all_times, key=len)
+        trace_df = pd.DataFrame({'Time': ref_time})
+        for bid, (t_vec, y_avg) in sorted(id_traces.items()):
+            if len(y_avg) == len(ref_time):
+                trace_df[bid] = y_avg
+            else:
+                # Interpolate to match reference time grid
+                trace_df[bid] = np.interp(ref_time, t_vec, y_avg)
+        trace_df.to_excel(trace_writer, sheet_name=_safe_sheet_name(folder_name), index=False)
+        wrote_traces = True
+    if not wrote_traces:
+        pd.DataFrame({"info": ["No traces found"]}).to_excel(trace_writer, sheet_name="Summary", index=False)
+print(f"[export] Saved average traces to: {traces_out}")
