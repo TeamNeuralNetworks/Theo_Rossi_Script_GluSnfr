@@ -4255,24 +4255,33 @@ def export_folders_to_excel(paths,
             import pandas as _pd
             _pd.DataFrame({"info": ["No valid data found"]}).to_excel(writer, sheet_name="Summary", index=False)
 
-    # Write companion traces file if requested
+    # Write companion traces and times files if requested
+    # Two separate files are created:
+    #   - <out_stem>_traces.xlsx: one column per bouton ID (no time column)
+    #   - <out_stem>_times.xlsx: one column per bouton ID with time vectors
+    # Both files have the same sheet/column organization for easy pairing.
     if save_traces and traces_by_sheet:
         out_stem = os.path.splitext(out_file)[0]
         traces_file = f"{out_stem}_traces.xlsx"
-        with pd.ExcelWriter(traces_file) as trace_writer:
+        times_file = f"{out_stem}_times.xlsx"
+        with pd.ExcelWriter(traces_file) as trace_writer, pd.ExcelWriter(times_file) as time_writer:
             wrote_traces = False
             for sheet_name, id_traces in traces_by_sheet.items():
                 if not id_traces:
                     continue
-                # Build DataFrame: Time column + one column per bouton ID
-                # All traces should share the same time vector; use the first one
-                first_id = next(iter(id_traces))
-                time_vec = id_traces[first_id][0]
-                trace_df = pd.DataFrame({'Time': time_vec})
-                for bid, (_, y_avg) in sorted(id_traces.items()):
+                # Build DataFrames: one column per bouton ID (no Time column in traces)
+                # Traces file: amplitude values only
+                # Times file: time vectors (same column order as traces)
+                trace_df = pd.DataFrame()
+                time_df = pd.DataFrame()
+                for bid, (t_vec, y_avg) in sorted(id_traces.items()):
                     trace_df[bid] = y_avg
+                    time_df[bid] = t_vec
                 trace_df.to_excel(trace_writer, sheet_name=sheet_name[:31], index=False)
+                time_df.to_excel(time_writer, sheet_name=sheet_name[:31], index=False)
                 wrote_traces = True
             if not wrote_traces:
                 pd.DataFrame({"info": ["No traces found"]}).to_excel(trace_writer, sheet_name="Summary", index=False)
+                pd.DataFrame({"info": ["No traces found"]}).to_excel(time_writer, sheet_name="Summary", index=False)
         progress_print(f"[export] Saved average traces to: {traces_file}")
+        progress_print(f"[export] Saved time vectors to: {times_file}")
