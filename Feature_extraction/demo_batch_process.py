@@ -458,11 +458,14 @@ with pd.ExcelWriter(traces_out) as trace_writer, pd.ExcelWriter(times_out) as ti
             continue
         # Build DataFrames: one column per bouton ID (no Time column in traces)
         # Each trace keeps its original time vector (no interpolation)
-        trace_df = pd.DataFrame()
-        time_df = pd.DataFrame()
+        # Use pd.Series to handle different lengths per column
+        trace_dict = {}
+        time_dict = {}
         for bid, (t_vec, y_avg) in sorted(id_traces.items()):
-            trace_df[bid] = y_avg
-            time_df[bid] = t_vec
+            trace_dict[bid] = pd.Series(y_avg)
+            time_dict[bid] = pd.Series(t_vec)
+        trace_df = pd.DataFrame(trace_dict)
+        time_df = pd.DataFrame(time_dict)
         trace_df.to_excel(trace_writer, sheet_name=_safe_sheet_name(folder_name), index=False)
         time_df.to_excel(time_writer, sheet_name=_safe_sheet_name(folder_name), index=False)
         wrote_traces = True

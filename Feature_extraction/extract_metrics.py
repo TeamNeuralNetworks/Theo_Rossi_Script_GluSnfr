@@ -4270,13 +4270,14 @@ def export_folders_to_excel(paths,
                 if not id_traces:
                     continue
                 # Build DataFrames: one column per bouton ID (no Time column in traces)
-                # Traces file: amplitude values only
-                # Times file: time vectors (same column order as traces)
-                trace_df = pd.DataFrame()
-                time_df = pd.DataFrame()
+                # Use pd.Series to handle different lengths per column
+                trace_dict = {}
+                time_dict = {}
                 for bid, (t_vec, y_avg) in sorted(id_traces.items()):
-                    trace_df[bid] = y_avg
-                    time_df[bid] = t_vec
+                    trace_dict[bid] = pd.Series(y_avg)
+                    time_dict[bid] = pd.Series(t_vec)
+                trace_df = pd.DataFrame(trace_dict)
+                time_df = pd.DataFrame(time_dict)
                 trace_df.to_excel(trace_writer, sheet_name=sheet_name[:31], index=False)
                 time_df.to_excel(time_writer, sheet_name=sheet_name[:31], index=False)
                 wrote_traces = True
