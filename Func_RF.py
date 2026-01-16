@@ -15,7 +15,7 @@ from scipy import stats
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.multiclass import OneVsRestClassifier
 from sklearn.model_selection import GridSearchCV, StratifiedKFold
-from sklearn.metrics import confusion_matrix
+from sklearn.metrics import confusion_matrix, balanced_accuracy_score
 
 
 # -----------------------------------------------------------------------------
@@ -41,23 +41,31 @@ DEFAULT_PARAM_GRID = {
 # Internal helper functions
 # -----------------------------------------------------------------------------
 def _create_model(n_estimators=20, max_leaf_nodes=3, random_state=42):
-    """Create a OneVsRestClassifier wrapping RandomForestClassifier."""
+    """Create a OneVsRestClassifier wrapping RandomForestClassifier.
+    
+    Uses class_weight='balanced' to handle imbalanced classes by adjusting
+    weights inversely proportional to class frequencies.
+    """
     base_rf = RandomForestClassifier(
         n_estimators=n_estimators,
         max_leaf_nodes=max_leaf_nodes,
-        random_state=random_state
+        random_state=random_state,
+        class_weight='balanced'  # Handle class imbalance
     )
     return OneVsRestClassifier(base_rf)
 
 
 def _find_best_hyperparameters(model, param_grid, X_train, y_train, cv, verbose=True):
-    """Use GridSearchCV to find the best hyperparameters."""
-    grid = GridSearchCV(model, param_grid, n_jobs=1, cv=cv)
+    """Use GridSearchCV to find the best hyperparameters.
+    
+    Uses balanced_accuracy as scoring metric to handle class imbalance.
+    """
+    grid = GridSearchCV(model, param_grid, n_jobs=1, cv=cv, scoring='balanced_accuracy')
     grid.fit(X_train, y_train)
     
     if verbose:
         print('------------------')
-        print(f'Best model score: {grid.best_score_:.3f}')
+        print(f'Best model score (balanced acc): {grid.best_score_:.3f}')
         print(f'Best params: {grid.best_params_}')
     
     return grid.best_estimator_, grid.best_score_
@@ -65,7 +73,11 @@ def _find_best_hyperparameters(model, param_grid, X_train, y_train, cv, verbose=
 
 def _run_classification(X, y, n_splits, n_iter, param_grid, shuffle_labels=False, 
                         random_state=42, verbose=True):
-    """Run classification with StratifiedKFold cross-validation."""
+    """Run classification with StratifiedKFold cross-validation.
+    
+    Uses balanced_accuracy_score to handle class imbalance (average of recall
+    for each class, giving equal weight to all classes regardless of size).
+    """
     if shuffle_labels:
         np.random.seed(random_state)
         y = pd.Series(np.random.permutation(y.values), index=y.index)
@@ -83,20 +95,22 @@ def _run_classification(X, y, n_splits, n_iter, param_grid, shuffle_labels=False
             model = _create_model(random_state=random_state)
             modell, _ = _find_best_hyperparameters(model, param_grid, X_train, y_train, cv, verbose=verbose)
             
-            test_score = modell.score(X_test, y_test)
+            # Use balanced accuracy: average recall per class (handles imbalance)
+            y_pred = modell.predict(X_test)
+            test_score = balanced_accuracy_score(y_test, y_pred)
             test_score_all.append(test_score)
             
             if verbose:
-                print(f'Test score TRIAL {i}; SPLIT {j}: {test_score:.3f}')
+                print(f'Balanced accuracy TRIAL {i}; SPLIT {j}: {test_score:.3f}')
                 print('------------------')
             
-            matrix = confusion_matrix(y_test, modell.predict(X_test), normalize='true')
+            matrix = confusion_matrix(y_test, y_pred, normalize='true')
             confusion_mats_all.append(pd.DataFrame(matrix))
     
     confusion_mat_final = pd.concat(confusion_mats_all).groupby(level=0).mean()
     
     if verbose:
-        print(f'Total mean test score: {np.mean(test_score_all):.3f}')
+        print(f'Total mean balanced accuracy: {np.mean(test_score_all):.3f}')
     
     return confusion_mat_final, test_score_all
 
@@ -174,8 +188,8 @@ def _plot_scores_boxplot(scores_actual, scores_shuffled, ax):
     # Labels and formatting
     ax.set_xticks(positions)
     ax.set_xticklabels(['Actual', 'Shuffled'])
-    ax.set_ylabel('Classification Score')
-    ax.set_title('Average Global Score')
+    ax.set_ylabel('Balanced Accuracy')
+    ax.set_title('Average Balanced Accuracy')
     ax.set_ylim(0, bar_height + 0.12)
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
@@ -310,8 +324,8 @@ def random_forest_classification(df,
         print("\n" + "=" * 60)
         print("RESULTS SUMMARY")
         print("=" * 60)
-        print(f"\nMean test accuracy (actual): {accuracy_actual:.3f} ± {np.std(scores_actual):.3f}")
-        print(f"Mean test accuracy (shuffled): {accuracy_shuffled:.3f} ± {np.std(scores_shuffled):.3f}")
+        print(f"\nMean balanced accuracy (actual): {accuracy_actual:.3f} ± {np.std(scores_actual):.3f}")
+        print(f"Mean balanced accuracy (shuffled): {accuracy_shuffled:.3f} ± {np.std(scores_shuffled):.3f}")
     
     # Create figure with 3 subplots: 2 confusion matrices + 1 boxplot
     fig, axes = plt.subplots(1, 3, figsize=(16, 5))
