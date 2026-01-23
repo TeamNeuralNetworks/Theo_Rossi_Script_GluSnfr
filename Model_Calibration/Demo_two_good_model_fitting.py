@@ -27,7 +27,8 @@ except Exception:  # pragma: no cover - allow running as script
 # =============================================================================
 
 # Data input settings
-DEFAULT_INPUT_DIR = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\WT_Anthime\\"  # Default data directory
+DATA_ROOT = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL"
+DEFAULT_INPUT_DIR = os.path.join(DATA_ROOT, "WT_Anthime")  # Default data directory
 
 # Time windows and fitting parameters
 ANALYSIS_TIME_START_MS = -5      # Start of analysis window (ms)

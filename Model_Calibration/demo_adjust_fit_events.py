@@ -34,7 +34,8 @@ EVENT_INDEX = None  # Set to 0 for event 1, 2 for event 3, etc. Use None for all
 #  2. Set environment variable GLUSNFR_IN_DIR
 #        (Windows) set GLUSNFR_IN_DIR=C:\\path\\to\\folder
 #  3. Rely on the hard‑coded DEFAULT_IN_DIR below
-DEFAULT_IN_DIR = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Theo_1_5Ca\\"
+DATA_ROOT = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL"
+DEFAULT_IN_DIR = os.path.join(DATA_ROOT, "Theo_1_5Ca")
 
 def _resolve_input_dir_from_argv(argv) -> str | None:
     """Return the first positional CLI argument that is an existing directory.

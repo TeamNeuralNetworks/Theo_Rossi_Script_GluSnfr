@@ -45,8 +45,13 @@ from Feature_extraction.extract_metrics import extract_metrics
 # Configuration
 # ---------------------------------------------------------------------------
 
-XLSX_PATH = r"C:\\Users\\Antoine.Valera\\Desktop\\PPR_DATA_FINAL\\Theo_4Ca\\20211125_linescan1_20Hz_10pulses_4mMCa_bouton1_traces_converted.xlsx"
-OUT_DIR = r"C:\\Users\\Antoine.Valera\\Desktop\\Testout"
+DATA_ROOT = r"C:\\Users\\Antoine.Valera\\Desktop\\PPR_DATA_FINAL"
+XLSX_PATH = os.path.join(
+    DATA_ROOT,
+    "Theo_4Ca",
+    "20211125_linescan1_20Hz_10pulses_4mMCa_bouton1_traces_converted.xlsx",
+)
+OUT_DIR = os.path.join(DATA_ROOT, "Testout")
 
 # Event models to compare. Add or remove entries as needed. Each tuple contains
 # the event model name accepted by ``extract_metrics`` and optional keyword

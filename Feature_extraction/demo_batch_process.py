@@ -55,35 +55,44 @@ def _safe_sheet_name(name: str) -> str:
     return (cleaned or "Sheet")[:31]
 
 
+def _build_data_folders(base_dir: str, subfolders: list[str]) -> list[str]:
+    return [os.path.join(base_dir, name) for name in subfolders]
+
+
 # Input listed above
-folders = [
-    r"C:\\Users\\Anthime.PERROT\\PPR_DATA_AND_CODE\\Stability_After_temp_t_delete_later\\Stability_Before",
-    r"C:\\Users\\Anthime.PERROT\\PPR_DATA_AND_CODE\\Stability_After_temp_t_delete_later\\Stability_After",
-    r"C:\\Users\\Anthime.PERROT\\PPR_DATA_AND_CODE\\Stability_After_temp_t_delete_later\\Stability_Before_05",
-    r"C:\\Users\\Anthime.PERROT\\PPR_DATA_AND_CODE\\Stability_After_temp_t_delete_later\\Stability_After_05",
-    r"C:\\Users\\Anthime.PERROT\\PPR_DATA_AND_CODE\\Stability_After_temp_t_delete_later\\Theo_4Ca",
-    r"C:\\Users\\Anthime.PERROT\\PPR_DATA_AND_CODE\\Stability_After_temp_t_delete_later\\Theo_1_5Ca",
-    r"C:\\Users\\Anthime.PERROT\\PPR_DATA_AND_CODE\\Stability_After_temp_t_delete_later\\WT_Theo",
-    r"C:\\Users\\Anthime.PERROT\\PPR_DATA_AND_CODE\\Stability_After_temp_t_delete_later\\WT_Theo_1scd",
-    r"C:\\Users\\Anthime.PERROT\\PPR_DATA_AND_CODE\\Stability_After_temp_t_delete_later\\WT_Anthime",
-    r"C:\\Users\\Anthime.PERROT\\PPR_DATA_AND_CODE\\Stability_After_temp_t_delete_later\\SynII",
-    r"C:\\Users\\Anthime.PERROT\\PPR_DATA_AND_CODE\\Stability_After_temp_t_delete_later\\Theo_1_5_50Hz",
-    r"C:\\Users\\Anthime.PERROT\\PPR_DATA_AND_CODE\\Stability_After_temp_t_delete_later\\Theo_2_5_50Hz",
-    r"C:\\Users\\Anthime.PERROT\\PPR_DATA_AND_CODE\\Stability_After_temp_t_delete_later\\Theo_4_50Hz",
+VIEW_ONLY = True
+TARGET_BOUTON = "20210721_linescan1_50Hz_10pulses_4mMCa_bouton4_traces_converted"
+DATA_ROOT = r"C:\\Users\\Antoine.Valera\\Desktop\\PPR_DATA_FINAL"
+SUBFOLDERS = [
+    "Stability_Before",
+    "Stability_After",
+    "Stability_Before_05",
+    "Stability_After_05",
+    "Theo_4Ca",
+    "Theo_1_5Ca",
+    "WT_Theo",
+    "WT_Theo_1scd",
+    "WT_Anthime",
+    "SynII",
+    "Theo_1_5_50Hz",
+    "Theo_2_5_50Hz",
+    "Theo_4_50Hz",
 ]
-root_out = r"C:\\Users\\Anthime.PERROT\\PPR_DATA_AND_CODE\\Stability_After_temp_t_delete_later\\Testout"; os.makedirs(root_out, exist_ok=True)
+folders = _build_data_folders(DATA_ROOT, SUBFOLDERS)
+root_out = os.path.join(DATA_ROOT, "Testout")
+os.makedirs(root_out, exist_ok=True)
 
 # Per-folder train_start (seconds). Default 0.998; override selected folders to 0.498
 default_start = 0.998
-train_start_by_folder = {
-    folders[2]: 0.498,
-    folders[3]: 0.498,
-    folders[4]: 0.498,
-    folders[5]: 0.498,
-    folders[6]: 0.498,
-    folders[10]: 0.498,
-    folders[11]: 0.498,
-    folders[12]: 0.498,
+train_start_by_name = {
+    "Stability_Before_05": 0.498,
+    "Stability_After_05": 0.498,
+    "Theo_4Ca": 0.498,
+    "Theo_1_5Ca": 0.498,
+    "WT_Theo": 0.498,
+    "Theo_1_5_50Hz": 0.498,
+    "Theo_2_5_50Hz": 0.498,
+    "Theo_4_50Hz": 0.498,
 }
 
 # ISI control: default_isi applies to all unless overridden in isi_by_folder.
@@ -94,18 +103,19 @@ train_start_by_folder = {
 #   0.02 = 50Hz (high frequency, uses shorter analysis windows)
 #   0.01 = 100Hz (ultra-high frequency)
 default_isi = 0.05
-isi_by_folder = {
-    folders[10]: 0.02,  # Theo_1_5_50Hz
-    folders[11]: 0.02,  # Theo_2_5_50Hz
-    folders[12]: 0.02,  # Theo_4_50Hz
+isi_by_name = {
+    "Theo_1_5_50Hz": 0.02,
+    "Theo_2_5_50Hz": 0.02,
+    "Theo_4_50Hz": 0.02,
 }
 
 # add a debug skip that would select one condition and adjust isis_by_folder and train_start_by_folder accordingly, given the index to keep
 keep_expe_idx = None
 if keep_expe_idx is not None:
     folders = [folders[keep_expe_idx]]
-    train_start_by_folder = {folders[0]: train_start_by_folder.get(folders[0], default_start)}
-    isi_by_folder = {folders[0]: isi_by_folder.get(folders[0], default_isi)}
+    keep_name = os.path.basename(folders[0])
+    train_start_by_name = {keep_name: train_start_by_name.get(keep_name, default_start)}
+    isi_by_name = {keep_name: isi_by_name.get(keep_name, default_isi)}
 
 
 summaries = {}
@@ -117,8 +127,9 @@ for in_dir in folders:
     os.makedirs(out_dir, exist_ok=True)
 
     # Per-folder timing
-    train_start = train_start_by_folder.get(in_dir, default_start)
-    isi = isi_by_folder.get(in_dir, default_isi)
+    in_name = os.path.basename(in_dir)
+    train_start = train_start_by_name.get(in_name, default_start)
+    isi = isi_by_name.get(in_name, default_isi)
     n_pulses = 10
 
     rows = []
@@ -368,6 +379,8 @@ for in_dir in folders:
         options = options_presets[preset_name]
 
         base = os.path.splitext(os.path.basename(xlsx_path))[0]
+        if VIEW_ONLY and base != TARGET_BOUTON:
+            continue
         res = extract_metrics(
             time, trials,
             train_start=train_start,  # seconds
@@ -377,7 +390,10 @@ for in_dir in folders:
             filename=base  # Add filename for plot title
         )
         if res.get('figure') is not None:
-            res['figure'].savefig(os.path.join(out_dir, f"{base}.png"), dpi=150)
+            if VIEW_ONLY:
+                res['figure'].show()
+            else:
+                res['figure'].savefig(os.path.join(out_dir, f"{base}.png"), dpi=150)
 
         row = {'measurement': 'NNLS', 'ID': base}
         amp = res['average'].get('amp_nnls_corr', res['average']['amp_nnls'])
@@ -438,39 +454,40 @@ for in_dir in folders:
     df_rows.to_csv(os.path.join(out_dir, "summary.csv"), index=False)
     summaries[os.path.basename(in_dir)] = df_rows
 
-# Save a multi-sheet workbook with one sheet per input folder
-main_out = os.path.join(root_out, "summary.xlsx")
-with pd.ExcelWriter(main_out) as writer:
-    for folder_name, df in summaries.items():
-        df.to_excel(writer, sheet_name=_safe_sheet_name(folder_name), index=False)
-if per_trial_rows:
-    pd.DataFrame(per_trial_rows).to_excel(os.path.splitext(main_out)[0] + "_trials.xlsx", index=False)
+if not VIEW_ONLY:
+    # Save a multi-sheet workbook with one sheet per input folder
+    main_out = os.path.join(root_out, "summary.xlsx")
+    with pd.ExcelWriter(main_out) as writer:
+        for folder_name, df in summaries.items():
+            df.to_excel(writer, sheet_name=_safe_sheet_name(folder_name), index=False)
+    if per_trial_rows:
+        pd.DataFrame(per_trial_rows).to_excel(os.path.splitext(main_out)[0] + "_trials.xlsx", index=False)
 
-# Save companion traces and times files (separate files, no interpolation)
-# - summary_traces.xlsx: amplitude values only (one column per bouton ID)
-# - summary_times.xlsx: time vectors (one column per bouton ID, same order)
-traces_out = os.path.splitext(main_out)[0] + "_traces.xlsx"
-times_out = os.path.splitext(main_out)[0] + "_times.xlsx"
-with pd.ExcelWriter(traces_out) as trace_writer, pd.ExcelWriter(times_out) as time_writer:
-    wrote_traces = False
-    for folder_name, id_traces in traces_by_folder.items():
-        if not id_traces:
-            continue
-        # Build DataFrames: one column per bouton ID (no Time column in traces)
-        # Each trace keeps its original time vector (no interpolation)
-        # Use pd.Series to handle different lengths per column
-        trace_dict = {}
-        time_dict = {}
-        for bid, (t_vec, y_avg) in sorted(id_traces.items()):
-            trace_dict[bid] = pd.Series(y_avg)
-            time_dict[bid] = pd.Series(t_vec)
-        trace_df = pd.DataFrame(trace_dict)
-        time_df = pd.DataFrame(time_dict)
-        trace_df.to_excel(trace_writer, sheet_name=_safe_sheet_name(folder_name), index=False)
-        time_df.to_excel(time_writer, sheet_name=_safe_sheet_name(folder_name), index=False)
-        wrote_traces = True
-    if not wrote_traces:
-        pd.DataFrame({"info": ["No traces found"]}).to_excel(trace_writer, sheet_name="Summary", index=False)
-        pd.DataFrame({"info": ["No traces found"]}).to_excel(time_writer, sheet_name="Summary", index=False)
-print(f"[export] Saved average traces to: {traces_out}")
-print(f"[export] Saved time vectors to: {times_out}")
+    # Save companion traces and times files (separate files, no interpolation)
+    # - summary_traces.xlsx: amplitude values only (one column per bouton ID)
+    # - summary_times.xlsx: time vectors (one column per bouton ID, same order)
+    traces_out = os.path.splitext(main_out)[0] + "_traces.xlsx"
+    times_out = os.path.splitext(main_out)[0] + "_times.xlsx"
+    with pd.ExcelWriter(traces_out) as trace_writer, pd.ExcelWriter(times_out) as time_writer:
+        wrote_traces = False
+        for folder_name, id_traces in traces_by_folder.items():
+            if not id_traces:
+                continue
+            # Build DataFrames: one column per bouton ID (no Time column in traces)
+            # Each trace keeps its original time vector (no interpolation)
+            # Use pd.Series to handle different lengths per column
+            trace_dict = {}
+            time_dict = {}
+            for bid, (t_vec, y_avg) in sorted(id_traces.items()):
+                trace_dict[bid] = pd.Series(y_avg)
+                time_dict[bid] = pd.Series(t_vec)
+            trace_df = pd.DataFrame(trace_dict)
+            time_df = pd.DataFrame(time_dict)
+            trace_df.to_excel(trace_writer, sheet_name=_safe_sheet_name(folder_name), index=False)
+            time_df.to_excel(time_writer, sheet_name=_safe_sheet_name(folder_name), index=False)
+            wrote_traces = True
+        if not wrote_traces:
+            pd.DataFrame({"info": ["No traces found"]}).to_excel(trace_writer, sheet_name="Summary", index=False)
+            pd.DataFrame({"info": ["No traces found"]}).to_excel(time_writer, sheet_name="Summary", index=False)
+    print(f"[export] Saved average traces to: {traces_out}")
+    print(f"[export] Saved time vectors to: {times_out}")

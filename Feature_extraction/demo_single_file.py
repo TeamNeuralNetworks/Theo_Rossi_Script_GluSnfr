@@ -72,7 +72,12 @@ if REPO_ROOT not in sys.path:
 from Feature_extraction.extract_metrics import extract_metrics
 
 # Test on the specific problematic 50Hz file
-xlsx_path = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\Theo_4_50Hz\20210722_linescan3_50Hz_10pulses_4mMCa_bouton3_traces_converted.xlsx"
+DATA_ROOT = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL"
+xlsx_path = os.path.join(
+    DATA_ROOT,
+    "Theo_4_50Hz",
+    "20210722_linescan3_50Hz_10pulses_4mMCa_bouton3_traces_converted.xlsx",
+)
 
 
 START = 0.498
@@ -85,7 +90,7 @@ START = 0.498
 # ISI = 0.01  # 100Hz stimulation
 ISI = 0.02  # Current: 50Hz
 
-out_dir = r"C:\Users\Antoine.Valera\Desktop\Testout"
+out_dir = os.path.join(DATA_ROOT, "Testout")
 
 # === ISI-Dependent Parameter Calculation ===
 # The following parameters are automatically adjusted based on ISI to prevent
@@ -423,7 +428,7 @@ fig = res.get('figure')
 if fig is not None:
     # If the recutter returned snippets, ensure overlay is enabled in the figure
     try:
-        fig.savefig(r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\fiber_plot.png", dpi=150)
+        fig.savefig(os.path.join(out_dir, "fiber_plot.png"), dpi=150)
     except Exception:
         pass
     # If recut snippets were returned, create and display the average/overlay
@@ -444,7 +449,7 @@ if fig is not None:
                 fig2 = build_median_recut_figure(t_rel_rec, avg_rec, snippets=snips, ax=ax_target, plot_median_first=True)
                 try:
                     # If fig2 is the same as fig (we plotted into existing axes), save the main fig
-                    outpath = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL\fiber_recuts_overlay.png"
+                    outpath = os.path.join(out_dir, "fiber_recuts_overlay.png")
                     saved_fig = None
                     if fig is not None and getattr(fig, 'axes', None) and fig.axes[0] is ax_target:
                         fig.savefig(outpath, dpi=150)
