@@ -76,7 +76,7 @@ DATA_ROOT = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL"
 xlsx_path = os.path.join(
     DATA_ROOT,
     "Theo_4_50Hz",
-    "20210722_linescan3_50Hz_10pulses_4mMCa_bouton3_traces_converted.xlsx",
+    "20210721_linescan1_50Hz_10pulses_4mMCa_bouton4_traces_converted.xlsx",
 )
 
 
@@ -293,6 +293,8 @@ options_presets = {
             'trials': False,
             'baseline': False,
             'residuals': True,
+            'nnls_residual': True,
+            'nnls_n_minus_1': True,
             'plot_peaks_details': True,
         },
 

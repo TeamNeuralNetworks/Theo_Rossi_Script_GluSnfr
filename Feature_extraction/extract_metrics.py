@@ -1110,6 +1110,8 @@ def extract_metrics(
     baseline_figs = bool(plot_opts.get('baseline', False))
     plot_residuals = bool(plot_opts.get('residuals', False))
     plot_peaks_details = bool(plot_opts.get('plot_peaks_details', False))
+    plot_residual_buildup = bool(plot_opts.get('residual_buildup', False))
+    plot_nnls_residual = bool(plot_opts.get('nnls_residual', False))
     if baseline_figs:
         plot_trials = True  # baseline panel requires per-trial figures
     cfg = {**DEFAULTS, **{k: v for k, v in opts.items() if k != 'plot'}}
@@ -4074,6 +4076,63 @@ def extract_metrics(
         ppr_nnls_avg = _norm(amp_nnls_avg)
         ppr_nnls_corr_avg = _norm(amp_nnls_corr_avg)
 
+    figure_residual_buildup = None
+    if plot_residual_buildup and per_trial:
+        try:
+            comps_trials = [r.get('components') for r in per_trial if r.get('components') is not None]
+            if comps_trials:
+                n_p = len(comps_trials[0]) if comps_trials[0] else 0
+                comp_avg = []
+                for p in range(n_p):
+                    comp_stack = []
+                    for comp_list in comps_trials:
+                        if comp_list and len(comp_list) > p:
+                            comp_stack.append(np.asarray(comp_list[p], float))
+                    if comp_stack:
+                        comp_avg.append(np.nanmean(np.vstack(comp_stack), axis=0))
+                if len(comp_avg) == n_p:
+                    cum_before_last = np.sum(comp_avg[:-1], axis=0) if n_p > 1 else np.zeros_like(y_avg)
+                    resid_before_last = y_avg - cum_before_last
+                    resid_full = y_avg - yhat_avg if yhat_avg.size == y_avg.size else None
+                    zmask = (t >= float(train_start) - cfg['pre_zoom_s']) & (
+                        t <= float(train_start) + float(isi) * int(n_pulses) + cfg['post_zoom_s']
+                    )
+                    figure_residual_buildup, axes_res = plt.subplots(2, 1, figsize=(9, 6), sharex=True)
+                    axes_res[0].plot(t[zmask], y_avg[zmask], color='black', label='avg trace')
+                    axes_res[0].plot(t[zmask], cum_before_last[zmask], color='tab:orange', label='sum first N-1')
+                    if yhat_avg.size == y_avg.size:
+                        axes_res[0].plot(t[zmask], yhat_avg[zmask], color='tab:blue', label='nnls model')
+                    axes_res[0].set_ylabel("ΔF/F0")
+                    axes_res[0].set_title("Average trace vs cumulative fit")
+                    axes_res[0].legend(loc='upper right')
+                    axes_res[1].plot(t[zmask], resid_before_last[zmask], color='tab:red', label='residual after N-1')
+                    if resid_full is not None:
+                        axes_res[1].plot(t[zmask], resid_full[zmask], color='tab:purple', label='full residual')
+                    axes_res[1].axhline(0.0, color='0.6', linestyle=':')
+                    axes_res[1].set_xlabel("Time (s)")
+                    axes_res[1].set_ylabel("Residual")
+                    axes_res[1].set_title("Residual buildup check")
+                    axes_res[1].legend(loc='upper right')
+                    plt.tight_layout()
+        except Exception:
+            figure_residual_buildup = None
+
+    figure_nnls_residual = None
+    if plot_nnls_residual:
+        try:
+            if t.size and y_avg.size and yhat_avg.size == y_avg.size:
+                resid = y_avg - yhat_avg
+                figure_nnls_residual, ax_resid = plt.subplots(figsize=(8, 3))
+                ax_resid.plot(t, resid, color='tab:purple', linewidth=1.2)
+                ax_resid.axhline(0.0, color='0.6', linestyle=':')
+                ax_resid.set_title("NNLS residual (avg - model)")
+                ax_resid.set_xlabel("Time (s)")
+                ax_resid.set_ylabel("Residual ΔF/F0")
+                ax_resid.legend(loc='upper right')
+                plt.tight_layout()
+        except Exception:
+            figure_nnls_residual = None
+
     return {
         'tau_r_s': float(tau_r),
         'tau_d_s': np.asarray(tau_d_vec, float),
@@ -4104,6 +4163,8 @@ def extract_metrics(
         'pval_amp1': np.asarray(pval_list, float),
         'figure': figure,
         'figure_fit_diagnostic': fit_diag_figure,
+        'figure_residual_buildup': figure_residual_buildup,
+        'figure_nnls_residual': figure_nnls_residual,
         'figure_event_model': None,
         'figures_trials': figures_trials,
     }

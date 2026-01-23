@@ -606,7 +606,7 @@ All defaults live in a single dictionary inside `extract_metrics.py` named `DEFA
 - Kinetics grids (ms): `kin_taur_grid_ms`, `kin_taud0_grid_ms`, `kin_slope_grid_ms`
 - Robust NNLS + shifts: `huber_delta`, `irls_iters`, `delta_max_s`, `delta_step_s`, `shift_min_s`
 - Bleach correction: `bleach_huber_delta`, `bleach_tau_range_factor`, `bleach_n_tau`
-- Plot control: `plot = {'enabled': bool, 'traces': [...], 'show_decay': bool, 'trials': bool, 'baseline': bool}`
+- Plot control: `plot = {'enabled': bool, 'traces': [...], 'show_decay': bool, 'trials': bool, 'baseline': bool, 'residual_buildup': bool, 'nnls_residual': bool, 'nnls_n_minus_1': bool}`
 
 Notes:
 - Provide `train_start`, `isi`, and `n_pulses` appropriate to each dataset.
