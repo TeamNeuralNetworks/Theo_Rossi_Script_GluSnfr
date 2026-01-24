@@ -28,15 +28,19 @@ import numpy as np
 
 # Global fit limits that can be tweaked by calling code. These bounds
 # are applied across models for common parameters like t_peak and tau
-# values.  "tau_primary" refers to faster/primary components (e.g. rise
-# times or fast decays) while "tau_secondary" covers slower components.
-# CRITICAL: tau_primary and tau_secondary have NON-OVERLAPPING ranges
-# with boundary at 10ms to ensure proper separation of fast/slow components.
+# values.  Three tau categories:
+#   - tau_primary: fast components (rise, fast decay): 0.5-10ms
+#   - tau_secondary: slow components (slow decay): 10-300ms
+#   - tau_tertiary: super-slow (accumulation, for tri-exp): 25-150ms
+# NOTE: tau_secondary remains wide (10-300ms) for bi-exponential iglusnfr.
+# For tri-exponential, tau_secondary is narrower (10-25ms) and tau_tertiary
+# handles the super-slow component.
 FIT_LIMITS: Dict[str, Tuple[float, float]] = {
     't_peak': (0.0, 10.0),
-    'tau': (0.001, 0.300),        # Generic tau up to 300ms
+    'tau': (0.001, 0.300),           # Generic tau up to 300ms
     'tau_primary': (0.0005, 0.010),  # Fast: 0.5-10ms (rise, fast decay)
-    'tau_secondary': (0.010, 0.300),  # Slow: 10-300ms (NO OVERLAP with primary)
+    'tau_secondary': (0.010, 0.300), # Slow: 10-300ms (for bi-exponential)
+    'tau_tertiary': (0.025, 0.150),  # Super-slow: 25-150ms (for tri-exponential)
 }
 
 
@@ -61,9 +65,15 @@ def _apply_global_bounds(spec: Dict) -> Dict:
         if p == 't_peak':
             lb[i], ub[i] = FIT_LIMITS['t_peak']
         elif 'tau' in p:
-            if any(s in p for s in ('fast', 'rise', 'bind')) or p.endswith('1'):
+            # Tri-exponential: fast < slow < superslow
+            if 'superslow' in p or 'super_slow' in p:
+                bounds = FIT_LIMITS.get('tau_tertiary')
+            elif any(s in p for s in ('fast', 'rise', 'bind')) or p.endswith('1'):
                 bounds = FIT_LIMITS.get('tau_primary')
-            elif any(s in p for s in ('slow', 'conform', 'dissoc')) or p.endswith('2') or 'decay' in p:
+            elif any(s in p for s in ('slow', 'conform', 'dissoc')) or p.endswith('2'):
+                bounds = FIT_LIMITS.get('tau_secondary')
+            elif 'decay' in p:
+                # For generic 'tau_decay' without fast/slow qualifier, use secondary
                 bounds = FIT_LIMITS.get('tau_secondary')
             else:
                 bounds = FIT_LIMITS.get('tau')
@@ -519,6 +529,62 @@ def model_iglusnfr(t, amp, tau_rise, tau_decay_fast, tau_decay_slow, frac_fast, 
     
     return y
 
+
+def model_iglusnfr_tri(t, amp, tau_rise, tau_decay_fast, tau_decay_slow, tau_decay_superslow,
+                       frac_fast, frac_slow, t_peak):
+    """Tri-exponential iGluSnFR model with fast, slow, and super-slow decay components.
+    
+    Biophysical basis:
+    - Single effective rise time constant (binding + initial conformational change)
+    - Tri-exponential decay captures full heterogeneous kinetics:
+        * Fast (1-10ms): intrinsic sensor unbinding from high-affinity state
+        * Slow (10-25ms): conformational relaxation / intermediate states
+        * Super-slow (25-150ms): glutamate accumulation / spillover effects
+          (typically fixed from post-train decay fitting)
+    
+    The super-slow component builds up during train stimulation and dominates
+    the post-train decay, while fast/slow components dominate early events.
+    
+    Parameters in seconds; t in milliseconds.
+    frac_fast + frac_slow <= 1.0; frac_superslow = 1 - frac_fast - frac_slow
+    """
+    t = np.asarray(t)
+    y = np.zeros_like(t, dtype=float)
+    m = t >= t_peak
+    
+    if np.any(m):
+        ts = (t[m] - t_peak) / 1000.0
+        
+        # Ensure valid time constants
+        tr = max(tau_rise, 1e-6)
+        tdf = max(tau_decay_fast, 1e-6)
+        tds = max(tau_decay_slow, 1e-6)
+        tdss = max(tau_decay_superslow, 1e-6)
+        
+        # Ensure decay ordering: fast < slow < superslow
+        if tdf >= tds:
+            tdf = tds * 0.5
+        if tds >= tdss:
+            tds = tdss * 0.5
+        
+        # Clamp fractions to valid range
+        f_fast = np.clip(frac_fast, 0.0, 1.0)
+        f_slow = np.clip(frac_slow, 0.0, 1.0 - f_fast)
+        f_superslow = 1.0 - f_fast - f_slow
+        
+        # Single exponential rise
+        rise = 1.0 - np.exp(-ts / tr)
+        
+        # Tri-exponential decay
+        decay = (f_fast * np.exp(-ts / tdf) + 
+                 f_slow * np.exp(-ts / tds) + 
+                 f_superslow * np.exp(-ts / tdss))
+        
+        y[m] = amp * rise * decay
+    
+    return y
+
+
 def get_event_model(name: str) -> Dict:
     """Return a model spec dict for the given name.
 
@@ -597,6 +663,43 @@ def get_event_model(name: str) -> Dict:
                 'frac_fast': 'free',                        # can vary either direction
                 'amp': 'free',                              # can increase or decrease
                 't_peak': 'free',                           # timing parameter
+            },
+        })
+    if nm in ('iglusnfr_tri', 'iglusnfr_triexp', 'triexp'):
+        return _apply_global_bounds({
+            'name': 'iglusnfr_tri',
+            'func': model_iglusnfr_tri,
+            'params': ['amp', 'tau_rise', 'tau_decay_fast', 'tau_decay_slow', 'tau_decay_superslow',
+                       'frac_fast', 'frac_slow', 't_peak'],
+            # Tri-exponential with NON-OVERLAPPING ranges:
+            # tau_rise: 0.5-5 ms
+            # tau_decay_fast: 1-10 ms (intrinsic unbinding)
+            # tau_decay_slow: 10-25 ms (conformational/intermediate)
+            # tau_decay_superslow: 25-150 ms (accumulation, typically fixed from post-train)
+            'bounds': (
+                [0,      0.0005, 0.001,  0.010,  0.025,  0.1,   0.1,   0],      # lower bounds
+                [np.inf, 0.005,  0.010,  0.025,  0.150,  0.7,   0.6,   10]      # upper bounds
+            ),
+            'p0_func': lambda y, t: [
+                float(np.nanmax(y)),                    # amp
+                0.002,                                   # tau_rise: 2 ms
+                0.005,                                   # tau_decay_fast: 5 ms
+                0.015,                                   # tau_decay_slow: 15 ms
+                0.040,                                   # tau_decay_superslow: 40 ms
+                0.5,                                     # frac_fast: 50%
+                0.3,                                     # frac_slow: 30% (superslow = 20%)
+                float(np.clip(t[np.nanargmax(y)], 0, 10))
+            ],
+            'complexity': 8,
+            'progression_rules': {
+                'tau_rise': 'monotonic_increasing',
+                'tau_decay_fast': 'monotonic_increasing',
+                'tau_decay_slow': 'monotonic_increasing',
+                'tau_decay_superslow': 'free',              # Fixed from post-train decay
+                'frac_fast': 'monotonic_decreasing',        # Less fast component as train progresses
+                'frac_slow': 'free',
+                'amp': 'free',
+                't_peak': 'free',
             },
         })
     if nm in ('single', 'single_exp', 'single-exponential'):

@@ -90,6 +90,11 @@ START = 0.498
 # ISI = 0.01  # 100Hz stimulation
 ISI = 0.02  # Current: 50Hz
 
+# === TRI-EXPONENTIAL FLAG ===
+# Set to True for tri-exponential model (3 decay components: fast, slow, superslow)
+# Set to False for bi-exponential model (2 decay components: fast, slow) - more stable
+USE_TRI_EXPONENTIAL = True  # Testing tri-exponential
+
 out_dir = os.path.join(DATA_ROOT, "Testout")
 
 # === ISI-Dependent Parameter Calculation ===
@@ -215,19 +220,22 @@ options_presets = {
         'anchor_final_tau': False,  # Don't over-constrain - let the model fit naturally
         'anchor_first_tau': False,
 
-        # === Event Model ===
-        'event_model': 'iglusnfr',  # Specifically optimized for iGluSnFR S72A
+        # === Event Model (controlled by USE_TRI_EXPONENTIAL flag) ===
+        'event_model': 'iglusnfr_tri' if USE_TRI_EXPONENTIAL else 'iglusnfr',
+        # iglusnfr: Bi-exponential (fast 1-10ms, slow from post-train decay)
+        # iglusnfr_tri: Tri-exponential (fast 1-10ms, slow 10-25ms, superslow from post-train)
 
-        # === Parameter Bounds ===
-        # NON-OVERLAPPING ranges with boundary at 10ms
-        # Fast: 1-10ms, Slow: 10ms+ (auto-estimated from post-train decay)
+        # === Parameter Bounds (auto-configured based on model) ===
         'parameter_bounds': {
-            'tau_decay_fast': (0.001, 0.020),  # 1-10ms fast component
-            # tau_decay_slow: intentionally omitted - auto-estimated from post-train (min 10ms)
+            'tau_decay_fast': (0.001, 0.010),      # 1-10ms fast component
+            'tau_decay_slow': (0.010, 0.025),      # 10-25ms (only used for tri-exp)
+            # tau_decay_slow (bi-exp) or tau_decay_superslow (tri-exp): auto from post-train
+        } if USE_TRI_EXPONENTIAL else {
+            'tau_decay_fast': (0.001, 0.010),      # 1-10ms fast component
+            # tau_decay_slow: auto from post-train decay (no constraint needed)
         },
         
-        # Use all events for averaging (early_events_only caused issues)
-        # tau_slow will still be fixed from post-train decay when early_events_only > 0
+        # Use all events for averaging
         'early_events_only': 0,
 
         # === Recut/Averaging ===

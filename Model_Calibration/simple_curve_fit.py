@@ -324,12 +324,86 @@ def fit_average_event(
         except Exception:
             pass
         
+        # Robust seeding for iGluSnFR TRI-EXPONENTIAL: grid search over key parameters
+        try:
+            if spec.get('name', '').lower() == 'iglusnfr_tri':
+                # For iGluSnFR_tri: amp, tau_rise, tau_decay_fast, tau_decay_slow, tau_decay_superslow, frac_fast, frac_slow, t_peak
+                amp0, tr0, tdf0, tds0, tdss0, ff0, fs0, tp0 = [float(x) for x in p0]
+                lb, ub = spec['bounds']
+                
+                def _clip(v, lo, hi):
+                    return float(min(max(v, lo), hi))
+                
+                # Grids for key parameters with NON-OVERLAPPING ranges
+                # tau_rise: 0.5-4ms, tau_fast: 1-10ms, tau_slow: 10-25ms, tau_superslow: 25-100ms
+                tau_rise_grid = np.array([_clip(x, lb[1], ub[1]) for x in (0.001, 0.002, 0.003, 0.004)])
+                tau_fast_grid = np.array([_clip(x, lb[2], ub[2]) for x in (0.002, 0.003, 0.005, 0.007, 0.010)])
+                tau_slow_grid = np.array([_clip(x, lb[3], ub[3]) for x in (0.012, 0.015, 0.020, 0.025)])
+                # tau_superslow often fixed from post-train decay, use narrower grid
+                tau_superslow_grid = np.array([_clip(x, lb[4], ub[4]) for x in (0.030, 0.045, 0.060)])
+                frac_fast_grid = np.array([_clip(x, lb[5], ub[5]) for x in (0.5, 0.65, 0.8)])
+                frac_slow_grid = np.array([_clip(x, lb[6], ub[6]) for x in (0.15, 0.25)])  # Intermediate fraction
+                
+                # Find peak location in data
+                peak_idx = np.argmax(yf)
+                tp_data = float(tf[peak_idx])
+                tp_grid = np.array([_clip(x, lb[7], ub[7]) for x in (tp_data - 1.0, tp_data, tp_data + 1.0)])
+                
+                best = (np.inf, amp0, tr0, tdf0, tds0, tdss0, ff0, fs0, tp0)
+                for tr in tau_rise_grid:
+                    for tdf in tau_fast_grid:
+                        # Enforce tau_rise < tau_fast
+                        if tr >= tdf:
+                            continue
+                        for tds in tau_slow_grid:
+                            # Enforce tau_fast < tau_slow
+                            if tdf >= tds:
+                                continue
+                            for tdss in tau_superslow_grid:
+                                # Enforce tau_slow < tau_superslow
+                                if tds >= tdss:
+                                    continue
+                                for ff in frac_fast_grid:
+                                    for fs in frac_slow_grid:
+                                        # Ensure frac_superslow = 1 - ff - fs > 0
+                                        if ff + fs >= 0.95:
+                                            continue
+                                        for tp in tp_grid:
+                                            pars = [1.0, tr, tdf, tds, tdss, ff, fs, tp]
+                                            yshape = spec['func'](tf, *pars)
+                                            denom = float(np.sum(yshape ** 2))
+                                            if denom <= 0 or not np.isfinite(denom):
+                                                continue
+                                            amp = float(np.sum(yf * yshape)) / denom
+                                            if amp <= 0:
+                                                continue
+                                            r = yf - amp * yshape
+                                            # Weight residuals: emphasize post-peak fit
+                                            weights = np.ones_like(r)
+                                            weights[tf > tp] = 2.0
+                                            sse = float(np.sum(weights * r ** 2))
+                                            if sse < best[0]:
+                                                best = (sse, amp, tr, tdf, tds, tdss, ff, fs, tp)
+                
+                if best[0] < np.inf:
+                    _, amp_b, tr_b, tdf_b, tds_b, tdss_b, ff_b, fs_b, tp_b = best
+                    p0 = [float(amp_b), float(tr_b), float(tdf_b), float(tds_b), float(tdss_b), float(ff_b), float(fs_b), float(tp_b)]
+                    
+                    try:
+                        from smoothing import progress_print
+                        progress_print(f"[fit_average_event] iGluSnFR TRI grid search: tau_r={tr_b*1000:.1f}ms, tau_fast={tdf_b*1000:.1f}ms, tau_slow={tds_b*1000:.1f}ms, tau_superslow={tdss_b*1000:.1f}ms, frac_fast={ff_b:.2f}, frac_slow={fs_b:.2f}")
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        
         # Build sigma weights for curve_fit to emphasize the fast decay portion
         # The initial decay (0-5ms after peak) is where the fast component dominates
         # Lower sigma = higher weight in the least-squares objective
         sigma = None
         try:
-            if spec.get('name', '').lower() == 'iglusnfr':
+            model_name = spec.get('name', '').lower()
+            if model_name in ('iglusnfr', 'iglusnfr_tri'):
                 peak_idx = int(np.argmax(yf))
                 t_peak = float(tf[peak_idx])
                 sigma = np.ones_like(yf)
@@ -341,21 +415,34 @@ def fit_average_event(
                 sigma[mid_decay_mask] = 0.6  # ~1.7x higher weight
                 # Standard weight for late decay and rise
                 
-                # If fixed_tau_slow provided, lock tau_decay_slow bounds
+                # If fixed_tau_slow provided, lock tau_decay_slow bounds (or tau_decay_superslow for tri-exp)
                 if fixed_tau_slow is not None:
                     lb_list = list(spec['bounds'][0])
                     ub_list = list(spec['bounds'][1])
-                    # tau_decay_slow is index 3 for iGluSnFR
                     tds_fixed = float(fixed_tau_slow)
-                    lb_list[3] = tds_fixed * 0.999
-                    ub_list[3] = tds_fixed * 1.001
-                    p0[3] = tds_fixed
+                    
+                    if model_name == 'iglusnfr_tri':
+                        # For tri-exp: fixed_tau_slow -> tau_decay_superslow (index 4)
+                        lb_list[4] = tds_fixed * 0.999
+                        ub_list[4] = tds_fixed * 1.001
+                        p0[4] = tds_fixed
+                        try:
+                            from smoothing import progress_print
+                            progress_print(f"[fit_average_event] tau_superslow FIXED to {tds_fixed*1000:.1f}ms (from post-train decay)")
+                        except Exception:
+                            pass
+                    else:
+                        # For bi-exp: fixed_tau_slow -> tau_decay_slow (index 3)
+                        lb_list[3] = tds_fixed * 0.999
+                        ub_list[3] = tds_fixed * 1.001
+                        p0[3] = tds_fixed
+                        try:
+                            from smoothing import progress_print
+                            progress_print(f"[fit_average_event] tau_slow FIXED to {tds_fixed*1000:.1f}ms (from post-train decay)")
+                        except Exception:
+                            pass
+                    
                     spec['bounds'] = (lb_list, ub_list)
-                    try:
-                        from smoothing import progress_print
-                        progress_print(f"[fit_average_event] tau_slow FIXED to {tds_fixed*1000:.1f}ms (from post-train decay)")
-                    except Exception:
-                        pass
         except Exception:
             sigma = None
         
