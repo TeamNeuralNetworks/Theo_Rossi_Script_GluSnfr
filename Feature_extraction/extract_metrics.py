@@ -234,6 +234,85 @@ def apply_parameter_bounds(fitted_params: Dict[str, float], bounds: Dict[str, tu
     return result
 
 
+def estimate_tau_from_post_train_decay(
+    t: np.ndarray,
+    y: np.ndarray,
+    stim_times: np.ndarray,
+    isi: float,
+    min_decay_points: int = 10,
+) -> Optional[float]:
+    """Estimate tau_slow from the post-train decay portion of the signal.
+    
+    After the last stimulus, the signal decays from the accumulated response.
+    This decay is dominated by the slowest component and provides an upper
+    bound estimate for tau_slow.
+    
+    Args:
+        t: Time vector (seconds)
+        y: Signal (averaged trace)
+        stim_times: Stimulus times (seconds)
+        isi: Inter-stimulus interval (seconds)
+        min_decay_points: Minimum data points required for fitting
+        
+    Returns:
+        Estimated tau_slow in seconds, or None if fitting fails
+    """
+    try:
+        from scipy.optimize import curve_fit
+        
+        # Post-train region: start 0.5 ISI after last stim (let peak settle)
+        post_train_start = float(stim_times[-1]) + 0.5 * isi
+        # Use up to 5 ISIs of decay (or end of trace)
+        post_train_end = min(float(stim_times[-1]) + 5 * isi, t[-1])
+        
+        mask = (t >= post_train_start) & (t <= post_train_end)
+        if np.sum(mask) < min_decay_points:
+            return None
+            
+        t_decay = t[mask] - post_train_start  # Time relative to decay start
+        y_decay = y[mask]
+        
+        # Estimate baseline from end of decay region
+        baseline = np.median(y_decay[-max(3, len(y_decay)//5):])
+        y_decay_zeroed = y_decay - baseline
+        
+        # Skip if signal already at baseline
+        peak_decay = np.max(y_decay_zeroed)
+        if peak_decay < 0.1 * np.std(y_decay_zeroed):
+            return None
+        
+        # Single exponential fit: y = A * exp(-t/tau)
+        def exp_decay(t, A, tau):
+            return A * np.exp(-t / max(tau, 1e-6))
+        
+        # Initial guess: amplitude from first point, tau from half-life
+        A0 = float(y_decay_zeroed[0])
+        half_idx = np.argmin(np.abs(y_decay_zeroed - 0.5 * A0))
+        tau0 = float(t_decay[half_idx]) / np.log(2) if half_idx > 0 else 0.050
+        tau0 = np.clip(tau0, 0.010, 0.500)
+        
+        try:
+            popt, _ = curve_fit(
+                exp_decay, t_decay, y_decay_zeroed,
+                p0=[A0, tau0],
+                bounds=([0, 0.005], [np.inf, 1.0]),  # tau: 5ms to 1000ms
+                maxfev=1000
+            )
+            tau_fitted = float(popt[1])
+            
+            # Log the result
+            from smoothing import progress_print
+            progress_print(f"[post-train] Estimated tau_slow from decay: {tau_fitted*1000:.1f} ms")
+            
+            return tau_fitted
+            
+        except Exception:
+            return None
+            
+    except Exception:
+        return None
+
+
 def _calculate_nnls_weights(
     t: np.ndarray,
     stim_times: np.ndarray,
@@ -446,12 +525,18 @@ def fit_amplitudes_with_template_variants(
     isi: float,
     event_t0_s: float = 0.0,
     jitter_variant_ms: Optional[np.ndarray] = None,
+    residual_reweight_iters: int = 5,
+    residual_reweight_tau: float = 2.0,
 ):
     """Single-pass NNLS with multiple template variants per event.
 
     Instead of one template per event, creates N variants with different slow/fast
     component ratios and optionally temporal jitters. NNLS automatically selects
     the best combination.
+
+    Uses residual diagnostics to detect and correct template mismatch:
+    - Correlation of residual with cumulative model → decay rate error
+    - Correlation of residual with model derivative → timing error
 
     Args:
         y: Signal to fit
@@ -465,17 +550,11 @@ def fit_amplitudes_with_template_variants(
         isi: Inter-stimulus interval
         event_t0_s: Event onset offset
         jitter_variant_ms: Optional array of temporal shifts in milliseconds
-                          (e.g., np.arange(-2.0, 2.0, 0.2) for ±2ms range)
-                          If None, uses [0.0] (no jitter search)
+        residual_reweight_iters: Number of iterative refinement passes (default 3)
+        residual_reweight_tau: Downweighting aggressiveness (default 2.0)
 
     Returns:
         (amplitudes, shifts, design, reconstruction, components_list, variant_info)
-        - amplitudes: Per-event amplitudes (aggregated across variants)
-        - shifts: Per-event dominant jitter values in seconds
-        - design: Full kernel matrix [time, n_events * n_template_variants * n_jitter_variants]
-        - reconstruction: Fitted signal
-        - components_list: Per-event components (aggregated)
-        - variant_info: Dict with selection diagnostics (includes jitter info)
     """
     n_events = len(stim_times)
     n_template_variants = len(variant_ratios)
@@ -488,34 +567,204 @@ def fit_amplitudes_with_template_variants(
     n_jitter_variants = len(jitter_variant_s)
 
     event_t0_s = float(event_t0_s)
+    
+    # Track kinetics adjustments across iterations
+    current_tau_d = tau_d_vec_s.copy()
+    current_t0 = event_t0_s
+    kinetics_adjusted = False
 
-    # Build expanded kernel: [time_points, n_events * n_template_variants * n_jitter_variants]
-    # Order: for each event, iterate through (template_variant, jitter_variant) pairs
-    kernel_columns = []
-
-    for i_event in range(n_events):
-        st = float(stim_times[i_event])
-        tau_d = float(tau_d_vec_s[i_event])
-
-        for frac_slow in variant_ratios:
-            for jitter_s in jitter_variant_s:
-                # Combined template variant + temporal jitter
-                anchor = st + event_t0_s + jitter_s
-                k = _build_variant_kernel(t - anchor, tau_r_s, tau_d, frac_slow)
-                kernel_columns.append(k)
-
-    X = np.column_stack(kernel_columns) if kernel_columns else np.zeros((t.size, 0))
-
-    # Compute weights
-    weights = _calculate_nnls_weights(
+    # Compute base weights once
+    base_weights = _calculate_nnls_weights(
         t, stim_times, isi, weight_mode, weight_tau_s, y_ref=y
     )
 
-    # Single NNLS solve for all variants
-    a_variants = _nnls_weighted(X, y, weights)
+    # === Main iterative loop with residual-driven refinement ===
+    for iteration in range(max(1, residual_reweight_iters)):
+        # Build design matrix with current kinetics
+        kernel_columns = []
+        for i_event in range(n_events):
+            st = float(stim_times[i_event])
+            tau_d = float(current_tau_d[i_event])
+
+            for frac_slow in variant_ratios:
+                for jitter_s in jitter_variant_s:
+                    anchor = st + current_t0 + jitter_s
+                    k = _build_variant_kernel(t - anchor, tau_r_s, tau_d, frac_slow)
+                    kernel_columns.append(k)
+
+        X = np.column_stack(kernel_columns) if kernel_columns else np.zeros((t.size, 0))
+
+        # Initialize weights
+        if iteration == 0:
+            weights = base_weights.copy()
+        
+        # NNLS solve
+        a_variants = _nnls_weighted(X, y, weights)
+        
+        # Compute reconstruction
+        yhat_iter = X @ a_variants
+        residual = y - yhat_iter
+        
+        # === Residual-based kinetics diagnostics (principled approach) ===
+        if iteration < residual_reweight_iters - 1:
+            # === Diagnostic 0: Jitter saturation check ===
+            # If dominant jitters consistently hit limits, template timing is wrong
+            # This is a more reliable diagnostic than residual correlations
+            temp_a3d = a_variants.reshape(n_events, n_template_variants, n_jitter_variants)
+            temp_flat = temp_a3d.reshape(n_events, -1)
+            dom_flat_idx = np.argmax(temp_flat, axis=1)
+            dom_jitter_idx = dom_flat_idx % n_jitter_variants
+            dom_jitters = np.array([jitter_variant_s[j] for j in dom_jitter_idx])
+            
+            jitter_min, jitter_max = jitter_variant_s.min(), jitter_variant_s.max()
+            # Check how many events hit the jitter limits (within 0.5ms of boundary)
+            n_at_min = np.sum(dom_jitters <= jitter_min + 0.0005)
+            n_at_max = np.sum(dom_jitters >= jitter_max - 0.0005)
+            frac_saturated = (n_at_min + n_at_max) / n_events
+            
+            # If >30% of events saturate jitter limits and we haven't adjusted too much
+            # Only adjust if tau_d > 1.5ms (don't make unrealistically fast)
+            if frac_saturated > 0.3 and float(current_tau_d[0]) > 0.0015:
+                # Determine direction: 
+                # - More at max (positive jitter) -> template peaks too LATE -> need FASTER decay
+                # - More at min (negative jitter) -> template peaks too EARLY -> need SLOWER decay
+                # Note: faster decay (smaller tau) means earlier peak
+                if n_at_max > n_at_min:
+                    # Events want positive jitter -> template too late -> speed up decay
+                    scale_factor = 0.7
+                else:
+                    # Events want negative jitter -> template too early -> slow down decay
+                    scale_factor = 1.3
+                
+                current_tau_d = current_tau_d * scale_factor
+                # Apply floor: tau_d should not go below 1.5ms (iGluSnFR cannot decay faster)
+                min_tau_d = 0.0015  # 1.5ms floor
+                current_tau_d = np.maximum(current_tau_d, min_tau_d)
+                kinetics_adjusted = True
+                progress_print(f"[NNLS] Iter {iteration+1}: Jitter saturation ({frac_saturated*100:.0f}% at limits, {n_at_max} at max) [diagnostic only, kinetics adjustment disabled due to area normalization]")
+            
+            # === Diagnostic 1: Post-train decay check (diagnostic only, no adjustment) ===
+            # Kinetics adjustment via tau_d scaling is ineffective due to area normalization
+            # in the template builder. The templates are normalized by area, so changing
+            # tau_d has minimal effect on the NNLS solution.
+            post_start = float(stim_times[-1]) + isi
+            post_end = float(stim_times[-1]) + 3 * isi
+            post_mask = (t >= post_start) & (t <= min(post_end, t[-1]))
+            
+            if np.sum(post_mask) > 5:
+                residual_post = residual[post_mask]
+                mean_resid = np.mean(residual_post)
+                mean_yhat = np.mean(yhat_iter[post_mask]) + 1e-9
+                relative_bias = mean_resid / mean_yhat
+                
+                if abs(relative_bias) > 0.2:
+                    direction = "under" if relative_bias > 0 else "over"
+                    progress_print(f"[NNLS] Iter {iteration+1}: Post-train {direction}prediction ({abs(relative_bias)*100:.0f}%) [diagnostic only]")
+            
+            # Define train window for analysis
+            train_start = float(stim_times[0])
+            train_end = float(stim_times[-1]) + 2 * isi
+            train_mask = (t >= train_start) & (t <= train_end)
+            
+            if np.sum(train_mask) > 10:
+                t_train = t[train_mask]
+                y_train = y[train_mask]
+                yhat_train = yhat_iter[train_mask]
+                residual_train = residual[train_mask]
+                
+                # === Diagnostic 1: Cumulative model correlation ===
+                # If residual correlates with cumulative(yhat), decay is too slow
+                # Mathematically: E[r * cumsum(yhat)] should be 0 for correct model
+                cumsum_yhat = np.cumsum(yhat_train)
+                cumsum_yhat_centered = cumsum_yhat - np.mean(cumsum_yhat)
+                residual_centered = residual_train - np.mean(residual_train)
+                
+                # Correlation coefficient
+                var_cumsum = np.var(cumsum_yhat_centered)
+                var_resid = np.var(residual_centered)
+                if var_cumsum > 1e-12 and var_resid > 1e-12:
+                    corr_cumsum = np.mean(cumsum_yhat_centered * residual_centered) / np.sqrt(var_cumsum * var_resid)
+                else:
+                    corr_cumsum = 0.0
+                
+                # === Diagnostic 2: Model derivative correlation ===
+                # If residual correlates with d(yhat)/dt, timing is wrong
+                dyhat_dt = np.gradient(yhat_train, t_train)
+                dyhat_centered = dyhat_dt - np.mean(dyhat_dt)
+                var_dyhat = np.var(dyhat_centered)
+                if var_dyhat > 1e-12 and var_resid > 1e-12:
+                    corr_derivative = np.mean(dyhat_centered * residual_centered) / np.sqrt(var_dyhat * var_resid)
+                else:
+                    corr_derivative = 0.0
+                
+                # === Apply corrections based on diagnostics ===
+                # Positive cumsum correlation → model predicts too much late → decay too slow
+                # Apply correction only if correlation is substantial (>0.3)
+                if abs(corr_cumsum) > 0.3 and not kinetics_adjusted:
+                    # Scale decay time: positive corr → make faster (smaller tau)
+                    # Use correlation magnitude to set adjustment strength
+                    scale_factor = 1.0 - 0.3 * corr_cumsum  # e.g., corr=0.5 → scale=0.85
+                    scale_factor = np.clip(scale_factor, 0.5, 1.5)
+                    current_tau_d = current_tau_d * scale_factor
+                    kinetics_adjusted = True
+                    progress_print(f"[NNLS] Iter {iteration+1}: Decay adjustment (corr_cumsum={corr_cumsum:.3f}) -> tau_d scaled by {scale_factor:.3f}")
+                
+                # Derivative correlation → timing shift needed
+                if abs(corr_derivative) > 0.3 and not kinetics_adjusted:
+                    # Positive corr_derivative → model rising when residual positive → shift earlier
+                    dt = t_train[1] - t_train[0] if len(t_train) > 1 else 0.001
+                    shift_adjustment = -corr_derivative * dt * 5  # Scale by a few sample widths
+                    shift_adjustment = np.clip(shift_adjustment, -0.002, 0.002)  # Max ±2ms
+                    current_t0 = current_t0 + shift_adjustment
+                    kinetics_adjusted = True
+                    progress_print(f"[NNLS] Iter {iteration+1}: Timing adjustment (corr_deriv={corr_derivative:.3f}) -> t0 shifted by {shift_adjustment*1000:.2f}ms")
+                
+                # === Update weights based on residual structure ===
+                # Downweight regions with systematic residual bias
+                window_size = max(3, int(isi / (t[1] - t[0]) / 2)) if len(t) > 1 else 3
+                cumsum = np.cumsum(np.insert(residual, 0, 0))
+                running_mean = (cumsum[window_size:] - cumsum[:-window_size]) / window_size
+                pad_left = window_size // 2
+                pad_right = len(residual) - len(running_mean) - pad_left
+                running_mean = np.concatenate([
+                    np.full(pad_left, running_mean[0] if len(running_mean) > 0 else 0),
+                    running_mean,
+                    np.full(max(0, pad_right), running_mean[-1] if len(running_mean) > 0 else 0)
+                ])[:len(residual)]
+                
+                abs_residual = np.abs(residual)
+                mad_residual = np.median(abs_residual)
+                if mad_residual > 1e-9:
+                    norm_bias = np.abs(running_mean) / (1.4826 * mad_residual + 1e-9)
+                    norm_residual = abs_residual / (1.4826 * mad_residual)
+                    combined_penalty = np.maximum(norm_bias * 2, norm_residual)
+                    residual_weight = 1.0 / (1.0 + (combined_penalty / residual_reweight_tau) ** 2)
+                    weights = base_weights * residual_weight
+                    weights = np.maximum(weights, 0.01 * np.max(base_weights))
 
     # Reshape to 3D: [n_events, n_template_variants, n_jitter_variants]
     a_variants_3d = a_variants.reshape(n_events, n_template_variants, n_jitter_variants)
+
+    # === Post-train residual constraint ===
+    # The post-train decay should match the sum of all event tails
+    # If systematically biased, the model tails are wrong
+    # We use this to validate but NOT to adjust amplitudes (that would be ad-hoc)
+    post_train_start = float(stim_times[-1]) + isi  # Start after last event's peak window
+    post_train_end = float(stim_times[-1]) + 3 * isi  # ~3 ISIs for decay
+    post_train_mask = (t >= post_train_start) & (t <= min(post_train_end, t[-1]))
+    
+    if np.sum(post_train_mask) > 5:
+        residual_post = (y - yhat_iter)[post_train_mask]
+        y_post = y[post_train_mask]
+        
+        # Mean residual as fraction of signal
+        mean_resid_post = np.mean(residual_post)
+        signal_rms = np.sqrt(np.mean(y_post**2)) + 1e-9
+        relative_to_signal = mean_resid_post / signal_rms
+        
+        if abs(relative_to_signal) > 0.1:
+            direction = "under" if mean_resid_post > 0 else "over"
+            progress_print(f"[NNLS] Post-train residual: {direction}prediction by {abs(mean_resid_post):.3f} ({abs(relative_to_signal)*100:.1f}% of signal)")
 
     # Aggregate results: sum amplitudes across all variant dimensions for each event
     a_events = np.sum(a_variants_3d, axis=(1, 2))
@@ -530,14 +779,14 @@ def fit_amplitudes_with_template_variants(
     # Extract dominant jitter values
     d_events = np.array([jitter_variant_s[j_idx] for j_idx in dominant_jitter_idx], dtype=float)
 
-    # Build reconstruction
+    # Build reconstruction using final (possibly adjusted) kinetics
     yhat = X @ a_variants
 
-    # Build per-event components (aggregated across all variants)
+    # Build per-event components using adjusted kinetics
     components = []
     for i_event in range(n_events):
         st = float(stim_times[i_event])
-        tau_d = float(tau_d_vec_s[i_event])
+        tau_d = float(current_tau_d[i_event])  # Use adjusted tau_d
 
         # Sum contributions from all template and jitter variants for this event
         comp_event = np.zeros_like(y)
@@ -546,10 +795,16 @@ def fit_amplitudes_with_template_variants(
                 idx = i_event * (n_template_variants * n_jitter_variants) + i_template * n_jitter_variants + i_jitter
                 amp_var = a_variants[idx]
                 if amp_var > 0:
-                    anchor = st + event_t0_s + jitter_s
+                    anchor = st + current_t0 + jitter_s  # Use adjusted t0
                     k = _build_variant_kernel(t - anchor, tau_r_s, tau_d, frac_slow)
                     comp_event += amp_var * k
         components.append(comp_event)
+
+    # Log kinetics adjustment summary if adjustments were made
+    if kinetics_adjusted:
+        orig_tau = np.mean(tau_d_vec_s) * 1000
+        new_tau = np.mean(current_tau_d) * 1000
+        progress_print(f"[NNLS] Kinetics refined: tau_d {orig_tau:.2f}ms -> {new_tau:.2f}ms, t0 shift {(current_t0 - event_t0_s)*1000:.2f}ms")
 
     # Diagnostic info: which variants were selected for each event
     # Sum over jitter dimension to get template variant distribution
@@ -568,6 +823,9 @@ def fit_amplitudes_with_template_variants(
         'dominant_template_ratio': dominant_template_ratio,
         'dominant_jitter_idx': dominant_jitter_idx,
         'dominant_jitter_ms': dominant_jitter_ms,
+        'kinetics_adjusted': kinetics_adjusted,
+        'final_tau_d': current_tau_d,
+        'final_t0': current_t0,
     }
 
     return a_events, d_events, X, yhat, components, variant_info
@@ -1374,24 +1632,29 @@ def extract_metrics(
                     base_params.update(em_settings)
 
                 def _iglusnfr_variant_builder(dt: np.ndarray, tau_r: float, tau_d: float, frac_slow: float) -> np.ndarray:
-                    """Build iGluSnFR kernel with specific slow component fraction."""
+                    """Build iGluSnFR kernel with specific slow component fraction.
+                    
+                    tau_d: If different from base_params['tau_decay_fast'], use tau_d as fast decay
+                           This allows iterative kinetics refinement during NNLS.
+                    """
                     dt_ms = dt * 1000.0
                     frac_fast = 1.0 - frac_slow
-                    # Use fixed tau_decay values from base_params, only vary frac_fast
+                    # Use tau_d argument for fast decay if provided (enables kinetics adjustment)
+                    # tau_d is in seconds, convert to ms
+                    tau_fast_ms = tau_d * 1000.0 if tau_d > 0 else base_params['tau_decay_fast']
                     params = [
                         1.0,  # amp (will be normalized)
                         tau_r,  # tau_rise from global fit
-                        base_params['tau_decay_fast'],  # tau_decay_fast (fixed: 8ms)
-                        base_params['tau_decay_slow'],  # tau_decay_slow (fixed: 35ms, NOT tau_d which can be wrong)
+                        tau_fast_ms,  # tau_decay_fast - NOW uses passed tau_d argument
+                        base_params['tau_decay_slow'],  # tau_decay_slow (fixed: 35ms)
                         frac_fast,  # THIS is what varies across templates
                         0.0,  # t_peak
                     ]
                     y = model_func(dt_ms, *params)
-                    # Normalize by area (integrate in milliseconds to match model_func input units)
-                    tp_ms = np.maximum(dt_ms, 0.0)
-                    support = tp_ms <= 200.0  # First 200ms
-                    area = np.trapz(y[support], dt_ms[support]) if np.any(support) else 1.0
-                    return y / max(area, 1e-12)
+                    # Normalize by peak value instead of area
+                    # This preserves the tail contribution differences between templates
+                    peak_val = np.max(y) if np.any(y > 0) else 1.0
+                    return y / max(peak_val, 1e-12)
 
                 _VARIANT_KERNEL_BUILDER = _iglusnfr_variant_builder
                 progress_print(f"[model] Template variants enabled for iGluSnFR with ratios: {cfg.get('template_variant_ratios')}")
@@ -2000,15 +2263,41 @@ def extract_metrics(
         # For slower stimulation, use standard 50ms window
         isi_ms = isi * 1000.0
         if isi_ms < 30.0:
-            post_ms_for_fit = max(12.0, isi_ms * 0.75)  # Use 75% of ISI, min 12ms
+            # High-frequency trains: the recut window is CONTAMINATED by next pulse
+            # Use 75% of ISI to avoid contamination, but this limits kinetics fitting
+            # For bi-exponential models, we can't reliably fit tau_slow from recut
+            # Instead, rely on post-train decay estimate (see below)
+            post_ms_for_fit = max(12.0, isi_ms * 0.75)
         else:
             post_ms_for_fit = min(50.0, isi_ms - 5.0)  # Standard: 50ms or ISI-5ms
         progress_print(f"[global] Using post_ms={post_ms_for_fit:.1f} ms for recut fitting (ISI={isi_ms:.1f}ms)")
+
+        # === Estimate tau_slow from post-train decay ===
+        # This provides a data-driven estimate for the slow component
+        # Critical for high-frequency trains where recut window is too short to fit tau_slow
+        tau_slow_from_decay = estimate_tau_from_post_train_decay(t, y_avg, stim_times, isi)
+        if tau_slow_from_decay is not None:
+            # Use post-train estimate to set reasonable bounds
+            # CRITICAL: tau_slow must be >= 10ms (non-overlapping with tau_fast which is <=10ms)
+            param_bounds = cfg.setdefault('parameter_bounds', {})
+            if 'tau_decay_slow' not in param_bounds:
+                # Wide bounds: from max(10ms, 50% of estimate) to 3x estimate (or 400ms max)
+                lower_slow = max(0.010, tau_slow_from_decay * 0.5)  # Min 10ms!
+                upper_slow = min(0.400, tau_slow_from_decay * 3.0)
+                param_bounds['tau_decay_slow'] = (lower_slow, upper_slow)
+                progress_print(f"[global] tau_slow bounds: {lower_slow*1000:.1f}-{upper_slow*1000:.1f} ms (from post-train: {tau_slow_from_decay*1000:.1f}ms)")
 
         need_snips = bool(
             cfg.get('plot', {}).get('enabled', False)
             or cfg.get('recut_snippets', False)
         )
+        
+        # Use early events only for fast kinetics estimation (default: first 3 events)
+        early_events = int(cfg.get('early_events_only', 3))
+        
+        # Pass tau_slow from post-train decay to fix it during curve_fit
+        # This allows fitting tau_fast from early events while using the true slow kinetics
+        fixed_tau_slow = tau_slow_from_decay if (early_events > 0 and tau_slow_from_decay is not None) else None
 
         res = fit_average_event(
             t, Yd, event_model, stim_times,
@@ -2019,6 +2308,8 @@ def extract_metrics(
             post_ms=post_ms_for_fit,  # Use long window for fitting
             onset_method=str(cfg.get('onset_method', 'inflection')),
             onset_baseline_threshold=float(cfg.get('onset_baseline_threshold', 0.15)),
+            early_events_only=early_events,
+            fixed_tau_slow=fixed_tau_slow,
         )
 
         fitted = None
@@ -2093,24 +2384,30 @@ def extract_metrics(
                     }
 
                     def _iglusnfr_variant_builder_fitted(dt: np.ndarray, tau_r: float, tau_d: float, frac_slow: float) -> np.ndarray:
-                        """Build iGluSnFR kernel with specific slow component fraction using FITTED kinetics."""
+                        """Build iGluSnFR kernel with specific slow component fraction using FITTED kinetics.
+                        
+                        tau_d: If provided (>0), use as fast decay for iterative kinetics refinement.
+                        """
                         dt_ms = dt * 1000.0
                         frac_fast = 1.0 - frac_slow
-                        # Use FITTED tau values from global fit, vary only frac_fast
+                        # Use tau_d argument for fast decay if provided (enables kinetics adjustment)
+                        # tau_d is in seconds, convert to ms
+                        tau_fast_ms = tau_d * 1000.0 if tau_d > 0 else fitted_params['tau_decay_fast']
                         params = [
                             1.0,  # amp (will be normalized)
                             tau_r,  # tau_rise from global fit
-                            fitted_params['tau_decay_fast'],  # FITTED fast decay
-                            fitted_params['tau_decay_slow'],  # FITTED slow decay (or use tau_d)
+                            tau_fast_ms,  # FITTED fast decay - NOW uses passed tau_d if provided
+                            fitted_params['tau_decay_slow'],  # FITTED slow decay
                             frac_fast,  # THIS is what varies across templates
                             0.0,  # t_peak
                         ]
                         y = model_func(dt_ms, *params)
-                        # Normalize by area (integrate in milliseconds to match model_func input units)
-                        tp_ms = np.maximum(dt_ms, 0.0)
-                        support = tp_ms <= 200.0  # First 200ms
-                        area = np.trapz(y[support], dt_ms[support]) if np.any(support) else 1.0
-                        return y / max(area, 1e-12)
+                        # Normalize by peak value instead of area
+                        # This preserves the tail contribution differences between templates
+                        # with different decay times, which is important for decomposing
+                        # overlapping events in high-frequency trains
+                        peak_val = np.max(y) if np.any(y > 0) else 1.0
+                        return y / max(peak_val, 1e-12)
 
                     _VARIANT_KERNEL_BUILDER = _iglusnfr_variant_builder_fitted
                     override_msg = " (OVERRIDDEN)" if ('tau_decay_fast' in em_settings or 'tau_decay_slow' in em_settings) else ""

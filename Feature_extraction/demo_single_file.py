@@ -218,16 +218,17 @@ options_presets = {
         # === Event Model ===
         'event_model': 'iglusnfr',  # Specifically optimized for iGluSnFR S72A
 
-        # === Parameter Bounds (NEW - replaces event_model_settings + max_tau_decay_slow) ===
-        # Format: {'param_name': (lower, upper)}
-        # - Use (value, value) to force a fixed value
-        # - Use (np.nan, np.nan) or None for unconstrained
-        # For 50Hz: fix kinetics instead of fitting from contaminated recut
+        # === Parameter Bounds ===
+        # NON-OVERLAPPING ranges with boundary at 10ms
+        # Fast: 1-10ms, Slow: 10ms+ (auto-estimated from post-train decay)
         'parameter_bounds': {
-            'tau_decay_fast': (0.008, 0.008),  # Force 8ms (prevents fitting nonsense from overlap)
-            'tau_decay_slow': (0.025, 0.030),  # Constrain 25-30ms range
-            'tau_rise': (np.nan, np.nan),      # Unconstrained (let it fit)
+            'tau_decay_fast': (0.001, 0.020),  # 1-10ms fast component
+            # tau_decay_slow: intentionally omitted - auto-estimated from post-train (min 10ms)
         },
+        
+        # Use all events for averaging (early_events_only caused issues)
+        # tau_slow will still be fixed from post-train decay when early_events_only > 0
+        'early_events_only': 0,
 
         # === Recut/Averaging ===
         'recut_projection': 'mean',
@@ -305,10 +306,9 @@ options_presets = {
         'template_variant_ratios': np.arange(0.0, 1.0, 0.1),  # Slow component fractions to test
 
         # === Jitter Variants (NEW) ===
-        # Enable temporal jitter search in milliseconds (more intuitive than delta_max_s, etc.)
-        # Can be used alone OR combined with template variants for full grid search
-        # Example: np.arange(-2.0, 2.1, 0.2) tests jitters from -2ms to +2ms in 0.2ms steps
-        'jitter_variant_ms': np.arange(-1.0, 1.1, 0.25),  # Set to None to disable jitter search
+        # Enable temporal jitter search in milliseconds
+        # Wide range to handle template timing mismatch
+        'jitter_variant_ms': np.arange(-5.0, 5.1, 0.5),  # ±5ms in 0.5ms steps
     },
     
     # Minimal preset showing only changed values (others use defaults)

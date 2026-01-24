@@ -30,11 +30,13 @@ import numpy as np
 # are applied across models for common parameters like t_peak and tau
 # values.  "tau_primary" refers to faster/primary components (e.g. rise
 # times or fast decays) while "tau_secondary" covers slower components.
+# CRITICAL: tau_primary and tau_secondary have NON-OVERLAPPING ranges
+# with boundary at 10ms to ensure proper separation of fast/slow components.
 FIT_LIMITS: Dict[str, Tuple[float, float]] = {
     't_peak': (0.0, 10.0),
-    'tau': (0.001, 0.200),
-    'tau_primary': (0.0005, 0.020),
-    'tau_secondary': (0.010, 0.150),  # Tightened from 1.000s to 150ms for iGluSnFR
+    'tau': (0.001, 0.300),        # Generic tau up to 300ms
+    'tau_primary': (0.0005, 0.010),  # Fast: 0.5-10ms (rise, fast decay)
+    'tau_secondary': (0.010, 0.300),  # Slow: 10-300ms (NO OVERLAP with primary)
 }
 
 
