@@ -14,7 +14,7 @@ The function keeps the math equivalent to the main pipeline while exposing a sma
       pulses 1–3 against a single baseline threshold; pulses 2/3 amplitudes are
       corrected for residual pre‑stim currents
     - `allow_shift`: bool (default True) — enable per‑pulse micro‑shifts
-    - `event_model`: kernel used for fitting. Default `'double_exp'` (one rise τ and one decay τ). If you pass a value here it is respected; there is no auto‑replacement.
+    - `event_model`: kernel used for fitting. Default `'double_exp'`. For iGluSnFR use `'iglusnfr'` (bi‑exp) or `'iglusnfr_tri'` (tri‑exp). In tri‑exp mode, recut fits are bi‑exp for fast/slow taus and superslow tau is estimated from the final event decay.
     - Extras for `'cooperative'`: `event_model_settings={'n_coop': 2.0}`
   - `fit_source`: `'global'|'average'|'individual'` (default `'global'`)
     - `global`: fit a single template from all trials (recut median) then apply progression
@@ -30,6 +30,18 @@ The function keeps the math equivalent to the main pipeline while exposing a sma
 ## Decay Progression System
 
 The decay progression system determines how decay time constants (τd) evolve across the stimulus train. This is critical for accurately modeling synaptic depression or facilitation where each subsequent event may have different kinetics.
+
+---
+
+## Tri‑exponential iGluSnFR model (`iglusnfr_tri`)
+
+Tri‑exp mode behaves like the bi‑exp model for the recut fit (fast/slow taus), then adds a superslow component only during NNLS screening:
+
+- **Fast/slow taus**: taken from the recut fit (same as bi‑exp).
+- **Superslow tau**: estimated from the decay after the final event (last peak + 5 ms to baseline or end of trace).
+- **Template variants**: scan slow fraction (`template_variant_ratios`) and superslow fraction at the **final** event (`template_variant_superslow_fracs`). Superslow ramps monotonically from 0 to the chosen max across the train.
+
+Deprecated settings: `template_variant_weights`, `triexp_weight_step`, and `triexp_weight_min` are no longer used; replace them with `template_variant_ratios` + `template_variant_superslow_fracs`.
 
 ### Overview
 

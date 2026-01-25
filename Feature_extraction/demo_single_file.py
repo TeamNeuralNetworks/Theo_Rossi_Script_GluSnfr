@@ -96,9 +96,8 @@ START = 0.498
 ISI = 0.02  # Current: 50Hz
 
 # === TRI-EXPONENTIAL FLAG ===
-# Set to True for tri-exponential model (3 decay components: fast, slow, superslow)
-# Set to False for bi-exponential model (2 decay components: fast, slow) - more stable
-USE_TRI_EXPONENTIAL = True  # BiExp: stable, ~12.7% RMS. TriExp: experimental, needs tuning
+# Kept for reference; the options preset below controls the actual model.
+USE_TRI_EXPONENTIAL = True  # TriExp: superslow set from post-train; recut uses bi-exp internally
 
 out_dir = os.path.join(DATA_ROOT, "Testout")
 
@@ -110,7 +109,7 @@ ISI_MS = ISI * 1000.0  # Convert to milliseconds
 # Peak detection window: should be < ISI to avoid next pulse
 # Use 50-70% of ISI for fast stim, capped at 25ms for slow stim
 if ISI_MS < 30.0:
-    PEAK_WINDOW_MS = max(8.0, ISI_MS * 0.5)  # 90% of ISI, min 8ms
+    PEAK_WINDOW_MS = max(8.0, ISI_MS * 0.5)  # 50% of ISI, min 8ms
 else:
     PEAK_WINDOW_MS = min(25.0, ISI_MS * 0.3)  # Standard window for slow stim
 
@@ -225,29 +224,22 @@ options_presets = {
         'anchor_final_tau': False,  # Don't over-constrain - let the model fit naturally
         'anchor_first_tau': False,
 
-        # === Event Model (controlled by USE_TRI_EXPONENTIAL flag) ===
-        'event_model': 'iglusnfr_tri' if USE_TRI_EXPONENTIAL else 'iglusnfr',
-        # iglusnfr: Bi-exponential (fast 1-10ms, slow from post-train decay)
-        # iglusnfr_tri: Tri-exponential (fast 1-5ms, slow 10-25ms, superslow from post-train)
+        # === Event Model ===
+        'event_model': 'iglusnfr_tri',
+        # Tri-exponential (fast 1-5ms, slow 10-25ms, superslow from post-train)
         
         # === Event Model Settings (initial tau values for NNLS kernels) ===
         'event_model_settings': {
-            'tau_decay_fast': 0.008,     # 8ms fast component (reasonable for iGluSnFR3v)
+            'tau_decay_fast': 0.003,     # 3ms fast component (reasonable for iGluSnFR3v)
             'tau_decay_slow': 0.015,     # 15ms intermediate component
             # tau_decay_superslow: comes from post-train decay fitting
-        } if USE_TRI_EXPONENTIAL else {},
+        },
 
         # === Parameter Bounds (auto-configured based on model) ===
         'parameter_bounds': {
-            'tau_decay_fast': (0.003, 0.010),     # 1-10ms fast component
-            'tau_decay_slow': (0.010, 0.035),     # 8-30ms intermediate
-            'tau_decay_superslow': (0.038, 0.042),  # 35-100ms superslow
+            'tau_decay_fast': (0.001, 0.010),     # 1-10ms fast component
+            'tau_decay_slow': (0.010, 0.035),     # 10-35ms intermediate
             # tau_decay_superslow: auto from post-train decay (typically 30-50ms)
-        } if USE_TRI_EXPONENTIAL else {
-            'tau_decay_fast': (0.003, 0.010),  # Reasonable range for fast component
-            'tau_decay_slow': (0.010, 0.035),  # Cap slow component at 35ms max
-            'tau_rise': (np.nan, np.nan),       # Unconstrained
-            # tau_decay_slow: auto from post-train decay (no constraint needed)
         },
         
         # Use all events for averaging
@@ -322,13 +314,13 @@ options_presets = {
             'plot_peaks_details': True,
         },
 
-        # === Template Variants (Experimental) ===
-        # Enable multi-template NNLS: test multiple slow/fast ratios per event
-        # NNLS automatically selects best combination based on residuals
+        # === Template Variants (Tri-exp fractions) ===
+        # NNLS selects best slow/superslow fraction pairs per event
         'use_template_variants': True,  # Set to True to enable
-        # For tri-exp: frac_slow controls progressive shift fast→slow→superslow
-        'template_variant_ratios': np.arange(0.0, 1.01, 0.1),  # 11 ratio values from 0 to 1
-
+        # Slow fraction grid (fast = 1 - slow - superslow)
+        'template_variant_ratios': [0.2, 0.4, 0.6, 0.8],
+        # Superslow fraction at final event (ramps up monotonically across the train)
+        'template_variant_superslow_fracs': [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
         # === Jitter Variants (NEW) ===
         # Enable temporal jitter search in milliseconds
         # Reduced range to prevent NNLS convergence issues

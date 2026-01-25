@@ -3,7 +3,10 @@
 This module provides a compact, publication‑friendly API that is
 mathematically equivalent to the main pipeline. It extracts per‑pulse
 amplitudes and PPRs from iGluSnFR trains with minimal moving parts and a
-simple options dictionary for configuration and plotting.
+simple options dictionary for configuration and plotting. For tri‑exp
+(`iglusnfr_tri`), recut fits use the bi‑exp model for fast/slow taus,
+superslow tau is estimated from the final event decay, and NNLS templates
+scan slow/superslow fractions with a monotonic superslow ramp.
 
 Key steps performed (mirrors batch_measure_complex):
   1) Interpolate NaNs and (optionally) correct slow bleaching
@@ -131,7 +134,9 @@ DEFAULTS = {
     'fit_diagnostic_plot': False,  # Display weight and decay progression diagnostics
     # Template variants for residual-guided fitting (experimental)
     'use_template_variants': False,  # Enable multi-template NNLS (single pass, data-driven slow component)
-    'template_variant_ratios': [0.2, 0.4, 0.6, 0.8],  # Slow component fractions to test per event
+    # Bi-exp: slow component fractions per event.
+    # Tri-exp: slow fraction grid paired with template_variant_superslow_fracs.
+    'template_variant_ratios': [0.2, 0.4, 0.6, 0.8],
 }
 
 # Recut options: oversample factor and projection ('mean'|'median'|'std')
@@ -150,6 +155,11 @@ DEFAULTS.update({
 # PPR safety: floor amplitudes to noise threshold to prevent division by near-zero values
 DEFAULTS.update({
     'amplitude_floor_to_noise': False,  # If True, floor amplitudes < threshold to threshold before PPR calc
+})
+
+# Tri-exp NNLS variants: sweep slow + superslow fractions (superslow ramps across the train)
+DEFAULTS.update({
+    'template_variant_superslow_fracs': [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],  # Superslow fraction at final event
 })
 
 # Parameter bounds: classical upper/lower limits for all fitted parameters
@@ -357,19 +367,63 @@ def estimate_tau_superslow_from_last_event_decay(
         peak_idx_rel = int(np.argmax(y[peak_mask]))
         peak_idx = np.where(peak_mask)[0][0] + peak_idx_rel
         peak_t = float(t[peak_idx])
+        peak_y = float(y[peak_idx])
 
-        # Decay window: from peak to a few ISIs after (or end)
-        decay_end = min(last_st + 5.0 * isi, t[-1])
-        decay_mask = (t >= peak_t) & (t <= decay_end)
+        # Baseline from pre-train segment when available
+        baseline = None
+        try:
+            pre_mask = t < float(stim_times[0])
+            if np.sum(pre_mask) >= 5:
+                baseline = float(np.nanmedian(y[pre_mask]))
+        except Exception:
+            baseline = None
+
+        # Decay window: start 5ms after peak to avoid immediate transient
+        decay_start = peak_t + 0.005
+        if decay_start >= t[-1]:
+            return None
+
+        # Determine end of decay: when signal returns to baseline, else end of trace
+        decay_end = float(t[-1])
+        if baseline is None:
+            baseline = float(np.nanmedian(y[max(0, peak_idx - 10):peak_idx + 1]))
+        try:
+            if np.isfinite(baseline):
+                amp = peak_y - baseline
+                if not np.isfinite(amp) or amp <= 0:
+                    return None
+                pre_mask = t < float(stim_times[0])
+                if np.sum(pre_mask) >= 5:
+                    noise = float(np.nanmedian(np.abs(y[pre_mask] - baseline)))
+                else:
+                    noise = float(np.nanmedian(np.abs(y - baseline)))
+                threshold = baseline + max(0.05 * amp, 2.0 * noise)
+                after_mask = t >= decay_start
+                if np.any(after_mask):
+                    y_after = y[after_mask]
+                    t_after = t[after_mask]
+                    below = y_after <= threshold
+                    if np.any(below):
+                        first_idx = int(np.argmax(below))
+                        candidate_end = float(t_after[first_idx])
+                        if candidate_end > decay_start:
+                            candidate_mask = (t >= decay_start) & (t <= candidate_end)
+                            if np.sum(candidate_mask) >= min_decay_points:
+                                decay_end = candidate_end
+        except Exception:
+            decay_end = float(t[-1])
+
+        decay_mask = (t >= decay_start) & (t <= decay_end)
         if np.sum(decay_mask) < min_decay_points:
             return None
 
-        t_decay = t[decay_mask] - peak_t
+        t_decay = t[decay_mask] - decay_start
         y_decay = y[decay_mask]
 
-        # Baseline estimate from tail
-        tail_len = max(3, len(y_decay) // 5)
-        baseline = float(np.median(y_decay[-tail_len:]))
+        # Baseline estimate from pre-train segment or decay tail as fallback
+        if baseline is None or not np.isfinite(baseline):
+            tail_len = max(3, len(y_decay) // 5)
+            baseline = float(np.median(y_decay[-tail_len:]))
         y_decay_zeroed = y_decay - baseline
 
         # Skip if no clear decay signal
@@ -640,7 +694,7 @@ def fit_amplitudes_with_template_variants(
     tau_r_s: float,
     tau_d_vec_s: np.ndarray,
     *,
-    variant_ratios: List[float],
+    variant_ratios: List[Any],
     weight_mode: str,
     weight_tau_s: Optional[float],
     isi: float,
@@ -665,7 +719,9 @@ def fit_amplitudes_with_template_variants(
         stim_times: Stimulus times
         tau_r_s: Rise time constant
         tau_d_vec_s: Decay time constants per event
-        variant_ratios: List of slow component fractions (e.g., [0.1, 0.3, 0.5, 0.7])
+        variant_ratios: List of slow component fractions (bi-exp) or
+            tri-exp tuples [(frac_slow, frac_superslow_max), ...] where
+            superslow ramps 0→max across the train.
         weight_mode: Weighting mode for NNLS
         weight_tau_s: Weighting time constant
         isi: Inter-stimulus interval
@@ -936,7 +992,12 @@ def fit_amplitudes_with_template_variants(
     # Diagnostic info: which variants were selected for each event
     # Sum over jitter dimension to get template variant distribution
     template_variant_sums = np.sum(a_variants_3d, axis=2)  # [n_events, n_template_variants]
-    dominant_template_ratio = np.array([variant_ratios[idx] for idx in dominant_template_idx], dtype=float)
+    dominant_template_ratio = None
+    is_scalar_variants = all(np.isscalar(v) for v in variant_ratios)
+    if is_scalar_variants:
+        dominant_template_ratio = np.array([variant_ratios[idx] for idx in dominant_template_idx], dtype=float)
+    else:
+        dominant_template_ratio = [variant_ratios[idx] for idx in dominant_template_idx]
     dominant_jitter_ms = d_events * 1000.0
 
     variant_info = {
@@ -1481,8 +1542,13 @@ def extract_metrics(
       - recut_peak_recenter: int | tuple | None (default 0) — number of samples
         permitted for peak realignment before averaging; 0/None keeps stimulus
         alignment
-      - event_model: {'double_exp'|'cooperative'} (default 'double_exp') — template used
-        for NNLS fitting and residual subtraction; 'cooperative' uses a Hill‑like rise*exp decay
+      - event_model: {'double_exp'|'cooperative'|'iglusnfr'|'iglusnfr_tri'} (default 'double_exp')
+        — template used for NNLS fitting and residual subtraction. For 'iglusnfr_tri',
+        recut fits use the bi‑exp model; superslow tau is estimated from the final event decay.
+      - use_template_variants: bool (default False) — enable multi‑template NNLS
+      - template_variant_ratios: list[float] — slow fraction grid (bi‑exp and tri‑exp)
+      - template_variant_superslow_fracs: list[float] — tri‑exp superslow fractions
+        at the final event (ramps monotonically across the train)
       - plot: dict with keys
           - enabled: bool (default False)
           - traces: list of {'raw','savgol','nnls'} (default ['nnls'])
@@ -1771,6 +1837,44 @@ def extract_metrics(
         # Recut/per-event fits use bi-exponential kinetics; superslow is handled in NNLS variants.
         event_model_fit = 'iglusnfr'
 
+    triexp_variant_grid = None
+
+    def _build_triexp_variant_grid() -> List[Tuple[float, float]]:
+        nonlocal triexp_variant_grid
+        if triexp_variant_grid is not None:
+            return triexp_variant_grid
+
+        ratios = cfg.get('template_variant_ratios', [0.2, 0.4, 0.6, 0.8])
+        ss_fracs = cfg.get('template_variant_superslow_fracs', [0.0, 0.1, 0.2])
+        if not isinstance(ratios, (list, tuple, np.ndarray)):
+            ratios = [ratios]
+        if not isinstance(ss_fracs, (list, tuple, np.ndarray)):
+            ss_fracs = [ss_fracs]
+        grid: List[Tuple[float, float]] = []
+
+        for r in ratios:
+            try:
+                r = float(r)
+            except Exception:
+                continue
+            if not np.isfinite(r) or r < 0.0:
+                continue
+            for ss in ss_fracs:
+                try:
+                    ss = float(ss)
+                except Exception:
+                    continue
+                if not np.isfinite(ss) or ss < 0.0:
+                    continue
+                if r + ss > 1.0 + 1e-9:
+                    continue
+                grid.append((r, ss))
+
+        if not grid:
+            grid = [(0.3, 0.1)]
+        triexp_variant_grid = grid
+        return grid
+
     # Set up variant kernel builder if template variants are enabled
     global _VARIANT_KERNEL_BUILDER
     _VARIANT_KERNEL_BUILDER = None  # Reset to None by default
@@ -1799,6 +1903,8 @@ def extract_metrics(
                         ('tau_decay_fast', 0.005),    # 5 ms
                         ('tau_decay_slow', 0.015),    # 15 ms
                         ('tau_decay_superslow', 0.040),  # 40 ms (will be updated from post-train)
+                        ('frac_fast', 0.5),           # Default fast fraction
+                        ('frac_slow', 0.3),           # Default intermediate fraction
                     ]
                 else:
                     param_defaults = [
@@ -1831,24 +1937,63 @@ def extract_metrics(
                         event_idx: Optional[int] = None,
                         n_events: Optional[int] = None,
                     ) -> np.ndarray:
-                        """Build tri-exponential iGluSnFR kernel with fast/slow ratio + ramped superslow."""
+                        """Build tri-exponential iGluSnFR kernel with slow fraction + ramped superslow."""
                         dt_ms = dt * 1000.0
-                        frac_slow_total = float(np.clip(frac_slow, 0.0, 1.0))
-                        # Superslow fraction ramps up across the train; slow stays dominant early.
+                        # Defaults for fractions from settings (kept fixed across tau sweeps)
+                        frac_fast_base = float(base_params.get('frac_fast', 0.5))
+                        frac_slow_base = float(base_params.get('frac_slow', 0.3))
+                        frac_fast_base = np.clip(frac_fast_base, 0.0, 1.0)
+                        frac_slow_base = np.clip(frac_slow_base, 0.0, 1.0 - frac_fast_base)
+
+                        # Interpret variant spec: tuple/list => (frac_slow, frac_superslow_max)
+                        default_superslow = max(0.0, 1.0 - frac_fast_base - frac_slow_base)
+                        frac_slow_val = None
+                        frac_superslow_max = None
+                        if isinstance(frac_slow, (list, tuple)) and len(frac_slow) >= 2:
+                            try:
+                                frac_slow_val = float(frac_slow[0])
+                                frac_superslow_max = float(frac_slow[1])
+                            except Exception:
+                                frac_slow_val = None
+                                frac_superslow_max = None
+                        elif np.isscalar(frac_slow):
+                            try:
+                                frac_slow_val = float(frac_slow)
+                            except Exception:
+                                frac_slow_val = None
+
+                        if frac_slow_val is None or not np.isfinite(frac_slow_val):
+                            frac_slow_val = frac_slow_base
+                        if frac_superslow_max is None or not np.isfinite(frac_superslow_max):
+                            frac_superslow_max = default_superslow
+
                         ramp = 0.0
                         if event_idx is not None and n_events is not None and n_events > 1:
                             ramp = float(event_idx) / float(n_events - 1)
-                        frac_superslow = frac_slow_total * ramp
-                        frac_intermediate = frac_slow_total - frac_superslow
-                        frac_fast = 1.0 - frac_slow_total
-                        # Use per-event tau_d for fast component when available
+                        frac_superslow = max(0.0, min(1.0, frac_superslow_max)) * ramp
+                        frac_slow_use = max(0.0, min(1.0, frac_slow_val))
+                        if frac_slow_use + frac_superslow > 1.0:
+                            frac_slow_use = max(0.0, 1.0 - frac_superslow)
+                        frac_fast = max(0.0, 1.0 - frac_slow_use - frac_superslow)
+                        frac_intermediate = frac_slow_use
+
+                        # Use recut fit for fast/slow taus (slow scales from fast ratio)
+                        tau_superslow_s = float(base_params.get('tau_decay_superslow', 0.040))
                         tau_fast_s = float(tau_d) if np.isfinite(tau_d) and tau_d > 0 else base_params.get('tau_decay_fast', 0.003)
+                        tau_fast_base = float(base_params.get('tau_decay_fast', 0.003))
+                        tau_slow_base = float(base_params.get('tau_decay_slow', 0.015))
+                        ratio_slow = tau_slow_base / max(tau_fast_base, 1e-6)
+                        if not np.isfinite(ratio_slow) or ratio_slow <= 1.0:
+                            ratio_slow = 1.5
+                        tau_slow_s = tau_fast_s * ratio_slow
+                        if tau_slow_s > tau_superslow_s:
+                            tau_slow_s = tau_superslow_s * 0.6
                         params = [
                             1.0,  # amp
                             tau_r,  # tau_rise from global fit
                             tau_fast_s,  # tau_decay_fast in SECONDS
-                            base_params['tau_decay_slow'],  # tau_decay_slow (seconds)
-                            base_params['tau_decay_superslow'],  # tau_decay_superslow (seconds)
+                            tau_slow_s,  # tau_decay_slow (seconds)
+                            tau_superslow_s,  # tau_decay_superslow (seconds)
                             frac_fast,  # frac_fast varies
                             frac_intermediate,  # frac_slow (intermediate)
                             0.0,  # t_peak
@@ -1888,7 +2033,11 @@ def extract_metrics(
 
                 _VARIANT_KERNEL_BUILDER = _iglusnfr_variant_builder
                 model_type = "tri-exponential" if is_tri else "bi-exponential"
-                progress_print(f"[model] Template variants enabled for {model_type} iGluSnFR with ratios: {cfg.get('template_variant_ratios')}")
+                if is_tri:
+                    variant_preview = _build_triexp_variant_grid()
+                    progress_print(f"[model] Template variants enabled for {model_type} iGluSnFR with {len(variant_preview)} slow/superslow pairs")
+                else:
+                    progress_print(f"[model] Template variants enabled for {model_type} iGluSnFR with ratios: {cfg.get('template_variant_ratios')}")
             except Exception as e:
                 progress_print(f"[warning] Could not set up template variants for iGluSnFR: {e}")
                 progress_print("[warning] Falling back to standard single-template fitting")
@@ -2650,21 +2799,59 @@ def extract_metrics(
                         ) -> np.ndarray:
                             """Build tri-exponential iGluSnFR kernel using fitted kinetics + ramped superslow."""
                             dt_ms = dt * 1000.0
-                            frac_slow_total = float(np.clip(frac_slow, 0.0, 1.0))
+                            # Defaults for fractions from settings (kept fixed across tau sweeps)
+                            frac_fast_base = float(em_settings.get('frac_fast', fitted.get('frac_fast', 0.5)))
+                            frac_slow_base = float(em_settings.get('frac_slow', fitted.get('frac_slow', 0.3)))
+                            frac_fast_base = np.clip(frac_fast_base, 0.0, 1.0)
+                            frac_slow_base = np.clip(frac_slow_base, 0.0, 1.0 - frac_fast_base)
+
+                            default_superslow = max(0.0, 1.0 - frac_fast_base - frac_slow_base)
+                            frac_slow_val = None
+                            frac_superslow_max = None
+                            if isinstance(frac_slow, (list, tuple)) and len(frac_slow) >= 2:
+                                try:
+                                    frac_slow_val = float(frac_slow[0])
+                                    frac_superslow_max = float(frac_slow[1])
+                                except Exception:
+                                    frac_slow_val = None
+                                    frac_superslow_max = None
+                            elif np.isscalar(frac_slow):
+                                try:
+                                    frac_slow_val = float(frac_slow)
+                                except Exception:
+                                    frac_slow_val = None
+
+                            if frac_slow_val is None or not np.isfinite(frac_slow_val):
+                                frac_slow_val = frac_slow_base
+                            if frac_superslow_max is None or not np.isfinite(frac_superslow_max):
+                                frac_superslow_max = default_superslow
+
                             ramp = 0.0
                             if event_idx is not None and n_events is not None and n_events > 1:
                                 ramp = float(event_idx) / float(n_events - 1)
-                            frac_superslow = frac_slow_total * ramp
-                            frac_intermediate = frac_slow_total - frac_superslow
-                            frac_fast = 1.0 - frac_slow_total
-                            # Use per-event tau_d for fast component when available
+                            frac_superslow = max(0.0, min(1.0, frac_superslow_max)) * ramp
+                            frac_slow_use = max(0.0, min(1.0, frac_slow_val))
+                            if frac_slow_use + frac_superslow > 1.0:
+                                frac_slow_use = max(0.0, 1.0 - frac_superslow)
+                            frac_fast = max(0.0, 1.0 - frac_slow_use - frac_superslow)
+                            frac_intermediate = frac_slow_use
+
+                            tau_superslow_s = float(fitted_params.get('tau_decay_superslow', 0.040))
                             tau_fast_s = float(tau_d) if np.isfinite(tau_d) and tau_d > 0 else fitted_params.get('tau_decay_fast', 0.003)
+                            tau_fast_base = float(fitted_params.get('tau_decay_fast', 0.003))
+                            tau_slow_base = float(fitted_params.get('tau_decay_slow', 0.015))
+                            ratio_slow = tau_slow_base / max(tau_fast_base, 1e-6)
+                            if not np.isfinite(ratio_slow) or ratio_slow <= 1.0:
+                                ratio_slow = 1.5
+                            tau_slow_s = tau_fast_s * ratio_slow
+                            if tau_slow_s > tau_superslow_s:
+                                tau_slow_s = tau_superslow_s * 0.6
                             params = [
                                 1.0,  # amp (will be normalized)
                                 tau_r,  # tau_rise from global fit
                                 tau_fast_s,  # tau_decay_fast in SECONDS
-                                fitted_params['tau_decay_slow'],  # FITTED slow decay (seconds)
-                                fitted_params['tau_decay_superslow'],  # FITTED superslow decay (seconds)
+                                tau_slow_s,  # tau_decay_slow (seconds)
+                                tau_superslow_s,  # tau_decay_superslow (seconds)
                                 frac_fast,  # fast fraction varies
                                 frac_intermediate,  # intermediate fraction
                                 0.0,  # t_peak
@@ -3402,7 +3589,10 @@ def extract_metrics(
     if use_variants_approach:
         # Use template variants approach: single NNLS with multiple templates per event
         if cfg.get('use_template_variants', False) and _VARIANT_KERNEL_BUILDER is not None:
-            variant_ratios = cfg.get('template_variant_ratios', [0.2, 0.4, 0.6, 0.8])
+            if event_model == 'iglusnfr_tri':
+                variant_ratios = _build_triexp_variant_grid()
+            else:
+                variant_ratios = cfg.get('template_variant_ratios', [0.2, 0.4, 0.6, 0.8])
         else:
             # Jitter-only mode: determine optimal template ratio first if needed
             # For iGluSnFR, quickly test a few ratios to find the best one for this data
@@ -3460,7 +3650,11 @@ def extract_metrics(
                 dominant_ratios = variant_info_avg['dominant_template_ratio']
                 dominant_jitters = variant_info_avg['dominant_jitter_ms']
                 if cfg.get('use_template_variants', False):
-                    progress_print(f"[NNLS] Dominant slow fractions per event: {[f'{r:.1f}' for r in dominant_ratios]}")
+                    if event_model == 'iglusnfr_tri' and isinstance(dominant_ratios, list):
+                        fmt = [f"({r[0]:.2f},{r[1]:.2f})" if isinstance(r, (list, tuple)) and len(r) >= 2 else str(r) for r in dominant_ratios]
+                        progress_print(f"[NNLS] Dominant tri fractions per event: {fmt}")
+                    else:
+                        progress_print(f"[NNLS] Dominant slow fractions per event: {[f'{r:.1f}' for r in dominant_ratios]}")
                 if jitter_variant_ms is not None:
                     progress_print(f"[NNLS] Dominant jitter (ms) per event: {[f'{j:.2f}' for j in dominant_jitters]}")
             else:
@@ -3468,7 +3662,11 @@ def extract_metrics(
                 dominant_idx = variant_info_avg.get('dominant_variant_idx', [])
                 if len(dominant_idx):
                     dominant_ratios = [variant_ratios[i] for i in dominant_idx]
-                    progress_print(f"[NNLS] Dominant slow fractions per event: {[f'{r:.1f}' for r in dominant_ratios]}")
+                    if event_model == 'iglusnfr_tri':
+                        fmt = [f"({r[0]:.2f},{r[1]:.2f})" if isinstance(r, (list, tuple)) and len(r) >= 2 else str(r) for r in dominant_ratios]
+                        progress_print(f"[NNLS] Dominant tri fractions per event: {fmt}")
+                    else:
+                        progress_print(f"[NNLS] Dominant slow fractions per event: {[f'{r:.1f}' for r in dominant_ratios]}")
         except Exception:
             pass
     else:

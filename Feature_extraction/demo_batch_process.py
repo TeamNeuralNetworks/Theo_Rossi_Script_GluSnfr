@@ -162,11 +162,11 @@ for in_dir in folders:
         ISI_MS = isi * 1000.0  # Convert to milliseconds
 
         # Peak detection window: should be < ISI to avoid next pulse
-        # Use 60% of ISI for fast stim, capped at 25ms for slow stim
+        # Use 50-70% of ISI for fast stim, capped at 25ms for slow stim
         if ISI_MS < 30.0:
-            PEAK_WINDOW_MS = max(8.0, ISI_MS * 0.6)  # 60% of ISI, min 8ms
+            PEAK_WINDOW_MS = max(8.0, ISI_MS * 0.5)  # 50% of ISI, min 8ms
         else:
-            PEAK_WINDOW_MS = min(25.0, ISI_MS * 0.7)  # Standard window for slow stim
+            PEAK_WINDOW_MS = min(25.0, ISI_MS * 0.3)  # Standard window for slow stim
 
         # Zoom windows for plotting and analysis
         # For fast stim: limit to avoid excessive overlap visualization
@@ -198,7 +198,7 @@ for in_dir in folders:
 
                 # === Event Model Settings (initial tau values for NNLS kernels) ===
                 'event_model_settings': {
-                    'tau_decay_fast': 0.008,
+                    'tau_decay_fast': 0.003,
                     'tau_decay_slow': 0.015,
                 },
 
@@ -207,10 +207,9 @@ for in_dir in folders:
                 # - Use (value, value) to force a fixed value
                 # - Use (np.nan, np.nan) or None for unconstrained
                 'parameter_bounds': {
-                    'tau_decay_fast': (0.003, 0.01),
-                    'tau_decay_slow': (0.01, 0.035),
+                    'tau_decay_fast': (0.001, 0.010),     # 1-10ms fast component
+                    'tau_decay_slow': (0.010, 0.035),     # 10-35ms intermediate
                     # tau_decay_superslow: auto from post-train decay (typically 30-50ms)
-                    'tau_rise': (0.001, 0.01),       # Unconstrained
                 },
 
                 # Use all events for averaging (0 = all, N = first N only)
@@ -280,16 +279,18 @@ for in_dir in folders:
                     'trials': False,
                     'baseline': False,
                     'residuals': True,
+                    'nnls_residual': True,
+                    'nnls_n_minus_1': True,
                     'plot_peaks_details': True,
                 },
 
-                # === Template Variants (Experimental) ===
-                # Enable multi-template NNLS: test multiple slow/fast ratios per event
-                # NNLS automatically selects best combination based on residuals
+                # === Template Variants (Tri-exp fractions) ===
+                # NNLS selects best slow/superslow fraction pairs per event
                 'use_template_variants': True,  # Set to True to enable
-                # For tri-exp: frac_slow controls progressive shift fast→slow→superslow
-                'template_variant_ratios': np.arange(0.0, 1.01, 0.1),  # 11 ratio values from 0 to 1
-
+                # Slow fraction grid (fast = 1 - slow - superslow)
+                'template_variant_ratios': [0.2, 0.4, 0.6, 0.8],
+                # Superslow fraction at final event (ramps up monotonically across the train)
+                'template_variant_superslow_fracs': [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
                 # === Jitter Variants (NEW) ===
                 # Enable temporal jitter search in milliseconds
                 # Reduced range to prevent NNLS convergence issues
