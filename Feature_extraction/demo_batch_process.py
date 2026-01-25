@@ -285,7 +285,7 @@ for in_dir in folders:
                 # NNLS selects best slow/superslow fraction pairs per event
                 'use_template_variants': True,  # Set to True to enable
                 # Slow fraction grid (fast = 1 - slow - superslow)
-                'template_variant_ratios': [0.2, 0.4, 0.6, 0.8],
+                'template_variant_ratios': [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
                 # Superslow fraction at final event (ramps up monotonically across the train)
                 'template_variant_superslow_fracs': [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
                 # Disable superslow if it is too close to the slow tau
