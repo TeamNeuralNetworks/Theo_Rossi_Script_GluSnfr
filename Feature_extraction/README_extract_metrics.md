@@ -40,6 +40,7 @@ Tri‑exp mode behaves like the bi‑exp model for the recut fit (fast/slow taus
 - **Fast/slow taus**: taken from the recut fit (same as bi‑exp).
 - **Superslow tau**: estimated from the decay after the final event (last peak + 5 ms to baseline or end of trace).
 - **Template variants**: scan slow fraction (`template_variant_ratios`) and superslow fraction at the **final** event (`template_variant_superslow_fracs`). Superslow ramps monotonically from 0 to the chosen max across the train.
+- **Safeguard**: if the estimated superslow tau is too close to the slow tau (ratio below `superslow_min_ratio`, default 1.2), superslow variants are disabled and the fit reduces to bi‑exp templates.
 
 Deprecated settings: `template_variant_weights`, `triexp_weight_step`, and `triexp_weight_min` are no longer used; replace them with `template_variant_ratios` + `template_variant_superslow_fracs`.
 

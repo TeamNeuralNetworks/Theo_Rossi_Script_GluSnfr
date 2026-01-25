@@ -32,7 +32,7 @@ $$
 $$
 
 Here, $\tau_{\mathrm{rise}}$ (≈ 1.4 ms) controls the onset of the signal, while $\tau_{\mathrm{fast}}$ (~8 ms) and $\tau_{\mathrm{slow}}$ (~25–35 ms) capture fast and slow decay components, respectively. The mixing coefficient $f_{\mathrm{fast}} \in [0,1]$ specifies the relative contribution of the fast component. The script `generate_readme_figures.py` illustrates these components and their combinations in `fig2_template_variants.png`: the upper‑left panel shows the full bi‑exponential template together with its fast‑only and slow‑only counterparts; the upper‑right panel displays families of templates obtained by varying $f_{\mathrm{fast}}$ from 0% to 100%. The lower panels visualize temporal jitter variants (see below) and a schematic grid over template ratio and jitter used in the NNLS search; tri‑exp adds a superslow fraction dimension on top of this grid.
-For tri‑exponential modeling (`iglusnfr_tri`), a superslow decay term is added to capture post‑train accumulation. The recut fit remains bi‑exponential for reliable fast/slow taus, while the superslow time constant is estimated from the decay after the final event (last peak + 5 ms to baseline or end of trace).
+For tri‑exponential modeling (`iglusnfr_tri`), a superslow decay term is added to capture post‑train accumulation. The recut fit remains bi‑exponential for reliable fast/slow taus, while the superslow time constant is estimated from the decay after the final event (last peak + 5 ms to baseline or end of trace). If the estimated superslow is too close to the slow component, superslow variants are disabled and the NNLS fit reduces to bi‑exp templates.
 
 ![Template and jitter variants](docs/figures/fig2_template_variants.png)
 

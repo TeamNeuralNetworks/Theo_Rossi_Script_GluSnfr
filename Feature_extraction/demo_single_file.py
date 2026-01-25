@@ -75,8 +75,8 @@ from Feature_extraction.extract_metrics import extract_metrics
 DATA_ROOT = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL"
 xlsx_path = os.path.join(
     DATA_ROOT,
-    "Theo_4_50Hz",
-    "20210721_linescan1_50Hz_10pulses_4mMCa_bouton6_traces_converted.xlsx",
+    "Theo_4Ca",
+    "20220726_linescan1_20Hz_10pulses_4mMCa_bouton4_traces_converted.xlsx",
 )
 
 # xlsx_path = os.path.join(
@@ -93,7 +93,7 @@ START = 0.498
 # ISI = 0.05  # 20Hz stimulation
 # ISI = 0.02  # 50Hz stimulation
 # ISI = 0.01  # 100Hz stimulation
-ISI = 0.02  # Current: 50Hz
+ISI = 0.05  # Current: 20Hz
 
 # === TRI-EXPONENTIAL FLAG ===
 # Kept for reference; the options preset below controls the actual model.
@@ -237,13 +237,13 @@ options_presets = {
 
         # === Parameter Bounds (auto-configured based on model) ===
         'parameter_bounds': {
-            'tau_decay_fast': (0.001, 0.010),     # 1-10ms fast component
+            'tau_decay_fast': (0.003, 0.010),     # 3-10ms fast component
             'tau_decay_slow': (0.010, 0.035),     # 10-35ms intermediate
             # tau_decay_superslow: auto from post-train decay (typically 30-50ms)
         },
         
         # Use all events for averaging
-        'early_events_only': 3,
+        'early_events_only': 0,
 
         # === Recut/Averaging ===
         'recut_projection': 'mean',
@@ -270,7 +270,6 @@ options_presets = {
         'fit_diagnostic_plot': False,
         'huber_delta': 2.5,
         'irls_iters': 20,
-
         # === Time Windows (ISI-aware) ===
         'pre_zoom_s': PRE_ZOOM_S,  # Computed above based on ISI
         'post_zoom_s': POST_ZOOM_S,  # Automatically adjusted for fast/slow stim
@@ -318,9 +317,11 @@ options_presets = {
         # NNLS selects best slow/superslow fraction pairs per event
         'use_template_variants': True,  # Set to True to enable
         # Slow fraction grid (fast = 1 - slow - superslow)
-        'template_variant_ratios': [0.2, 0.4, 0.6, 0.8],
+        'template_variant_ratios': [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
         # Superslow fraction at final event (ramps up monotonically across the train)
         'template_variant_superslow_fracs': [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
+        # Disable superslow if it is too close to the slow tau
+        'superslow_min_ratio': 1.2,
         # === Jitter Variants (NEW) ===
         # Enable temporal jitter search in milliseconds
         # Reduced range to prevent NNLS convergence issues

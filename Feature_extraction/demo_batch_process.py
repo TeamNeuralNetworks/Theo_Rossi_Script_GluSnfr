@@ -198,16 +198,14 @@ for in_dir in folders:
 
                 # === Event Model Settings (initial tau values for NNLS kernels) ===
                 'event_model_settings': {
-                    'tau_decay_fast': 0.003,
-                    'tau_decay_slow': 0.015,
+                    'tau_decay_fast': 0.003,     # 3ms fast component (reasonable for iGluSnFR3v)
+                    'tau_decay_slow': 0.015,     # 15ms intermediate component
+                    # tau_decay_superslow: comes from post-train decay fitting
                 },
 
-                # === Parameter Bounds (match demo_single_file tri settings) ===
-                # Format: {'param_name': (lower, upper)}
-                # - Use (value, value) to force a fixed value
-                # - Use (np.nan, np.nan) or None for unconstrained
+                # === Parameter Bounds (auto-configured based on model) ===
                 'parameter_bounds': {
-                    'tau_decay_fast': (0.001, 0.010),     # 1-10ms fast component
+                    'tau_decay_fast': (0.003, 0.010),     # 3-10ms fast component
                     'tau_decay_slow': (0.010, 0.035),     # 10-35ms intermediate
                     # tau_decay_superslow: auto from post-train decay (typically 30-50ms)
                 },
@@ -240,7 +238,6 @@ for in_dir in folders:
                 'fit_diagnostic_plot': False,
                 'huber_delta': 2.5,
                 'irls_iters': 20,
-
                 # === Time Windows (ISI-aware) ===
                 'pre_zoom_s': PRE_ZOOM_S,  # Computed above based on ISI
                 'post_zoom_s': POST_ZOOM_S,  # Automatically adjusted for fast/slow stim
@@ -291,6 +288,8 @@ for in_dir in folders:
                 'template_variant_ratios': [0.2, 0.4, 0.6, 0.8],
                 # Superslow fraction at final event (ramps up monotonically across the train)
                 'template_variant_superslow_fracs': [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
+                # Disable superslow if it is too close to the slow tau
+                'superslow_min_ratio': 1.2,
                 # === Jitter Variants (NEW) ===
                 # Enable temporal jitter search in milliseconds
                 # Reduced range to prevent NNLS convergence issues

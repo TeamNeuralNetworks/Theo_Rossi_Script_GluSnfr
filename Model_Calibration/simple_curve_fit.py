@@ -30,6 +30,7 @@ def fit_average_event(
     onset_baseline_threshold: float = 0.15,
     early_events_only: int = 0,
     fixed_tau_slow: Optional[float] = None,
+    parameter_bounds: Optional[Dict[str, Tuple[float, float]]] = None,
 ) -> Optional[Tuple[Dict[str, float], np.ndarray, np.ndarray]]:
     """Recut trials, average, and fit an event model.
 
@@ -75,6 +76,10 @@ def fit_average_event(
         If provided (in seconds), fixes tau_decay_slow to this value during
         curve_fit. This allows fitting tau_fast from early events while using
         a pre-estimated tau_slow (e.g., from post-train decay). Default is None.
+    parameter_bounds : dict, optional
+        Optional per-parameter bounds overrides. Keys should match model params
+        (e.g., 'tau_decay_fast', 'tau_decay_slow'). Bounds use the same units
+        as the model spec (seconds for taus, milliseconds for t_peak).
 
     Returns
     -------
@@ -147,6 +152,23 @@ def fit_average_event(
         except Exception:  # pragma: no cover - fallback when run from repo root
             from event_models import get_event_model  # type: ignore
         spec = get_event_model(model_name)
+        if parameter_bounds:
+            try:
+                lb, ub = list(spec['bounds'][0]), list(spec['bounds'][1])
+                for i, pname in enumerate(spec['params']):
+                    if pname not in parameter_bounds:
+                        continue
+                    bound = parameter_bounds.get(pname)
+                    if not isinstance(bound, (tuple, list)) or len(bound) != 2:
+                        continue
+                    lo, hi = float(bound[0]), float(bound[1])
+                    if np.isfinite(lo):
+                        lb[i] = lo
+                    if np.isfinite(hi):
+                        ub[i] = hi
+                spec['bounds'] = (lb, ub)
+            except Exception:
+                pass
         mask = (t_ms >= window_ms[0]) & (t_ms <= window_ms[1])
         if not np.any(mask):
             return None

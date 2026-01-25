@@ -160,6 +160,7 @@ DEFAULTS.update({
 # Tri-exp NNLS variants: sweep slow + superslow fractions (superslow ramps across the train)
 DEFAULTS.update({
     'template_variant_superslow_fracs': [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],  # Superslow fraction at final event
+    'superslow_min_ratio': 1.2,  # Disable superslow variants if tau_superslow < tau_slow * ratio
 })
 
 # Parameter bounds: classical upper/lower limits for all fitted parameters
@@ -745,7 +746,7 @@ def fit_amplitudes_with_template_variants(
 
     event_t0_s = float(event_t0_s)
     
-    # Track kinetics adjustments across iterations
+    # Track kinetics across iterations (diagnostic only; no adjustment)
     current_tau_d = tau_d_vec_s.copy()
     current_t0 = event_t0_s
     kinetics_adjusted = False
@@ -802,26 +803,7 @@ def fit_amplitudes_with_template_variants(
             n_at_max = np.sum(dom_jitters >= jitter_max - 0.0005)
             frac_saturated = (n_at_min + n_at_max) / n_events
             
-            # If >30% of events saturate jitter limits and we haven't adjusted too much
-            # Only adjust if tau_d > 1.5ms (don't make unrealistically fast)
-            if frac_saturated > 0.3 and float(current_tau_d[0]) > 0.0015:
-                # Determine direction: 
-                # - More at max (positive jitter) -> template peaks too LATE -> need FASTER decay
-                # - More at min (negative jitter) -> template peaks too EARLY -> need SLOWER decay
-                # Note: faster decay (smaller tau) means earlier peak
-                if n_at_max > n_at_min:
-                    # Events want positive jitter -> template too late -> speed up decay
-                    scale_factor = 0.7
-                else:
-                    # Events want negative jitter -> template too early -> slow down decay
-                    scale_factor = 1.3
-                
-                current_tau_d = current_tau_d * scale_factor
-                # Apply floor: tau_d should not go below 1.5ms (iGluSnFR cannot decay faster)
-                min_tau_d = 0.0015  # 1.5ms floor
-                current_tau_d = np.maximum(current_tau_d, min_tau_d)
-                kinetics_adjusted = True
-                progress_print(f"[NNLS] Iter {iteration+1}: Jitter saturation ({frac_saturated*100:.0f}% at limits, {n_at_max} at max) [diagnostic only, kinetics adjustment disabled due to area normalization]")
+            progress_print(f"[NNLS] Iter {iteration+1}: Jitter saturation ({frac_saturated*100:.0f}% at limits, {n_at_max} at max) [diagnostic only]")
             
             # === Diagnostic 1: Post-train decay check (diagnostic only, no adjustment) ===
             # Kinetics adjustment via tau_d scaling is ineffective due to area normalization
@@ -877,27 +859,7 @@ def fit_amplitudes_with_template_variants(
                 else:
                     corr_derivative = 0.0
                 
-                # === Apply corrections based on diagnostics ===
-                # Positive cumsum correlation → model predicts too much late → decay too slow
-                # Apply correction only if correlation is substantial (>0.3)
-                if abs(corr_cumsum) > 0.3 and not kinetics_adjusted:
-                    # Scale decay time: positive corr → make faster (smaller tau)
-                    # Use correlation magnitude to set adjustment strength
-                    scale_factor = 1.0 - 0.3 * corr_cumsum  # e.g., corr=0.5 → scale=0.85
-                    scale_factor = np.clip(scale_factor, 0.5, 1.5)
-                    current_tau_d = current_tau_d * scale_factor
-                    kinetics_adjusted = True
-                    progress_print(f"[NNLS] Iter {iteration+1}: Decay adjustment (corr_cumsum={corr_cumsum:.3f}) -> tau_d scaled by {scale_factor:.3f}")
-                
-                # Derivative correlation → timing shift needed
-                if abs(corr_derivative) > 0.3 and not kinetics_adjusted:
-                    # Positive corr_derivative → model rising when residual positive → shift earlier
-                    dt = t_train[1] - t_train[0] if len(t_train) > 1 else 0.001
-                    shift_adjustment = -corr_derivative * dt * 5  # Scale by a few sample widths
-                    shift_adjustment = np.clip(shift_adjustment, -0.002, 0.002)  # Max ±2ms
-                    current_t0 = current_t0 + shift_adjustment
-                    kinetics_adjusted = True
-                    progress_print(f"[NNLS] Iter {iteration+1}: Timing adjustment (corr_deriv={corr_derivative:.3f}) -> t0 shifted by {shift_adjustment*1000:.2f}ms")
+                # Correlations are diagnostic only; kinetics are not adjusted here.
                 
                 # === Update weights based on residual structure ===
                 # Downweight regions with systematic residual bias
@@ -982,12 +944,6 @@ def fit_amplitudes_with_template_variants(
                     )
                     comp_event += amp_var * k
         components.append(comp_event)
-
-    # Log kinetics adjustment summary if adjustments were made
-    if kinetics_adjusted:
-        orig_tau = np.mean(tau_d_vec_s) * 1000
-        new_tau = np.mean(current_tau_d) * 1000
-        progress_print(f"[NNLS] Kinetics refined: tau_d {orig_tau:.2f}ms -> {new_tau:.2f}ms, t0 shift {(current_t0 - event_t0_s)*1000:.2f}ms")
 
     # Diagnostic info: which variants were selected for each event
     # Sum over jitter dimension to get template variant distribution
@@ -1549,6 +1505,8 @@ def extract_metrics(
       - template_variant_ratios: list[float] — slow fraction grid (bi‑exp and tri‑exp)
       - template_variant_superslow_fracs: list[float] — tri‑exp superslow fractions
         at the final event (ramps monotonically across the train)
+      - superslow_min_ratio: float (default 1.2) — disable superslow variants if
+        tau_superslow < tau_slow * ratio
       - plot: dict with keys
           - enabled: bool (default False)
           - traces: list of {'raw','savgol','nnls'} (default ['nnls'])
@@ -2219,6 +2177,7 @@ def extract_metrics(
                         window_ms=(0.0, float(local_t_ms[-1]) if local_t_ms.size else 50.0),
                         onset_method=str(cfg.get('onset_method', 'inflection')),
                         onset_baseline_threshold=float(cfg.get('onset_baseline_threshold', 0.15)),
+                        parameter_bounds=cfg.get('parameter_bounds', None),
                     )
                     if fit_res is not None:
                         params_dict = fit_res[0]
@@ -2689,6 +2648,7 @@ def extract_metrics(
             onset_baseline_threshold=float(cfg.get('onset_baseline_threshold', 0.15)),
             early_events_only=early_events,
             fixed_tau_slow=fixed_tau_slow,
+            parameter_bounds=cfg.get('parameter_bounds', None),
         )
 
         fitted = None
@@ -2724,6 +2684,7 @@ def extract_metrics(
             tau_d0 = float(fitted.get('tau_decay', fitted.get('tau_decay_fast', 0.010)))
             event_t0_s = float(fitted.get('t_peak', 0.0)) / 1000.0
 
+
             # Carry over model-specific parameters (only if not explicitly set by user)
             cfg.setdefault('event_model_settings', {})
             if event_model == 'cooperative' and ('n_coop' in fitted):
@@ -2752,7 +2713,39 @@ def extract_metrics(
                         tau_superslow_setting = estimate_tau_superslow_from_last_event_decay(
                             t, y_avg, stim_times, isi, event_t0_s=event_t0_s
                         )
-                    if tau_superslow_setting is not None:
+                    # Enforce superslow >= slow and optionally disable superslow if too close to slow
+                    tau_slow_fit = None
+                    try:
+                        if isinstance(fitted, dict):
+                            tau_slow_fit = float(fitted.get('tau_decay_slow', np.nan))
+                    except Exception:
+                        tau_slow_fit = None
+                    if tau_slow_fit is None or not np.isfinite(tau_slow_fit):
+                        try:
+                            tau_slow_fit = float(em_settings.get('tau_decay_slow', np.nan))
+                        except Exception:
+                            tau_slow_fit = None
+
+                    min_ratio = float(cfg.get('superslow_min_ratio', 1.2))
+                    if not np.isfinite(min_ratio) or min_ratio < 1.0:
+                        min_ratio = 1.0
+
+                    if tau_superslow_setting is None:
+                        cfg['template_variant_superslow_fracs'] = [0.0]
+                        triexp_variant_grid = None
+                        progress_print("[tri-exp] No superslow tau estimate; disabling superslow variants.")
+                    else:
+                        if tau_slow_fit is not None and np.isfinite(tau_slow_fit):
+                            if tau_superslow_setting < tau_slow_fit:
+                                tau_superslow_setting = float(tau_slow_fit)
+                            if tau_superslow_setting < tau_slow_fit * min_ratio:
+                                cfg['template_variant_superslow_fracs'] = [0.0]
+                                triexp_variant_grid = None
+                                progress_print(
+                                    "[tri-exp] Superslow tau too close to slow "
+                                    f"({tau_superslow_setting*1000:.1f}ms < {min_ratio:.2f}x {tau_slow_fit*1000:.1f}ms); "
+                                    "disabling superslow variants."
+                                )
                         cfg['event_model_settings'].setdefault('tau_decay_superslow', float(tau_superslow_setting))
 
             # REBUILD variant kernel builder with fitted parameters
@@ -2770,9 +2763,16 @@ def extract_metrics(
                     # Use FITTED parameters from global fit, but respect explicit overrides from event_model_settings
                     em_settings = cfg.get('event_model_settings', {})
 
-                    # Get fitted/override values
-                    tau_fast = float(em_settings.get('tau_decay_fast', fitted.get('tau_decay_fast', 0.005)))
-                    tau_slow = float(em_settings.get('tau_decay_slow', fitted.get('tau_decay_slow', 0.015)))
+                    # Get fitted values; only fall back to explicit overrides if fit missing
+                    tau_fast = float(fitted.get('tau_decay_fast', np.nan))
+                    tau_slow = float(fitted.get('tau_decay_slow', np.nan))
+                    override_used = False
+                    if not np.isfinite(tau_fast):
+                        tau_fast = float(em_settings.get('tau_decay_fast', 0.005))
+                        override_used = True
+                    if not np.isfinite(tau_slow):
+                        tau_slow = float(em_settings.get('tau_decay_slow', 0.015))
+                        override_used = True
                     tau_superslow = float(em_settings.get('tau_decay_superslow', fitted.get('tau_decay_superslow', 0.040))) if is_tri else None
 
                     # Apply cap to tau_decay_slow if specified
@@ -2890,7 +2890,7 @@ def extract_metrics(
                             return y / max(peak_val, 1e-12)
 
                     _VARIANT_KERNEL_BUILDER = _iglusnfr_variant_builder_fitted
-                    override_msg = " (OVERRIDDEN)" if ('tau_decay_fast' in em_settings or 'tau_decay_slow' in em_settings) else ""
+                    override_msg = " (OVERRIDDEN)" if override_used else ""
                     if is_tri:
                         progress_print(f"[model] Updated tri-exp variant kernel{override_msg}: tau_fast={tau_fast*1000:.2f}ms, tau_slow={tau_slow*1000:.2f}ms, tau_superslow={tau_superslow*1000:.2f}ms")
                     else:
