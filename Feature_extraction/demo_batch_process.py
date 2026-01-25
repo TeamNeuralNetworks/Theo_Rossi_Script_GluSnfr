@@ -60,8 +60,8 @@ def _build_data_folders(base_dir: str, subfolders: list[str]) -> list[str]:
 
 
 # Input listed above
-VIEW_ONLY = True
-TARGET_BOUTON = "20210721_linescan1_50Hz_10pulses_4mMCa_bouton4_traces_converted"
+VIEW_ONLY = False
+TARGET_BOUTON = ''#"20210721_linescan1_50Hz_10pulses_4mMCa_bouton4_traces_converted"
 DATA_ROOT = r"C:\\Users\\Antoine.Valera\\Desktop\\PPR_DATA_FINAL"
 SUBFOLDERS = [
     "Stability_Before",
@@ -79,7 +79,7 @@ SUBFOLDERS = [
     "Theo_4_50Hz",
 ]
 folders = _build_data_folders(DATA_ROOT, SUBFOLDERS)
-root_out = os.path.join(DATA_ROOT, "Testout")
+root_out = os.path.join(DATA_ROOT, "Testout_BiExp")  # BiExp results
 os.makedirs(root_out, exist_ok=True)
 
 # Per-folder train_start (seconds). Default 0.998; override selected folders to 0.498
@@ -194,17 +194,20 @@ for in_dir in folders:
                 'anchor_first_tau': False,
 
                 # === Event Model ===
-                'event_model': 'iglusnfr',  # Specifically optimized for iGluSnFR S72A
+                'event_model': 'iglusnfr',  # Bi-exponential iGluSnFR - stable, ~12.7% RMS
 
                 # === Parameter Bounds (NEW - replaces event_model_settings + max_tau_decay_slow) ===
                 # Format: {'param_name': (lower, upper)}
                 # - Use (value, value) to force a fixed value
                 # - Use (np.nan, np.nan) or None for unconstrained
                 'parameter_bounds': {
-                    'tau_decay_fast': (0.001, 0.010),  # Reasonable range for fast component
-                    'tau_decay_slow': (0.010, 0.050),  # Cap slow component at 50ms max
-                    'tau_rise': (np.nan, np.nan),       # Unconstrained
+                    'tau_decay_fast': (0.001, 0.008),  # Reasonable range for fast component
+                    'tau_decay_slow': (0.008, 0.050),  # Cap slow component at 50ms max
+                    'tau_rise': (np.nan, np.nan),       # Unconstrained                    # tau_decay_slow: auto from post-train decay (no constraint needed)
                 },
+
+                # Use all events for averaging (0 = all, N = first N only)
+                'early_events_only': 0,
 
                 # === Recut/Averaging ===
                 'recut_projection': 'mean',
@@ -277,13 +280,13 @@ for in_dir in folders:
                 # Enable multi-template NNLS: test multiple slow/fast ratios per event
                 # NNLS automatically selects best combination based on residuals
                 'use_template_variants': True,  # Set to True to enable
-                'template_variant_ratios': np.arange(0.0, 1.0, 0.1),  # Slow component fractions to test
+                # For tri-exp: frac_slow controls progressive shift fast→slow→superslow
+                'template_variant_ratios': np.arange(0.0, 1.01, 0.1),  # 11 ratio values from 0 to 1
 
                 # === Jitter Variants (NEW) ===
-                # Enable temporal jitter search in milliseconds (more intuitive than delta_max_s, etc.)
-                # Can be used alone OR combined with template variants for full grid search
-                # Example: np.arange(-2.0, 2.1, 0.2) tests jitters from -2ms to +2ms in 0.2ms steps
-                'jitter_variant_ms': np.arange(-1.0, 1.1, 0.25),  # Set to None to disable jitter search
+                # Enable temporal jitter search in milliseconds
+                # Reduced range to prevent NNLS convergence issues
+                'jitter_variant_ms': np.arange(-3.0, 3.1, 1.0),  # ±3ms in 1ms steps (7 values)
             },
             'double_exp_default': {
                 # === Preprocessing ===

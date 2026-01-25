@@ -93,7 +93,7 @@ ISI = 0.02  # Current: 50Hz
 # === TRI-EXPONENTIAL FLAG ===
 # Set to True for tri-exponential model (3 decay components: fast, slow, superslow)
 # Set to False for bi-exponential model (2 decay components: fast, slow) - more stable
-USE_TRI_EXPONENTIAL = True  # Testing tri-exponential
+USE_TRI_EXPONENTIAL = False  # BiExp: stable, ~12.7% RMS. TriExp: experimental, needs tuning
 
 out_dir = os.path.join(DATA_ROOT, "Testout")
 
@@ -223,15 +223,25 @@ options_presets = {
         # === Event Model (controlled by USE_TRI_EXPONENTIAL flag) ===
         'event_model': 'iglusnfr_tri' if USE_TRI_EXPONENTIAL else 'iglusnfr',
         # iglusnfr: Bi-exponential (fast 1-10ms, slow from post-train decay)
-        # iglusnfr_tri: Tri-exponential (fast 1-10ms, slow 10-25ms, superslow from post-train)
+        # iglusnfr_tri: Tri-exponential (fast 1-5ms, slow 10-25ms, superslow from post-train)
+        
+        # === Event Model Settings (initial tau values for NNLS kernels) ===
+        'event_model_settings': {
+            'tau_decay_fast': 0.003,     # 3ms fast component (reasonable for iGluSnFR3v)
+            'tau_decay_slow': 0.015,     # 15ms intermediate component
+            # tau_decay_superslow: comes from post-train decay fitting
+        } if USE_TRI_EXPONENTIAL else {},
 
         # === Parameter Bounds (auto-configured based on model) ===
         'parameter_bounds': {
-            'tau_decay_fast': (0.001, 0.010),      # 1-10ms fast component
-            'tau_decay_slow': (0.010, 0.025),      # 10-25ms (only used for tri-exp)
-            # tau_decay_slow (bi-exp) or tau_decay_superslow (tri-exp): auto from post-train
+            'tau_decay_fast': (0.001, 0.006),     # 1-6ms fast component
+            'tau_decay_slow': (0.008, 0.030),     # 8-30ms intermediate
+            # tau_decay_superslow: auto from post-train decay (typically 30-50ms)
         } if USE_TRI_EXPONENTIAL else {
-            'tau_decay_fast': (0.001, 0.010),      # 1-10ms fast component
+            #'tau_decay_fast': (0.001, 0.010),      # 1-10ms fast component
+            'tau_decay_fast': (0.001, 0.010),  # Reasonable range for fast component
+            'tau_decay_slow': (0.010, 0.150),  # Cap slow component at 50ms max
+            'tau_rise': (np.nan, np.nan),       # Unconstrained
             # tau_decay_slow: auto from post-train decay (no constraint needed)
         },
         
@@ -311,12 +321,13 @@ options_presets = {
         # Enable multi-template NNLS: test multiple slow/fast ratios per event
         # NNLS automatically selects best combination based on residuals
         'use_template_variants': True,  # Set to True to enable
-        'template_variant_ratios': np.arange(0.0, 1.0, 0.1),  # Slow component fractions to test
+        # For tri-exp: frac_slow controls progressive shift fast→slow→superslow
+        'template_variant_ratios': np.arange(0.0, 1.01, 0.1),  # 11 ratio values from 0 to 1
 
         # === Jitter Variants (NEW) ===
         # Enable temporal jitter search in milliseconds
-        # Wide range to handle template timing mismatch
-        'jitter_variant_ms': np.arange(-5.0, 5.1, 0.5),  # ±5ms in 0.5ms steps
+        # Reduced range to prevent NNLS convergence issues
+        'jitter_variant_ms': np.arange(-3.0, 3.1, 1.0),  # ±3ms in 1ms steps (7 values)
     },
     
     # Minimal preset showing only changed values (others use defaults)

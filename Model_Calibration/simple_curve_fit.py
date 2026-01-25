@@ -335,14 +335,14 @@ def fit_average_event(
                     return float(min(max(v, lo), hi))
                 
                 # Grids for key parameters with NON-OVERLAPPING ranges
-                # tau_rise: 0.5-4ms, tau_fast: 1-10ms, tau_slow: 10-25ms, tau_superslow: 25-100ms
-                tau_rise_grid = np.array([_clip(x, lb[1], ub[1]) for x in (0.001, 0.002, 0.003, 0.004)])
-                tau_fast_grid = np.array([_clip(x, lb[2], ub[2]) for x in (0.002, 0.003, 0.005, 0.007, 0.010)])
-                tau_slow_grid = np.array([_clip(x, lb[3], ub[3]) for x in (0.012, 0.015, 0.020, 0.025)])
+                # tau_rise: 0.3-3ms, tau_fast: 0.5-8ms, tau_slow: 8-35ms, tau_superslow: 25-100ms
+                tau_rise_grid = np.array([_clip(x, lb[1], ub[1]) for x in (0.0003, 0.0005, 0.001, 0.002, 0.003)])
+                tau_fast_grid = np.array([_clip(x, lb[2], ub[2]) for x in (0.0005, 0.001, 0.002, 0.004, 0.006, 0.008)])
+                tau_slow_grid = np.array([_clip(x, lb[3], ub[3]) for x in (0.010, 0.015, 0.020, 0.030)])
                 # tau_superslow often fixed from post-train decay, use narrower grid
-                tau_superslow_grid = np.array([_clip(x, lb[4], ub[4]) for x in (0.030, 0.045, 0.060)])
-                frac_fast_grid = np.array([_clip(x, lb[5], ub[5]) for x in (0.5, 0.65, 0.8)])
-                frac_slow_grid = np.array([_clip(x, lb[6], ub[6]) for x in (0.15, 0.25)])  # Intermediate fraction
+                tau_superslow_grid = np.array([_clip(x, lb[4], ub[4]) for x in (0.030, 0.050, 0.080, 0.120)])
+                frac_fast_grid = np.array([_clip(x, lb[5], ub[5]) for x in (0.4, 0.55, 0.7, 0.85)])
+                frac_slow_grid = np.array([_clip(x, lb[6], ub[6]) for x in (0.10, 0.20, 0.30)])  # Intermediate fraction
                 
                 # Find peak location in data
                 peak_idx = np.argmax(yf)
@@ -446,10 +446,41 @@ def fit_average_event(
         except Exception:
             sigma = None
         
+        # Store grid search p0 for tri-exp fallback validation
+        grid_search_p0 = p0.copy() if spec.get('name', '').lower() == 'iglusnfr_tri' else None
+        
         popt, _ = curve_fit(
             spec['func'], tf, yf, p0=p0, bounds=spec['bounds'], maxfev=maxfev,
             sigma=sigma, absolute_sigma=False
         )
+        
+        # For tri-exponential: validate curve_fit results and fallback to grid search if needed
+        if spec.get('name', '').lower() == 'iglusnfr_tri' and grid_search_p0 is not None:
+            # Check if curve_fit produced extreme tau values that differ greatly from grid search
+            # Indices: 2=tau_fast, 3=tau_slow, 4=tau_superslow
+            tau_fast_cf = popt[2]
+            tau_slow_cf = popt[3]
+            tau_ss_cf = popt[4]
+            tau_fast_gs = grid_search_p0[2]
+            tau_slow_gs = grid_search_p0[3]
+            tau_ss_gs = grid_search_p0[4]
+            
+            # Check for unreasonable deviations (>5x different from grid search)
+            use_grid_search = False
+            if tau_slow_cf > tau_slow_gs * 5 or tau_slow_cf < tau_slow_gs / 5:
+                use_grid_search = True
+            if tau_ss_cf > tau_ss_gs * 3 or tau_ss_cf < tau_ss_gs / 3:
+                use_grid_search = True
+                
+            if use_grid_search:
+                try:
+                    from smoothing import progress_print
+                    progress_print(f"[fit_average_event] TRI curve_fit produced extreme values, using grid search instead")
+                    progress_print(f"[fit_average_event] curve_fit: tau_fast={tau_fast_cf*1000:.1f}ms, tau_slow={tau_slow_cf*1000:.1f}ms, tau_superslow={tau_ss_cf*1000:.1f}ms")
+                except Exception:
+                    pass
+                popt = np.array(grid_search_p0)
+        
         params = {name: float(val) for name, val in zip(spec['params'], popt)}
         # If caller requested recut snippets, attach them to the params dict
         # so callers that call this helper via the pipeline can access them

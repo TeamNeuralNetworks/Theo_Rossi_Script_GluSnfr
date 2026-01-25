@@ -299,10 +299,21 @@ def estimate_tau_from_post_train_decay(
                 maxfev=1000
             )
             tau_fitted = float(popt[1])
+            amp_fitted = float(popt[0])
             
             # Log the result
             from smoothing import progress_print
             progress_print(f"[post-train] Estimated tau_slow from decay: {tau_fitted*1000:.1f} ms")
+            
+            # Store fit info globally for plotting (post_train_start is absolute time)
+            global _POST_TRAIN_DECAY_FIT
+            _POST_TRAIN_DECAY_FIT = {
+                'tau': tau_fitted,
+                'amp': amp_fitted,
+                'baseline': baseline,
+                't_start': post_train_start,
+                't_end': post_train_end,
+            }
             
             return tau_fitted
             
@@ -311,6 +322,9 @@ def estimate_tau_from_post_train_decay(
             
     except Exception:
         return None
+
+# Global storage for post-train decay fit (for plotting)
+_POST_TRAIN_DECAY_FIT = None
 
 
 def _calculate_nnls_weights(
@@ -1643,22 +1657,27 @@ def extract_metrics(
 
                 if is_tri:
                     def _iglusnfr_variant_builder(dt: np.ndarray, tau_r: float, tau_d: float, frac_slow: float) -> np.ndarray:
-                        """Build tri-exponential iGluSnFR kernel with varying slow/superslow ratio.
+                        """Build tri-exponential iGluSnFR kernel with varying slow component.
                         
-                        LEGACY: Match bi-exponential unit handling (tau_d*1000 for fast only)
-                        This preserves consistency with the working bi-exponential behavior.
+                        For tri-exp: frac_slow controls total slow fraction (intermediate + superslow):
+                        - frac_slow=0: 100% fast, 0% intermediate, 0% superslow
+                        - frac_slow=0.5: 50% fast, 25% intermediate, 25% superslow  
+                        - frac_slow=1: 0% fast, 50% intermediate, 50% superslow
+                        This ensures both intermediate and superslow contribute at high frac_slow.
                         """
                         dt_ms = dt * 1000.0
+                        # frac_slow = total slow fraction; split evenly between intermediate and superslow
                         frac_fast = 1.0 - frac_slow
-                        # For tri-exp: frac_slow is split between intermediate and superslow
-                        frac_intermediate = frac_slow * 0.6  # 60% of slow goes to intermediate
-                        # LEGACY: tau_d is in seconds, convert to ms (like bi-exp)
-                        tau_fast_ms = tau_d * 1000.0 if tau_d > 0 else base_params['tau_decay_fast']
+                        frac_intermediate = frac_slow * 0.5  # half of slow goes to intermediate
+                        frac_superslow = frac_slow * 0.5     # half of slow goes to superslow
+                        # For tri-exp: ALWAYS use base_params tau values (from event_model_settings)
+                        # Ignore tau_d from grid search - it's unreliable for tri-exp
+                        tau_fast_s = base_params.get('tau_decay_fast', 0.003)  # in seconds
                         params = [
                             1.0,  # amp
                             tau_r,  # tau_rise from global fit
-                            tau_fast_ms,  # tau_decay_fast (tau_d*1000 like bi-exp)
-                            base_params['tau_decay_slow'],  # tau_decay_slow (in seconds, NOT *1000)
+                            tau_fast_s,  # tau_decay_fast in SECONDS (model handles conversion)
+                            base_params['tau_decay_slow'],  # tau_decay_slow (in seconds)
                             base_params['tau_decay_superslow'],  # tau_decay_superslow (in seconds)
                             frac_fast,  # frac_fast varies
                             frac_intermediate,  # frac_slow (intermediate)
@@ -2317,9 +2336,10 @@ def extract_metrics(
             # For tri-exponential model: post-train decay gives tau_superslow
             if event_model == 'iglusnfr_tri':
                 if 'tau_decay_superslow' not in param_bounds:
-                    # Super-slow is directly from post-train decay (25-150ms range)
-                    lower_ss = max(0.025, tau_slow_from_decay * 0.7)
-                    upper_ss = min(0.150, tau_slow_from_decay * 1.5)
+                    # Super-slow is directly from post-train decay - use tight bounds (±20%)
+                    # This ensures the final decay matches the actual post-train kinetics
+                    lower_ss = max(0.020, tau_slow_from_decay * 0.8)
+                    upper_ss = min(0.120, tau_slow_from_decay * 1.2)
                     param_bounds['tau_decay_superslow'] = (lower_ss, upper_ss)
                     progress_print(f"[global] tau_superslow bounds: {lower_ss*1000:.1f}-{upper_ss*1000:.1f} ms (from post-train: {tau_slow_from_decay*1000:.1f}ms)")
             else:
@@ -2435,18 +2455,20 @@ def extract_metrics(
                         def _iglusnfr_variant_builder_fitted(dt: np.ndarray, tau_r: float, tau_d: float, frac_slow: float) -> np.ndarray:
                             """Build tri-exponential iGluSnFR kernel using FITTED kinetics.
                             
-                            LEGACY: Match bi-exponential unit handling (tau_d*1000 for fast only)
+                            frac_slow controls total slow fraction, split evenly between intermediate and superslow.
+                            This ensures balanced contribution from both slow components.
                             """
                             dt_ms = dt * 1000.0
+                            # Split total slow evenly between intermediate and superslow
                             frac_fast = 1.0 - frac_slow
-                            # Split frac_slow between intermediate and superslow
-                            frac_intermediate = frac_slow * 0.60
-                            # LEGACY: tau_d is in seconds, convert to ms (like bi-exp)
-                            tau_fast_ms = tau_d * 1000.0 if tau_d > 0 else fitted_params['tau_decay_fast']
+                            frac_intermediate = frac_slow * 0.5  # half of slow to intermediate
+                            frac_superslow = frac_slow * 0.5     # half of slow to superslow
+                            # For tri-exp: ALWAYS use fitted_params tau values
+                            tau_fast_s = fitted_params.get('tau_decay_fast', 0.003)  # in seconds
                             params = [
                                 1.0,  # amp (will be normalized)
                                 tau_r,  # tau_rise from global fit
-                                tau_fast_ms,  # FITTED fast decay (tau_d*1000 like bi-exp)
+                                tau_fast_s,  # tau_decay_fast in SECONDS
                                 fitted_params['tau_decay_slow'],  # FITTED slow decay (in seconds)
                                 fitted_params['tau_decay_superslow'],  # FITTED superslow decay (in seconds)
                                 frac_fast,  # fast fraction varies
@@ -3267,6 +3289,31 @@ def extract_metrics(
             progress_print(f"[NNLS fit] RMS error: {rms_error:.4f}, Signal RMS: {signal_rms:.4f}, Relative error: {relative_error:.2f}%")
             progress_print(f"[NNLS fit] Amplitudes: {[f'{a:.3f}' for a in a_avg[:min(5, len(a_avg))]]}")
             progress_print(f"[NNLS fit] Jitter (ms): {[f'{d*1000:.2f}' for d in d_avg[:min(5, len(d_avg))]]}")
+            
+            # Per-event RMS breakdown (train events + post-train decay)
+            per_event_rms = []
+            for i, st in enumerate(stim_times):
+                # Event window: from stim to stim+ISI (or next stim)
+                ev_start = float(st)
+                ev_end = float(st) + float(isi) if i < len(stim_times) - 1 else float(st) + float(isi)
+                ev_mask = (t >= ev_start) & (t < ev_end)
+                if np.any(ev_mask):
+                    ev_resid = y_avg[ev_mask] - yhat_avg[ev_mask]
+                    ev_rms = np.sqrt(np.nanmean(ev_resid**2))
+                    per_event_rms.append(ev_rms)
+                else:
+                    per_event_rms.append(np.nan)
+            # Post-train decay RMS (from last stim + ISI to end of zoom)
+            post_start = float(stim_times[-1]) + float(isi)
+            post_end = float(train_start) + float(isi) * int(n_pulses) + cfg['post_zoom_s']
+            post_mask = (t >= post_start) & (t < post_end)
+            if np.any(post_mask):
+                post_resid = y_avg[post_mask] - yhat_avg[post_mask]
+                post_rms = np.sqrt(np.nanmean(post_resid**2))
+            else:
+                post_rms = np.nan
+            progress_print(f"[NNLS fit] Per-event RMS: {[f'{r:.3f}' for r in per_event_rms]}")
+            progress_print(f"[NNLS fit] Post-train decay RMS: {post_rms:.3f}")
     except Exception as e:
         progress_print(f"[NNLS fit] Diagnostic failed: {e}")
 
@@ -3656,6 +3703,24 @@ def extract_metrics(
                 ax.scatter(peak_ts, resid_vals, s=60, marker='v', facecolors='white', edgecolors='tab:red', linewidths=1.0, zorder=5, label='residual at peak')
             except Exception:
                 pass
+                
+        # Overlay post-train decay fit (green dashed line)
+        try:
+            global _POST_TRAIN_DECAY_FIT
+            if _POST_TRAIN_DECAY_FIT is not None:
+                pt_fit = _POST_TRAIN_DECAY_FIT
+                t_start = pt_fit['t_start']
+                t_end = pt_fit['t_end']
+                tau = pt_fit['tau']
+                amp = pt_fit['amp']
+                baseline = pt_fit['baseline']
+                # Generate fit curve
+                t_fit = np.linspace(t_start, t_end, 100)
+                y_fit = amp * np.exp(-(t_fit - t_start) / tau) + baseline
+                ax.plot(t_fit, y_fit, 'g--', lw=2.0, alpha=0.8, label=f'post-train fit (τ={tau*1000:.1f}ms)')
+        except Exception:
+            pass
+            
         ax.set_xlim(z0, z1)
         ax.set_xlabel('Time (s)')
         ax.set_ylabel('ΔF/F0' if use_dff else 'ΔF')

@@ -36,11 +36,11 @@ import numpy as np
 # For tri-exponential, tau_secondary is narrower (10-25ms) and tau_tertiary
 # handles the super-slow component.
 FIT_LIMITS: Dict[str, Tuple[float, float]] = {
-    't_peak': (0.0, 10.0),
+    't_peak': (-2.0, 10.0),          # Peak location: -2 to +10 ms
     'tau': (0.001, 0.300),           # Generic tau up to 300ms
-    'tau_primary': (0.0005, 0.010),  # Fast: 0.5-10ms (rise, fast decay)
-    'tau_secondary': (0.010, 0.300), # Slow: 10-300ms (for bi-exponential)
-    'tau_tertiary': (0.025, 0.150),  # Super-slow: 25-150ms (for tri-exponential)
+    'tau_primary': (0.0003, 0.010),  # Fast: 0.3-10ms (rise, fast decay) - allow very fast
+    'tau_secondary': (0.008, 0.300), # Slow: 8-300ms (for bi-exponential or intermediate)
+    'tau_tertiary': (0.020, 0.200),  # Super-slow: 20-200ms (for tri-exponential) - wider range
 }
 
 
