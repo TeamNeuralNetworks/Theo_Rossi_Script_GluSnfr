@@ -179,8 +179,16 @@ def fit_average_event(
             baseline = float(np.median(yf[:baseline_len]))
             # Find peak
             peak = float(np.nanmax(yf))
-            # Compute threshold level
-            threshold_level = baseline + onset_baseline_threshold * (peak - baseline)
+            # Compute threshold level as a fraction of the baseline-to-peak range
+            frac = float(onset_baseline_threshold)
+            if frac > 1.0:
+                frac = frac / 100.0
+            frac = max(0.0, min(1.0, frac))
+            threshold_level = baseline + frac * (peak - baseline)
+            # Ensure threshold stays within [min(baseline, peak), max(baseline, peak)]
+            lo = min(baseline, peak)
+            hi = max(baseline, peak)
+            threshold_level = float(min(max(threshold_level, lo), hi))
             # Find first point that crosses threshold
             above_threshold = yf >= threshold_level
             if np.any(above_threshold):
@@ -547,10 +555,31 @@ def fit_average_event(
             params[0] = max(amp, 0.0)
             return params
 
-        popt, _ = curve_fit(
-            spec['func'], tf, yf, p0=p0, bounds=spec['bounds'], maxfev=maxfev,
-            sigma=sigma, absolute_sigma=False
-        )
+        maxfev_eff = int(maxfev)
+        try:
+            model_name = spec.get('name', '').lower()
+            if model_name in ('iglusnfr', 'iglusnfr_tri'):
+                maxfev_eff = int(maxfev_eff * 3)
+        except Exception:
+            maxfev_eff = int(maxfev)
+
+        curve_fit_failed = False
+        try:
+            popt, _ = curve_fit(
+                spec['func'], tf, yf, p0=p0, bounds=spec['bounds'], maxfev=maxfev_eff,
+                sigma=sigma, absolute_sigma=False
+            )
+        except Exception as e:
+            curve_fit_failed = True
+            if grid_search_best is not None:
+                popt = np.array(grid_search_best['params'], float)
+                try:
+                    from smoothing import progress_print
+                    progress_print(f"[fit_average_event] curve_fit failed ({type(e).__name__}); using grid search params")
+                except Exception:
+                    pass
+            else:
+                popt = np.array(p0, float)
 
         # Multi-start from paired grid seeds if curve_fit is clearly worse than grid search
         try:

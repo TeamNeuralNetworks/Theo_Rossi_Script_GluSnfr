@@ -76,29 +76,29 @@ DATA_ROOT = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL"
 xlsx_path = os.path.join(
     DATA_ROOT,
     "Theo_4_50Hz",
-    "20210721_linescan1_50Hz_10pulses_4mMCa_bouton4_traces_converted.xlsx",
+    "20210721_linescan1_50Hz_10pulses_4mMCa_bouton6_traces_converted.xlsx",
 )
 
-xlsx_path = os.path.join(
-    DATA_ROOT,
-    "WT_Anthime",
-    "241212_Fibre1_PortionB_bouton9.xlsx",
-)
+# xlsx_path = os.path.join(
+#     DATA_ROOT,
+#     "WT_Anthime",
+#     "241212_Fibre1_PortionB_bouton9.xlsx",
+# )
 
 START = 0.498
-START = START + 0.5
+# START = START + 0.5
 
 # === Inter-Stimulus Interval (ISI) ===
 # Set this based on your stimulation frequency:
 # ISI = 0.05  # 20Hz stimulation
 # ISI = 0.02  # 50Hz stimulation
 # ISI = 0.01  # 100Hz stimulation
-ISI = 0.05  # Current: 20Hz
+ISI = 0.02  # Current: 50Hz
 
 # === TRI-EXPONENTIAL FLAG ===
 # Set to True for tri-exponential model (3 decay components: fast, slow, superslow)
 # Set to False for bi-exponential model (2 decay components: fast, slow) - more stable
-USE_TRI_EXPONENTIAL = False  # BiExp: stable, ~12.7% RMS. TriExp: experimental, needs tuning
+USE_TRI_EXPONENTIAL = True  # BiExp: stable, ~12.7% RMS. TriExp: experimental, needs tuning
 
 out_dir = os.path.join(DATA_ROOT, "Testout")
 
@@ -110,9 +110,9 @@ ISI_MS = ISI * 1000.0  # Convert to milliseconds
 # Peak detection window: should be < ISI to avoid next pulse
 # Use 50-70% of ISI for fast stim, capped at 25ms for slow stim
 if ISI_MS < 30.0:
-    PEAK_WINDOW_MS = max(8.0, ISI_MS * 0.6)  # 60% of ISI, min 8ms
+    PEAK_WINDOW_MS = max(8.0, ISI_MS * 0.5)  # 90% of ISI, min 8ms
 else:
-    PEAK_WINDOW_MS = min(25.0, ISI_MS * 0.7)  # Standard window for slow stim
+    PEAK_WINDOW_MS = min(25.0, ISI_MS * 0.3)  # Standard window for slow stim
 
 # Zoom windows for plotting and analysis
 # For fast stim: limit to avoid excessive overlap visualization
@@ -232,26 +232,26 @@ options_presets = {
         
         # === Event Model Settings (initial tau values for NNLS kernels) ===
         'event_model_settings': {
-            'tau_decay_fast': 0.003,     # 3ms fast component (reasonable for iGluSnFR3v)
+            'tau_decay_fast': 0.008,     # 8ms fast component (reasonable for iGluSnFR3v)
             'tau_decay_slow': 0.015,     # 15ms intermediate component
             # tau_decay_superslow: comes from post-train decay fitting
         } if USE_TRI_EXPONENTIAL else {},
 
         # === Parameter Bounds (auto-configured based on model) ===
         'parameter_bounds': {
-            'tau_decay_fast': (0.001, 0.006),     # 1-6ms fast component
-            'tau_decay_slow': (0.008, 0.030),     # 8-30ms intermediate
+            'tau_decay_fast': (0.003, 0.010),     # 1-10ms fast component
+            'tau_decay_slow': (0.010, 0.035),     # 8-30ms intermediate
+            'tau_decay_superslow': (0.038, 0.042),  # 35-100ms superslow
             # tau_decay_superslow: auto from post-train decay (typically 30-50ms)
         } if USE_TRI_EXPONENTIAL else {
-            #'tau_decay_fast': (0.001, 0.010),      # 1-10ms fast component
-            'tau_decay_fast': (0.001, 0.010),  # Reasonable range for fast component
-            'tau_decay_slow': (0.010, 0.150),  # Cap slow component at 50ms max
+            'tau_decay_fast': (0.003, 0.010),  # Reasonable range for fast component
+            'tau_decay_slow': (0.010, 0.035),  # Cap slow component at 35ms max
             'tau_rise': (np.nan, np.nan),       # Unconstrained
             # tau_decay_slow: auto from post-train decay (no constraint needed)
         },
         
         # Use all events for averaging
-        'early_events_only': 0,
+        'early_events_only': 3,
 
         # === Recut/Averaging ===
         'recut_projection': 'mean',

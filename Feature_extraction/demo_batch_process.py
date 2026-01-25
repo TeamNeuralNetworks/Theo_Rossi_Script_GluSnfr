@@ -198,7 +198,7 @@ for in_dir in folders:
 
                 # === Event Model Settings (initial tau values for NNLS kernels) ===
                 'event_model_settings': {
-                    'tau_decay_fast': 0.003,
+                    'tau_decay_fast': 0.008,
                     'tau_decay_slow': 0.015,
                 },
 
