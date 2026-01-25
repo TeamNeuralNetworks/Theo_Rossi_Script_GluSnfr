@@ -199,6 +199,28 @@ def fit_average_event(
             tf = tf[onset_idx:]
             yf = yf[onset_idx:]
 
+        # Fit error should ignore pre-stim (t<0) and pre-onset samples
+        if tf.size:
+            fit_start_ms = max(0.0, float(tf[0]))
+        else:
+            fit_start_ms = 0.0
+        early_window_ms = 0.005
+        early_boost = 2.0
+        decay_boost = 2.0
+        amp_floor = 0.2
+        amp_scale = 0.8
+        amp_weight = np.ones_like(yf)
+        try:
+            fit_mask_full = tf >= fit_start_ms
+            if np.any(fit_mask_full):
+                abs_y = np.abs(yf)
+                max_abs = float(np.nanmax(abs_y[fit_mask_full]))
+                if np.isfinite(max_abs) and max_abs > 0:
+                    amp_norm = abs_y / max_abs
+                    amp_weight = amp_floor + amp_scale * amp_norm
+        except Exception:
+            amp_weight = np.ones_like(yf)
+
         p0 = spec['p0_func'](yf, tf)
         # Robust seeding for two_step_binding: quick coarse grid search
         # to avoid local minima/stagnation at defaults.
@@ -247,6 +269,15 @@ def fit_average_event(
             pass
         
         # Robust seeding for iGluSnFR: grid search over key parameters
+        grid_search_best = None
+        tau_rise_grid = None
+        tau_fast_grid = None
+        tau_slow_grid = None
+        tau_superslow_grid = None
+        frac_fast_grid = None
+        frac_slow_grid = None
+        tp_grid = None
+        tp_data = None
         # Critical for high-frequency trains where the short fitting window makes
         # curve_fit sensitive to initial conditions
         try:
@@ -291,9 +322,20 @@ def fit_average_event(
                                     if amp <= 0:
                                         continue
                                     r = yf - amp * yshape
-                                    # Weight residuals: emphasize post-peak fit (t > t_peak)
-                                    weights = np.ones_like(r)
-                                    weights[tf > tp] = 2.0  # Double weight for decay portion
+                                    # Weight residuals: ignore pre-stim/onset; emphasize early and decay
+                                    weights = np.zeros_like(r)
+                                    fit_mask = tf >= fit_start_ms
+                                    if np.any(fit_mask):
+                                        weights[fit_mask] = 1.0
+                                        early_mask = (tf >= fit_start_ms) & (tf <= fit_start_ms + early_window_ms)
+                                        if np.any(early_mask):
+                                            weights[early_mask] = np.maximum(weights[early_mask], early_boost)
+                                        decay_mask = tf > tp
+                                        if np.any(decay_mask):
+                                            weights[decay_mask] = np.maximum(weights[decay_mask], decay_boost)
+                                        weights[fit_mask] = weights[fit_mask] * amp_weight[fit_mask]
+                                    else:
+                                        weights = np.ones_like(r)
                                     sse = float(np.sum(weights * r ** 2))
                                     if sse < best[0]:
                                         best = (sse, amp, tr, tdf, tds, ff, tp)
@@ -301,6 +343,10 @@ def fit_average_event(
                 if best[0] < np.inf:
                     _, amp_b, tr_b, tdf_b, tds_b, ff_b, tp_b = best
                     p0 = [float(amp_b), float(tr_b), float(tdf_b), float(tds_b), float(ff_b), float(tp_b)]
+                    grid_search_best = {
+                        'sse': float(best[0]),
+                        'params': p0.copy(),
+                    }
                     
                     # Dynamically constrain bounds based on grid search results
                     # This prevents curve_fit from diverging to edge solutions
@@ -378,9 +424,20 @@ def fit_average_event(
                                             if amp <= 0:
                                                 continue
                                             r = yf - amp * yshape
-                                            # Weight residuals: emphasize post-peak fit
-                                            weights = np.ones_like(r)
-                                            weights[tf > tp] = 2.0
+                                            # Weight residuals: ignore pre-stim/onset; emphasize early and decay
+                                            weights = np.zeros_like(r)
+                                            fit_mask = tf >= fit_start_ms
+                                            if np.any(fit_mask):
+                                                weights[fit_mask] = 1.0
+                                                early_mask = (tf >= fit_start_ms) & (tf <= fit_start_ms + early_window_ms)
+                                                if np.any(early_mask):
+                                                    weights[early_mask] = np.maximum(weights[early_mask], early_boost)
+                                                decay_mask = tf > tp
+                                                if np.any(decay_mask):
+                                                    weights[decay_mask] = np.maximum(weights[decay_mask], decay_boost)
+                                                weights[fit_mask] = weights[fit_mask] * amp_weight[fit_mask]
+                                            else:
+                                                weights = np.ones_like(r)
                                             sse = float(np.sum(weights * r ** 2))
                                             if sse < best[0]:
                                                 best = (sse, amp, tr, tdf, tds, tdss, ff, fs, tp)
@@ -388,6 +445,10 @@ def fit_average_event(
                 if best[0] < np.inf:
                     _, amp_b, tr_b, tdf_b, tds_b, tdss_b, ff_b, fs_b, tp_b = best
                     p0 = [float(amp_b), float(tr_b), float(tdf_b), float(tds_b), float(tdss_b), float(ff_b), float(fs_b), float(tp_b)]
+                    grid_search_best = {
+                        'sse': float(best[0]),
+                        'params': p0.copy(),
+                    }
                     
                     try:
                         from smoothing import progress_print
@@ -414,6 +475,12 @@ def fit_average_event(
                 mid_decay_mask = (tf > t_peak + 0.005) & (tf <= t_peak + 0.010)
                 sigma[mid_decay_mask] = 0.6  # ~1.7x higher weight
                 # Standard weight for late decay and rise
+                # Boost early post-stim window to stabilize tau_rise
+                early_mask = (tf >= fit_start_ms) & (tf <= fit_start_ms + early_window_ms)
+                if np.any(early_mask):
+                    sigma[early_mask] = np.minimum(sigma[early_mask], 0.5)
+                # Use data amplitude to weight the fit (higher amplitude => higher weight)
+                sigma = sigma / np.sqrt(np.maximum(amp_weight, 1e-6))
                 
                 # If fixed_tau_slow provided, lock tau_decay_slow bounds (or tau_decay_superslow for tri-exp)
                 if fixed_tau_slow is not None:
@@ -448,11 +515,168 @@ def fit_average_event(
         
         # Store grid search p0 for tri-exp fallback validation
         grid_search_p0 = p0.copy() if spec.get('name', '').lower() == 'iglusnfr_tri' else None
-        
+
+        def _weighted_sse(params):
+            y_fit = spec['func'](tf, *params)
+            r = yf - y_fit
+            t_peak = float(params[-1])
+            weights = np.zeros_like(r)
+            fit_mask = tf >= fit_start_ms
+            if np.any(fit_mask):
+                weights[fit_mask] = 1.0
+                early_mask = (tf >= fit_start_ms) & (tf <= fit_start_ms + early_window_ms)
+                if np.any(early_mask):
+                    weights[early_mask] = np.maximum(weights[early_mask], early_boost)
+                decay_mask = tf > t_peak
+                if np.any(decay_mask):
+                    weights[decay_mask] = np.maximum(weights[decay_mask], decay_boost)
+                weights[fit_mask] = weights[fit_mask] * amp_weight[fit_mask]
+            else:
+                weights = np.ones_like(r)
+            return float(np.sum(weights * r ** 2))
+
+        def _clip_p0(params):
+            lb, ub = spec['bounds']
+            return [float(min(max(v, lo), hi)) for v, lo, hi in zip(params, lb, ub)]
+
+        def _seed_with_amp(base_params):
+            params = [1.0] + list(base_params)
+            yshape = spec['func'](tf, *params)
+            denom = float(np.sum(yshape ** 2))
+            amp = float(np.sum(yf * yshape)) / denom if denom > 0 else 1.0
+            params[0] = max(amp, 0.0)
+            return params
+
         popt, _ = curve_fit(
             spec['func'], tf, yf, p0=p0, bounds=spec['bounds'], maxfev=maxfev,
             sigma=sigma, absolute_sigma=False
         )
+
+        # Multi-start from paired grid seeds if curve_fit is clearly worse than grid search
+        try:
+            model_name = spec.get('name', '').lower()
+            if (
+                grid_search_best is not None
+                and model_name in ('iglusnfr', 'iglusnfr_tri')
+                and tp_grid is not None
+                and tau_fast_grid is not None
+                and tau_slow_grid is not None
+                and tau_rise_grid is not None
+            ):
+                sse_curve = _weighted_sse(popt)
+                if sse_curve > grid_search_best['sse'] * 1.05:
+                    fast_n = len(tau_fast_grid)
+                    slow_n = len(tau_slow_grid)
+                    rise_n = len(tau_rise_grid)
+                    fast_idx = np.unique([0, 1, fast_n // 2, max(fast_n // 2 - 1, 0), fast_n - 1])
+                    slow_offsets = [0, 1, 2]
+                    tp_seeds = list(tp_grid)
+                    # Allow extra jitter when the fit is clearly off
+                    if tp_data is not None and sse_curve > grid_search_best['sse'] * 1.25:
+                        tp_seeds.extend([tp_data - 2.0, tp_data + 2.0])
+
+                    ff_seed = None
+                    fs_seed = None
+                    if grid_search_best is not None:
+                        if model_name == 'iglusnfr':
+                            ff_seed = float(grid_search_best['params'][4])
+                        else:
+                            ff_seed = float(grid_search_best['params'][5])
+                            fs_seed = float(grid_search_best['params'][6])
+                    if ff_seed is None and frac_fast_grid is not None:
+                        ff_seed = float(np.median(frac_fast_grid))
+                    if fs_seed is None and frac_slow_grid is not None:
+                        fs_seed = float(np.median(frac_slow_grid))
+
+                    candidates = []
+                    for i in fast_idx:
+                        i = int(i)
+                        tr = float(tau_rise_grid[min(i, rise_n - 1)])
+                        tdf = float(tau_fast_grid[i])
+                        for off in slow_offsets:
+                            j = min(i + off, slow_n - 1)
+                            tds = float(tau_slow_grid[j])
+                            if tdf >= tds:
+                                continue
+                            for tp in tp_seeds:
+                                if model_name == 'iglusnfr':
+                                    base = [tr, tdf, tds, float(ff_seed), float(tp)]
+                                    candidates.append(_seed_with_amp(base))
+                                else:
+                                    if tau_superslow_grid is None or frac_slow_grid is None:
+                                        continue
+                                    sup_n = len(tau_superslow_grid)
+                                    k = min(j + 1, sup_n - 1)
+                                    tdss = float(tau_superslow_grid[k])
+                                    if tds >= tdss:
+                                        continue
+                                    ff = float(ff_seed) if ff_seed is not None else 0.5
+                                    fs = float(fs_seed) if fs_seed is not None else 0.2
+                                    if ff + fs >= 0.95:
+                                        fs = max(0.05, 0.9 - ff)
+                                    base = [tr, tdf, tds, tdss, ff, fs, float(tp)]
+                                    candidates.append(_seed_with_amp(base))
+                                if len(candidates) >= 12:
+                                    break
+                            if len(candidates) >= 12:
+                                break
+                        if len(candidates) >= 12:
+                            break
+
+                    best_params = popt
+                    best_sse = sse_curve
+                    for cand in candidates:
+                        try:
+                            p0_c = _clip_p0(cand)
+                            popt_c, _ = curve_fit(
+                                spec['func'], tf, yf, p0=p0_c, bounds=spec['bounds'], maxfev=maxfev,
+                                sigma=sigma, absolute_sigma=False
+                            )
+                            sse_c = _weighted_sse(popt_c)
+                            if sse_c < best_sse:
+                                best_sse = sse_c
+                                best_params = popt_c
+                        except Exception:
+                            continue
+                    if best_sse < sse_curve * 0.98:
+                        popt = np.array(best_params, float)
+                        try:
+                            from smoothing import progress_print
+                            progress_print("[fit_average_event] Multi-start improved recut fit; using paired grid seed.")
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+
+        # Fallback if curve_fit underperforms the coarse grid search (local minimum)
+        try:
+            if grid_search_best is not None:
+                y_fit = spec['func'](tf, *popt)
+                r = yf - y_fit
+                t_peak = float(popt[-1])
+                weights = np.zeros_like(r)
+                fit_mask = tf >= fit_start_ms
+                if np.any(fit_mask):
+                    weights[fit_mask] = 1.0
+                    early_mask = (tf >= fit_start_ms) & (tf <= fit_start_ms + early_window_ms)
+                    if np.any(early_mask):
+                        weights[early_mask] = np.maximum(weights[early_mask], early_boost)
+                    decay_mask = tf > t_peak
+                    if np.any(decay_mask):
+                        weights[decay_mask] = np.maximum(weights[decay_mask], decay_boost)
+                    weights[fit_mask] = weights[fit_mask] * amp_weight[fit_mask]
+                else:
+                    weights = np.ones_like(r)
+                sse_curve = float(np.sum(weights * r ** 2))
+                if sse_curve > grid_search_best['sse'] * 1.10:
+                    popt = np.array(grid_search_best['params'], float)
+                    try:
+                        from smoothing import progress_print
+                        progress_print("[fit_average_event] curve_fit worse than grid search, using grid search params")
+                    except Exception:
+                        pass
+        except Exception:
+            pass
         
         # For tri-exponential: validate curve_fit results and fallback to grid search if needed
         if spec.get('name', '').lower() == 'iglusnfr_tri' and grid_search_p0 is not None:

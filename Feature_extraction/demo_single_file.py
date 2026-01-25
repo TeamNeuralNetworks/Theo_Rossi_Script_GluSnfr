@@ -79,16 +79,21 @@ xlsx_path = os.path.join(
     "20210721_linescan1_50Hz_10pulses_4mMCa_bouton4_traces_converted.xlsx",
 )
 
+xlsx_path = os.path.join(
+    DATA_ROOT,
+    "WT_Anthime",
+    "241212_Fibre1_PortionB_bouton9.xlsx",
+)
 
 START = 0.498
-# START = START + 0.5
+START = START + 0.5
 
 # === Inter-Stimulus Interval (ISI) ===
 # Set this based on your stimulation frequency:
 # ISI = 0.05  # 20Hz stimulation
 # ISI = 0.02  # 50Hz stimulation
 # ISI = 0.01  # 100Hz stimulation
-ISI = 0.02  # Current: 50Hz
+ISI = 0.05  # Current: 20Hz
 
 # === TRI-EXPONENTIAL FLAG ===
 # Set to True for tri-exponential model (3 decay components: fast, slow, superslow)

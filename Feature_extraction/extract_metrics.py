@@ -327,6 +327,113 @@ def estimate_tau_from_post_train_decay(
 _POST_TRAIN_DECAY_FIT = None
 
 
+def estimate_tau_superslow_from_last_event_decay(
+    t: np.ndarray,
+    y: np.ndarray,
+    stim_times: np.ndarray,
+    isi: float,
+    *,
+    event_t0_s: float = 0.0,
+    min_decay_points: int = 12,
+) -> Optional[float]:
+    """Estimate tau_superslow from a bi-exponential fit of the last event decay.
+
+    Fits only the decay after the last event peak using a bi-exponential model.
+    Returns the slower decay constant (tau_slow) in seconds.
+    """
+    try:
+        from scipy.optimize import curve_fit
+
+        if stim_times is None or len(stim_times) == 0:
+            return None
+
+        last_st = float(stim_times[-1]) + float(event_t0_s)
+        # Find the local peak of the last event within a short window
+        peak_search_end = min(last_st + max(0.5 * isi, 0.010), t[-1])
+        peak_mask = (t >= last_st) & (t <= peak_search_end)
+        if not np.any(peak_mask):
+            return None
+
+        peak_idx_rel = int(np.argmax(y[peak_mask]))
+        peak_idx = np.where(peak_mask)[0][0] + peak_idx_rel
+        peak_t = float(t[peak_idx])
+
+        # Decay window: from peak to a few ISIs after (or end)
+        decay_end = min(last_st + 5.0 * isi, t[-1])
+        decay_mask = (t >= peak_t) & (t <= decay_end)
+        if np.sum(decay_mask) < min_decay_points:
+            return None
+
+        t_decay = t[decay_mask] - peak_t
+        y_decay = y[decay_mask]
+
+        # Baseline estimate from tail
+        tail_len = max(3, len(y_decay) // 5)
+        baseline = float(np.median(y_decay[-tail_len:]))
+        y_decay_zeroed = y_decay - baseline
+
+        # Skip if no clear decay signal
+        peak_decay = float(np.nanmax(y_decay_zeroed))
+        if not np.isfinite(peak_decay) or peak_decay <= 0:
+            return None
+
+        def biexp(t, a_fast, tau_fast, a_slow, tau_slow):
+            return a_fast * np.exp(-t / max(tau_fast, 1e-6)) + a_slow * np.exp(-t / max(tau_slow, 1e-6))
+
+        # Initial guesses
+        a0_fast = peak_decay * 0.6
+        a0_slow = peak_decay * 0.4
+        tau_fast0 = 0.005
+        tau_slow0 = 0.050
+
+        try:
+            popt, _ = curve_fit(
+                biexp,
+                t_decay,
+                y_decay_zeroed,
+                p0=[a0_fast, tau_fast0, a0_slow, tau_slow0],
+                bounds=(
+                    [0.0, 0.001, 0.0, 0.010],  # tau_fast >=1ms, tau_slow >=10ms
+                    [np.inf, 0.050, np.inf, 0.400],
+                ),
+                maxfev=2000,
+            )
+            tau_fast = float(popt[1])
+            tau_slow = float(popt[3])
+            tau_superslow = max(tau_fast, tau_slow)
+
+            try:
+                from smoothing import progress_print
+                progress_print(f"[last-event] Estimated tau_superslow from biexp decay: {tau_superslow*1000:.1f} ms")
+            except Exception:
+                pass
+            return tau_superslow
+        except Exception:
+            # Fallback to single exponential on last-event decay
+            def exp_decay(t, a, tau):
+                return a * np.exp(-t / max(tau, 1e-6))
+            try:
+                popt, _ = curve_fit(
+                    exp_decay,
+                    t_decay,
+                    y_decay_zeroed,
+                    p0=[peak_decay, 0.050],
+                    bounds=([0.0, 0.010], [np.inf, 0.400]),
+                    maxfev=1000,
+                )
+                tau_slow = float(popt[1])
+                try:
+                    from smoothing import progress_print
+                    progress_print(f"[last-event] Estimated tau_superslow from single-exp decay: {tau_slow*1000:.1f} ms")
+                except Exception:
+                    pass
+                return tau_slow
+            except Exception:
+                return None
+    except Exception:
+        return None
+
+
 def _calculate_nnls_weights(
     t: np.ndarray,
     stim_times: np.ndarray,
@@ -603,7 +710,10 @@ def fit_amplitudes_with_template_variants(
             for frac_slow in variant_ratios:
                 for jitter_s in jitter_variant_s:
                     anchor = st + current_t0 + jitter_s
-                    k = _build_variant_kernel(t - anchor, tau_r_s, tau_d, frac_slow)
+                    k = _build_variant_kernel(
+                        t - anchor, tau_r_s, tau_d, frac_slow,
+                        event_idx=i_event, n_events=n_events,
+                    )
                     kernel_columns.append(k)
 
         X = np.column_stack(kernel_columns) if kernel_columns else np.zeros((t.size, 0))
@@ -810,7 +920,10 @@ def fit_amplitudes_with_template_variants(
                 amp_var = a_variants[idx]
                 if amp_var > 0:
                     anchor = st + current_t0 + jitter_s  # Use adjusted t0
-                    k = _build_variant_kernel(t - anchor, tau_r_s, tau_d, frac_slow)
+                    k = _build_variant_kernel(
+                        t - anchor, tau_r_s, tau_d, frac_slow,
+                        event_idx=i_event, n_events=n_events,
+                    )
                     comp_event += amp_var * k
         components.append(comp_event)
 
@@ -845,7 +958,14 @@ def fit_amplitudes_with_template_variants(
     return a_events, d_events, X, yhat, components, variant_info
 
 
-def _build_variant_kernel(dt: np.ndarray, tau_r: float, tau_d: float, frac_slow: float) -> np.ndarray:
+def _build_variant_kernel(
+    dt: np.ndarray,
+    tau_r: float,
+    tau_d: float,
+    frac_slow: float,
+    event_idx: Optional[int] = None,
+    n_events: Optional[int] = None,
+) -> np.ndarray:
     """Build kernel with specific slow component fraction.
 
     For iGluSnFR model with bi-exponential decay, this adjusts frac_fast parameter.
@@ -855,7 +975,10 @@ def _build_variant_kernel(dt: np.ndarray, tau_r: float, tau_d: float, frac_slow:
     """
     global _VARIANT_KERNEL_BUILDER
     if _VARIANT_KERNEL_BUILDER is not None:
-        return _VARIANT_KERNEL_BUILDER(dt, tau_r, tau_d, frac_slow)
+        try:
+            return _VARIANT_KERNEL_BUILDER(dt, tau_r, tau_d, frac_slow, event_idx, n_events)
+        except TypeError:
+            return _VARIANT_KERNEL_BUILDER(dt, tau_r, tau_d, frac_slow)
     else:
         # Fallback: use standard kernel (no variant support)
         return _KERNEL_FUN(dt, tau_r, tau_d)
@@ -1585,6 +1708,46 @@ def extract_metrics(
             lib_name = evm
             if lib_name.startswith('library:'):
                 lib_name = lib_name.split(':', 1)[1].strip().lower()
+            if lib_name == 'iglusnfr_tri':
+                # Base kernel uses bi-exponential iGluSnFR; superslow is reserved for NNLS variants.
+                base_spec, make_fixed, _ = _build_kernel_from_library('iglusnfr')
+                model_spec = base_spec  # Progression rules follow bi-exp kinetics
+                allowed_base = set(base_spec['params']) - {'amp', 't_peak'}
+                allowed_extra = {'tau_decay_superslow', 'frac_slow'}
+                unknown = set(em_settings.keys()) - (allowed_base | allowed_extra)
+                if unknown:
+                    raise ValueError(f"Unknown event_model_settings for '{lib_name}': {sorted(unknown)}. Allowed keys: {sorted(allowed_base | allowed_extra)}")
+                # Build complete base params (defaults -> bounds -> explicit overrides)
+                param_bounds = cfg.get('parameter_bounds', {})
+                base_defaults = [
+                    ('tau_rise', 0.003),
+                    ('tau_decay_fast', 0.008),
+                    ('tau_decay_slow', 0.035),
+                    ('frac_fast', 0.6),
+                ]
+                base_params = {}
+                for param_name, default_value in base_defaults:
+                    bound = param_bounds.get(param_name)
+                    if bound and isinstance(bound, (tuple, list)) and len(bound) == 2:
+                        lower, upper = float(bound[0]), float(bound[1])
+                        if np.isfinite(lower) and np.isfinite(upper):
+                            base_params[param_name] = (lower + upper) / 2.0
+                        else:
+                            base_params[param_name] = default_value
+                    else:
+                        base_params[param_name] = default_value
+                for key in allowed_base:
+                    if key in em_settings:
+                        try:
+                            base_params[key] = float(em_settings[key])
+                        except Exception:
+                            pass
+                _KERNEL_FUN = make_fixed(base_params)
+                if verbose:
+                    progress_print("[model] Using 'iglusnfr_tri' base kernel (bi-exp); superslow added during NNLS variant screening.")
+                event_model = lib_name
+                return lib_name, None
+
             spec, make_fixed, _ = _build_kernel_from_library(lib_name)
             model_spec = spec  # Store for progression rules
             allowed = set(spec['params']) - {'amp', 't_peak'}
@@ -1603,6 +1766,10 @@ def extract_metrics(
     ev_model_name, n_coop_effective = _apply_event_model_from_cfg()
     varying_supported_names = {"double_exp", "cooperative", "bilinear"}
     is_varying_model = ev_model_name in varying_supported_names
+    event_model_fit = event_model
+    if event_model == 'iglusnfr_tri':
+        # Recut/per-event fits use bi-exponential kinetics; superslow is handled in NNLS variants.
+        event_model_fit = 'iglusnfr'
 
     # Set up variant kernel builder if template variants are enabled
     global _VARIANT_KERNEL_BUILDER
@@ -1656,29 +1823,32 @@ def extract_metrics(
                     base_params.update(em_settings)
 
                 if is_tri:
-                    def _iglusnfr_variant_builder(dt: np.ndarray, tau_r: float, tau_d: float, frac_slow: float) -> np.ndarray:
-                        """Build tri-exponential iGluSnFR kernel with varying slow component.
-                        
-                        For tri-exp: frac_slow controls total slow fraction (intermediate + superslow):
-                        - frac_slow=0: 100% fast, 0% intermediate, 0% superslow
-                        - frac_slow=0.5: 50% fast, 25% intermediate, 25% superslow  
-                        - frac_slow=1: 0% fast, 50% intermediate, 50% superslow
-                        This ensures both intermediate and superslow contribute at high frac_slow.
-                        """
+                    def _iglusnfr_variant_builder(
+                        dt: np.ndarray,
+                        tau_r: float,
+                        tau_d: float,
+                        frac_slow: float,
+                        event_idx: Optional[int] = None,
+                        n_events: Optional[int] = None,
+                    ) -> np.ndarray:
+                        """Build tri-exponential iGluSnFR kernel with fast/slow ratio + ramped superslow."""
                         dt_ms = dt * 1000.0
-                        # frac_slow = total slow fraction; split evenly between intermediate and superslow
-                        frac_fast = 1.0 - frac_slow
-                        frac_intermediate = frac_slow * 0.5  # half of slow goes to intermediate
-                        frac_superslow = frac_slow * 0.5     # half of slow goes to superslow
-                        # For tri-exp: ALWAYS use base_params tau values (from event_model_settings)
-                        # Ignore tau_d from grid search - it's unreliable for tri-exp
-                        tau_fast_s = base_params.get('tau_decay_fast', 0.003)  # in seconds
+                        frac_slow_total = float(np.clip(frac_slow, 0.0, 1.0))
+                        # Superslow fraction ramps up across the train; slow stays dominant early.
+                        ramp = 0.0
+                        if event_idx is not None and n_events is not None and n_events > 1:
+                            ramp = float(event_idx) / float(n_events - 1)
+                        frac_superslow = frac_slow_total * ramp
+                        frac_intermediate = frac_slow_total - frac_superslow
+                        frac_fast = 1.0 - frac_slow_total
+                        # Use per-event tau_d for fast component when available
+                        tau_fast_s = float(tau_d) if np.isfinite(tau_d) and tau_d > 0 else base_params.get('tau_decay_fast', 0.003)
                         params = [
                             1.0,  # amp
                             tau_r,  # tau_rise from global fit
-                            tau_fast_s,  # tau_decay_fast in SECONDS (model handles conversion)
-                            base_params['tau_decay_slow'],  # tau_decay_slow (in seconds)
-                            base_params['tau_decay_superslow'],  # tau_decay_superslow (in seconds)
+                            tau_fast_s,  # tau_decay_fast in SECONDS
+                            base_params['tau_decay_slow'],  # tau_decay_slow (seconds)
+                            base_params['tau_decay_superslow'],  # tau_decay_superslow (seconds)
                             frac_fast,  # frac_fast varies
                             frac_intermediate,  # frac_slow (intermediate)
                             0.0,  # t_peak
@@ -1687,7 +1857,14 @@ def extract_metrics(
                         peak_val = np.max(y) if np.any(y > 0) else 1.0
                         return y / max(peak_val, 1e-12)
                 else:
-                    def _iglusnfr_variant_builder(dt: np.ndarray, tau_r: float, tau_d: float, frac_slow: float) -> np.ndarray:
+                    def _iglusnfr_variant_builder(
+                        dt: np.ndarray,
+                        tau_r: float,
+                        tau_d: float,
+                        frac_slow: float,
+                        event_idx: Optional[int] = None,
+                        n_events: Optional[int] = None,
+                    ) -> np.ndarray:
                         """Build bi-exponential iGluSnFR kernel with specific slow component fraction.
                         
                         LEGACY: Match original unit handling exactly (tau_d*1000 but NOT tau_slow*1000)
@@ -1889,7 +2066,7 @@ def extract_metrics(
                     fit_res = fit_average_event(
                         local_t_ms,
                         yf,
-                        event_model,
+                        event_model_fit,
                         window_ms=(0.0, float(local_t_ms[-1]) if local_t_ms.size else 50.0),
                         onset_method=str(cfg.get('onset_method', 'inflection')),
                         onset_baseline_threshold=float(cfg.get('onset_baseline_threshold', 0.15)),
@@ -2326,24 +2503,14 @@ def extract_metrics(
             post_ms_for_fit = min(50.0, isi_ms - 5.0)  # Standard: 50ms or ISI-5ms
         progress_print(f"[global] Using post_ms={post_ms_for_fit:.1f} ms for recut fitting (ISI={isi_ms:.1f}ms)")
 
-        # === Estimate tau_slow from post-train decay ===
-        # This provides a data-driven estimate for the slow/superslow component
-        # Critical for high-frequency trains where recut window is too short to fit slow kinetics
-        tau_slow_from_decay = estimate_tau_from_post_train_decay(t, y_avg, stim_times, isi)
-        if tau_slow_from_decay is not None:
-            param_bounds = cfg.setdefault('parameter_bounds', {})
-            
-            # For tri-exponential model: post-train decay gives tau_superslow
-            if event_model == 'iglusnfr_tri':
-                if 'tau_decay_superslow' not in param_bounds:
-                    # Super-slow is directly from post-train decay - use tight bounds (±20%)
-                    # This ensures the final decay matches the actual post-train kinetics
-                    lower_ss = max(0.020, tau_slow_from_decay * 0.8)
-                    upper_ss = min(0.120, tau_slow_from_decay * 1.2)
-                    param_bounds['tau_decay_superslow'] = (lower_ss, upper_ss)
-                    progress_print(f"[global] tau_superslow bounds: {lower_ss*1000:.1f}-{upper_ss*1000:.1f} ms (from post-train: {tau_slow_from_decay*1000:.1f}ms)")
-            else:
-                # For bi-exponential: post-train decay gives tau_slow bounds
+        # === Estimate tau_slow from post-train decay (bi-exp only) ===
+        # For tri-exp, superslow is derived from the final event decay instead.
+        tau_slow_from_decay = None
+        if event_model != 'iglusnfr_tri':
+            # Critical for high-frequency trains where recut window is too short to fit slow kinetics
+            tau_slow_from_decay = estimate_tau_from_post_train_decay(t, y_avg, stim_times, isi)
+            if tau_slow_from_decay is not None:
+                param_bounds = cfg.setdefault('parameter_bounds', {})
                 if 'tau_decay_slow' not in param_bounds:
                     lower_slow = max(0.010, tau_slow_from_decay * 0.5)
                     upper_slow = min(0.400, tau_slow_from_decay * 3.0)
@@ -2363,7 +2530,7 @@ def extract_metrics(
         fixed_tau_slow = tau_slow_from_decay if (early_events > 0 and tau_slow_from_decay is not None) else None
 
         res = fit_average_event(
-            t, Yd, event_model, stim_times,
+            t, Yd, event_model_fit, stim_times,
             oversample=int(cfg['recut_oversample']),
             projection=str(cfg['recut_projection']).lower(),
             peak_recenter=peak_recenter,
@@ -2418,6 +2585,27 @@ def extract_metrics(
                         # Only set if user didn't explicitly provide this parameter
                         cfg['event_model_settings'].setdefault(k, float(v))
 
+            # For tri-exp: estimate tau_superslow from the final event decay (if not user-specified)
+            if event_model == 'iglusnfr_tri':
+                em_settings = cfg.get('event_model_settings', {}) or {}
+                param_bounds = cfg.get('parameter_bounds', {}) or {}
+                if 'tau_decay_superslow' not in em_settings:
+                    tau_superslow_setting = None
+                    bound = param_bounds.get('tau_decay_superslow')
+                    if bound and isinstance(bound, (tuple, list)) and len(bound) == 2:
+                        lower, upper = float(bound[0]), float(bound[1])
+                        if np.isfinite(lower) and np.isfinite(upper):
+                            if abs(lower - upper) < 1e-12:
+                                tau_superslow_setting = lower
+                            else:
+                                tau_superslow_setting = (lower + upper) / 2.0
+                    if tau_superslow_setting is None:
+                        tau_superslow_setting = estimate_tau_superslow_from_last_event_decay(
+                            t, y_avg, stim_times, isi, event_t0_s=event_t0_s
+                        )
+                    if tau_superslow_setting is not None:
+                        cfg['event_model_settings'].setdefault('tau_decay_superslow', float(tau_superslow_setting))
+
             # REBUILD variant kernel builder with fitted parameters
             if cfg.get('use_template_variants', False) and event_model in ('iglusnfr', 'iglusnfr_tri'):
                 try:
@@ -2452,25 +2640,31 @@ def extract_metrics(
 
                     if is_tri:
                         # Tri-exponential variant builder
-                        def _iglusnfr_variant_builder_fitted(dt: np.ndarray, tau_r: float, tau_d: float, frac_slow: float) -> np.ndarray:
-                            """Build tri-exponential iGluSnFR kernel using FITTED kinetics.
-                            
-                            frac_slow controls total slow fraction, split evenly between intermediate and superslow.
-                            This ensures balanced contribution from both slow components.
-                            """
+                        def _iglusnfr_variant_builder_fitted(
+                            dt: np.ndarray,
+                            tau_r: float,
+                            tau_d: float,
+                            frac_slow: float,
+                            event_idx: Optional[int] = None,
+                            n_events: Optional[int] = None,
+                        ) -> np.ndarray:
+                            """Build tri-exponential iGluSnFR kernel using fitted kinetics + ramped superslow."""
                             dt_ms = dt * 1000.0
-                            # Split total slow evenly between intermediate and superslow
-                            frac_fast = 1.0 - frac_slow
-                            frac_intermediate = frac_slow * 0.5  # half of slow to intermediate
-                            frac_superslow = frac_slow * 0.5     # half of slow to superslow
-                            # For tri-exp: ALWAYS use fitted_params tau values
-                            tau_fast_s = fitted_params.get('tau_decay_fast', 0.003)  # in seconds
+                            frac_slow_total = float(np.clip(frac_slow, 0.0, 1.0))
+                            ramp = 0.0
+                            if event_idx is not None and n_events is not None and n_events > 1:
+                                ramp = float(event_idx) / float(n_events - 1)
+                            frac_superslow = frac_slow_total * ramp
+                            frac_intermediate = frac_slow_total - frac_superslow
+                            frac_fast = 1.0 - frac_slow_total
+                            # Use per-event tau_d for fast component when available
+                            tau_fast_s = float(tau_d) if np.isfinite(tau_d) and tau_d > 0 else fitted_params.get('tau_decay_fast', 0.003)
                             params = [
                                 1.0,  # amp (will be normalized)
                                 tau_r,  # tau_rise from global fit
                                 tau_fast_s,  # tau_decay_fast in SECONDS
-                                fitted_params['tau_decay_slow'],  # FITTED slow decay (in seconds)
-                                fitted_params['tau_decay_superslow'],  # FITTED superslow decay (in seconds)
+                                fitted_params['tau_decay_slow'],  # FITTED slow decay (seconds)
+                                fitted_params['tau_decay_superslow'],  # FITTED superslow decay (seconds)
                                 frac_fast,  # fast fraction varies
                                 frac_intermediate,  # intermediate fraction
                                 0.0,  # t_peak
@@ -2480,7 +2674,14 @@ def extract_metrics(
                             return y / max(peak_val, 1e-12)
                     else:
                         # Bi-exponential variant builder
-                        def _iglusnfr_variant_builder_fitted(dt: np.ndarray, tau_r: float, tau_d: float, frac_slow: float) -> np.ndarray:
+                        def _iglusnfr_variant_builder_fitted(
+                            dt: np.ndarray,
+                            tau_r: float,
+                            tau_d: float,
+                            frac_slow: float,
+                            event_idx: Optional[int] = None,
+                            n_events: Optional[int] = None,
+                        ) -> np.ndarray:
                             """Build iGluSnFR kernel with specific slow component fraction using FITTED kinetics.
                             
                             LEGACY: Match original unit handling exactly (tau_d*1000 but NOT tau_slow*1000)
@@ -3215,7 +3416,10 @@ def extract_metrics(
                     kernel_cols = []
                     for i_event, st in enumerate(stim_times):
                         anchor = st + event_t0_s
-                        k = _build_variant_kernel(t - anchor, tau_r, tau_d_vec[i_event], ratio)
+                        k = _build_variant_kernel(
+                            t - anchor, tau_r, tau_d_vec[i_event], ratio,
+                            event_idx=i_event, n_events=len(stim_times),
+                        )
                         kernel_cols.append(k)
                     X_test = np.column_stack(kernel_cols) if kernel_cols else np.zeros((t.size, 0))
                     a_test = _nnls_weighted(X_test, y_avg, weights_test)
@@ -3469,7 +3673,7 @@ def extract_metrics(
                 except Exception:
                     from event_models import get_event_model  # type: ignore
                 # Resolve the effective model name
-                _name = event_model
+                _name = event_model_fit if event_model == 'iglusnfr_tri' else event_model
                 if _name.startswith('library:'):
                     _name = _name.split(':', 1)[1].strip().lower()
                 spec = get_event_model(_name)

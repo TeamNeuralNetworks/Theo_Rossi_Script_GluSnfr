@@ -194,16 +194,23 @@ for in_dir in folders:
                 'anchor_first_tau': False,
 
                 # === Event Model ===
-                'event_model': 'iglusnfr',  # Bi-exponential iGluSnFR - stable, ~12.7% RMS
+                'event_model': 'iglusnfr_tri',  # Recut fit is bi-exp; superslow reserved for train
 
-                # === Parameter Bounds (NEW - replaces event_model_settings + max_tau_decay_slow) ===
+                # === Event Model Settings (initial tau values for NNLS kernels) ===
+                'event_model_settings': {
+                    'tau_decay_fast': 0.003,
+                    'tau_decay_slow': 0.015,
+                },
+
+                # === Parameter Bounds (match demo_single_file tri settings) ===
                 # Format: {'param_name': (lower, upper)}
                 # - Use (value, value) to force a fixed value
                 # - Use (np.nan, np.nan) or None for unconstrained
                 'parameter_bounds': {
-                    'tau_decay_fast': (0.001, 0.008),  # Reasonable range for fast component
-                    'tau_decay_slow': (0.008, 0.050),  # Cap slow component at 50ms max
-                    'tau_rise': (np.nan, np.nan),       # Unconstrained                    # tau_decay_slow: auto from post-train decay (no constraint needed)
+                    'tau_decay_fast': (0.003, 0.01),
+                    'tau_decay_slow': (0.01, 0.035),
+                    # tau_decay_superslow: auto from post-train decay (typically 30-50ms)
+                    'tau_rise': (0.001, 0.01),       # Unconstrained
                 },
 
                 # Use all events for averaging (0 = all, N = first N only)
