@@ -1,4 +1,4 @@
-import os, sys, glob, zipfile, numpy as np, pandas as pd
+import os, sys, glob, zipfile, copy, numpy as np, pandas as pd
 
 """
 Compact model & options reference (from `Model_Calibration/event_models.py`)
@@ -83,9 +83,9 @@ SUBFOLDERS = [
     "Theo_4_50Hz",
 ]
 
-SUBFOLDERS = ["Theo_4_50Hz"]
+SUBFOLDERS = ["Theo_2_5_50Hz"]
 folders = _build_data_folders(DATA_ROOT, SUBFOLDERS)
-root_out = os.path.join(DATA_ROOT, "Testout_BiExphica")  # BiExp results
+root_out = os.path.join(DATA_ROOT, "Testout_TriExp")  # TriExp results
 os.makedirs(root_out, exist_ok=True)
 
 # Per-folder train_start (seconds). Default 0.998; override selected folders to 0.498
@@ -200,20 +200,13 @@ for in_dir in folders:
                 'anchor_first_tau': False,
 
                 # === Event Model ===
-                'event_model': 'iglusnfr_tri',  # Recut fit is bi-exp; superslow reserved for train
-
-                # === Event Model Settings (initial tau values for NNLS kernels) ===
-                'event_model_settings': {
-                    'tau_decay_fast': 0.003,     # 3ms fast component (reasonable for iGluSnFR3v)
-                    'tau_decay_slow': 0.015,     # 15ms intermediate component
-                    # tau_decay_superslow: comes from post-train decay fitting
-                },
+                'event_model': 'iglusnfr',  # Recut fit is bi-exp; superslow reserved for train
 
                 # === Parameter Bounds (auto-configured based on model) ===
                 'parameter_bounds': {
-                    'tau_decay_fast': (0.003, 0.010),     # 3-10ms fast component
-                    'tau_decay_slow': (0.010, 0.035),     # 10-35ms intermediate
-                    't_onset': (0.0, 3.0),  # ms
+                    'tau_decay_fast': (0.001, 0.008),     # 1-8ms fast component
+                    'tau_decay_slow': (0.008, 0.035),     # 8-35ms intermediate
+                    't_onset': (0.0, 5.0),  # ms
                     # tau_decay_superslow: auto from post-train decay (typically 30-50ms)
                 },
 
@@ -283,8 +276,8 @@ for in_dir in folders:
                     'trials': False,
                     'baseline': False,
                     'residuals': True,
-                    'nnls_residual': True,
-                    'nnls_n_minus_1': True,
+                    'nnls_residual': False,
+                    'nnls_n_minus_1': False,
                     'plot_peaks_details': True,
                 },
 
@@ -393,7 +386,10 @@ for in_dir in folders:
 
         # Choose which preset to use
         preset_name = 'iglusnfr_optimized'  # Use iGluSnFR-specific model for better peak capture
-        options = options_presets[preset_name]
+        options = copy.deepcopy(options_presets[preset_name])
+        is_50hz = isi <= 0.025
+        options['event_model'] = 'iglusnfr_tri' if is_50hz else 'iglusnfr'
+        options['allow_tau_slow_override'] = (in_name == "Theo_4_50Hz")
 
         base = os.path.splitext(os.path.basename(xlsx_path))[0]
         if VIEW_ONLY and base != TARGET_BOUTON:

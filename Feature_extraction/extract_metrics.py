@@ -161,6 +161,7 @@ DEFAULTS.update({
 DEFAULTS.update({
     'template_variant_superslow_fracs': [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],  # Superslow fraction at final event
     'superslow_min_ratio': 1.0,  # Disable superslow variants if tau_superslow < tau_slow * ratio
+    'allow_tau_slow_override': True,  # Allow last-event tau to replace recut tau_decay_slow when shorter
 })
 
 # Parameter bounds: classical upper/lower limits for all fitted parameters
@@ -1546,6 +1547,8 @@ def extract_metrics(
         at the final event (ramps monotonically across the train)
       - superslow_min_ratio: float (default 1.0) — disable superslow variants if
         tau_superslow < tau_slow * ratio
+      - allow_tau_slow_override: bool (default True) — when superslow < slow, allow
+        last‑event tau to replace recut tau_decay_slow (else clamp superslow only)
       - plot: dict with keys
           - enabled: bool (default False)
           - traces: list of {'raw','savgol','nnls'} (default ['nnls'])
@@ -1580,10 +1583,7 @@ def extract_metrics(
             cfg['fit_diagnostic_plot'] = bool(cfg.get('fit_diagnostic_plot', False))
     interpolated_settings: List[Dict[str, Any]] = []
     global_fit_params: Dict[str, float] = {}
-    explicit_em_settings = {}
-    if isinstance(opts.get('event_model_settings'), dict):
-        # Preserve user-provided overrides so later auto-fits do not clobber them
-        explicit_em_settings = dict(opts['event_model_settings'])
+    recut_slow_replaced = False
     cfg_em_settings = cfg.get('event_model_settings')
     if isinstance(cfg_em_settings, dict):
         # Use a shallow copy to avoid mutating the caller's dict in-place
@@ -1676,7 +1676,7 @@ def extract_metrics(
     event_model = str(cfg.get('event_model', DEFAULTS.get('event_model', 'double_exp'))).strip().lower()
     em_settings = cfg.get('event_model_settings', {}) or {}
     if not isinstance(em_settings, dict):
-        raise ValueError("event_model_settings must be a dict of parameter overrides")
+        raise ValueError("event_model_settings must be a dict of parameter initial guesses")
     coop_n_default = float(em_settings.get('n_coop', 2.0))
 
     def _build_kernel_from_library(name: str):
@@ -1728,7 +1728,7 @@ def extract_metrics(
         evm = str(cfg.get('event_model', event_model)).strip().lower()
         em_settings = cfg.get('event_model_settings', {}) or {}
         if not isinstance(em_settings, dict):
-            raise ValueError("event_model_settings must be a dict of parameter overrides")
+            raise ValueError("event_model_settings must be a dict of parameter initial guesses")
         if evm.startswith('library:'):
             _lib = evm.split(':', 1)[1].strip().lower()
             if _lib in varying_supported:
@@ -1921,7 +1921,7 @@ def extract_metrics(
                     else:
                         base_params[param_name] = default_value
 
-                # Backward compatibility: allow event_model_settings to override
+                # Allow event_model_settings to seed initial kernel parameters
                 if em_settings:
                     base_params.update(em_settings)
 
@@ -2724,15 +2724,14 @@ def extract_metrics(
             event_t0_s = float(fitted.get('t_onset', 0.0)) / 1000.0
 
 
-            # Carry over model-specific parameters (only if not explicitly set by user)
+            # Carry over model-specific parameters (treat event_model_settings as initial guesses)
             cfg.setdefault('event_model_settings', {})
             if event_model == 'cooperative' and ('n_coop' in fitted):
-                cfg['event_model_settings'].setdefault('n_coop', float(fitted['n_coop']))
+                cfg['event_model_settings']['n_coop'] = float(fitted['n_coop'])
             elif event_model not in varying_supported_names:
                 for k, v in fitted.items():
                     if k not in ('amp', 't_onset', '_recut') and np.isfinite(v):
-                        # Only set if user didn't explicitly provide this parameter
-                        cfg['event_model_settings'].setdefault(k, float(v))
+                        cfg['event_model_settings'][k] = float(v)
 
             # For tri-exp: estimate tau_superslow from the final event decay (if not user-specified)
             if event_model == 'iglusnfr_tri':
@@ -2780,16 +2779,30 @@ def extract_metrics(
                     min_ratio = float(cfg.get('superslow_min_ratio', 1.0))
                     if not np.isfinite(min_ratio) or min_ratio < 1.0:
                         min_ratio = 1.0
-
                     if tau_superslow_setting is None:
                         cfg['template_variant_superslow_fracs'] = [0.0]
                         triexp_variant_grid = None
                         superslow_disabled = True
                         progress_print("[tri-exp] No superslow tau estimate; disabling superslow variants.")
                     else:
+                        tau_superslow_setting = float(tau_superslow_setting)
+                        allow_slow_override = bool(cfg.get('allow_tau_slow_override', True))
                         if tau_slow_fit is not None and np.isfinite(tau_slow_fit):
                             if tau_superslow_setting < tau_slow_fit:
-                                tau_superslow_setting = float(tau_slow_fit)
+                                if allow_slow_override:
+                                    tau_slow_fit = float(tau_superslow_setting)
+                                    recut_slow_replaced = True
+                                    if isinstance(fitted, dict):
+                                        fitted['tau_decay_slow'] = float(tau_slow_fit)
+                                    if isinstance(cfg.get('event_model_settings', None), dict):
+                                        cfg['event_model_settings']['tau_decay_slow'] = float(tau_slow_fit)
+                                    global_fit_params['tau_decay_slow'] = float(tau_slow_fit)
+                                    progress_print(
+                                        "[tri-exp] Replaced recut tau_decay_slow with last-event decay: "
+                                        f"{tau_slow_fit*1000:.1f} ms"
+                                    )
+                                else:
+                                    tau_superslow_setting = float(tau_slow_fit)
                             if tau_superslow_setting < tau_slow_fit * min_ratio:
                                 cfg['template_variant_superslow_fracs'] = [0.0]
                                 triexp_variant_grid = None
@@ -2821,7 +2834,7 @@ def extract_metrics(
                                 "[tri-exp] Enforcing min superslow fraction at last event: "
                                 f"{min_superslow_frac:.2f} (kept {len(ss_filtered)} variants)"
                             )
-                        cfg['event_model_settings'].setdefault('tau_decay_superslow', float(tau_superslow_setting))
+                        cfg['event_model_settings']['tau_decay_superslow'] = float(tau_superslow_setting)
 
             # REBUILD variant kernel builder with fitted parameters
             if cfg.get('use_template_variants', False) and event_model in ('iglusnfr', 'iglusnfr_tri'):
@@ -2835,7 +2848,7 @@ def extract_metrics(
                     spec_iglu = get_event_model(event_model)
                     model_func = spec_iglu['func']
 
-                    # Use FITTED parameters from global fit, but respect explicit overrides from event_model_settings
+                    # Use FITTED parameters from global fit; fall back to event_model_settings if fit missing
                     em_settings = cfg.get('event_model_settings', {})
 
                     # Get fitted values; only fall back to explicit overrides if fit missing
@@ -2989,16 +3002,6 @@ def extract_metrics(
             else:
                 t_avg_evt = (t - float(train_start)) * 1000.0
                 y_avg_evt = y_avg
-
-        # Optional override
-        tau_decay_override = cfg['event_model_settings'].get('tau_decay')
-        if tau_decay_override is not None:
-            try:
-                tau_decay_override = float(tau_decay_override)
-                if np.isfinite(tau_decay_override):
-                    tau_d0 = tau_decay_override
-            except Exception:
-                pass
 
         ev_model_name, n_coop_effective = _apply_event_model_from_cfg(verbose=False)  # Suppress duplicate message
         is_varying_model = ev_model_name in varying_supported_names
@@ -4040,7 +4043,7 @@ def extract_metrics(
                             params.append(t_onset_ms)
                         else:
                             # Prefer values from the recent global fit if available;
-                            # then explicit user overrides in event_model_settings;
+                            # then event_model_settings (initial guesses) if fit missing;
                             # then tau_r/tau_d0 mapping; finally default p0.
                             if 'fitted' in locals() and isinstance(fitted, dict) and name in fitted and np.isfinite(fitted.get(name, np.nan)):
                                 params.append(float(fitted[name]))
@@ -4062,7 +4065,10 @@ def extract_metrics(
                     params[0] = amp_ls
                     popt = params
                     yhat_ev = spec['func'](tf, *popt)
-                axL.plot(tf, yhat_ev, color='crimson', ls='--', lw=1.8, label=_name)
+                fit_color = 'crimson'
+                if event_model == 'iglusnfr_tri' and recut_slow_replaced:
+                    fit_color = 'darkorange'
+                axL.plot(tf, yhat_ev, color=fit_color, ls='--', lw=1.8, label=_name)
                 try:
                     # Omit 't_onset' and stack vertically; include amp at top for context
                     pairs = [(n, v) for n, v in zip(spec['params'], popt)]
