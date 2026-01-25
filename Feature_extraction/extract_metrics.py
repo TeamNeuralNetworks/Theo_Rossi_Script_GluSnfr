@@ -160,7 +160,7 @@ DEFAULTS.update({
 # Tri-exp NNLS variants: sweep slow + superslow fractions (superslow ramps across the train)
 DEFAULTS.update({
     'template_variant_superslow_fracs': [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],  # Superslow fraction at final event
-    'superslow_min_ratio': 1.2,  # Disable superslow variants if tau_superslow < tau_slow * ratio
+    'superslow_min_ratio': 1.0,  # Disable superslow variants if tau_superslow < tau_slow * ratio
 })
 
 # Parameter bounds: classical upper/lower limits for all fitted parameters
@@ -336,6 +336,8 @@ def estimate_tau_from_post_train_decay(
 
 # Global storage for post-train decay fit (for plotting)
 _POST_TRAIN_DECAY_FIT = None
+# Global storage for last-event decay fit (for plotting tri-exp superslow)
+_LAST_EVENT_DECAY_FIT = None
 
 
 def estimate_tau_superslow_from_last_event_decay(
@@ -345,25 +347,28 @@ def estimate_tau_superslow_from_last_event_decay(
     isi: float,
     *,
     event_t0_s: float = 0.0,
+    tau_fast_s: Optional[float] = None,
     min_decay_points: int = 12,
-) -> Optional[float]:
+) -> Tuple[Optional[float], Optional[float]]:
     """Estimate tau_superslow from a bi-exponential fit of the last event decay.
 
     Fits only the decay after the last event peak using a bi-exponential model.
-    Returns the slower decay constant (tau_slow) in seconds.
+    Returns (tau_superslow, frac_superslow_min), where the fraction is the
+    slow-component amplitude fraction at the decay start.
     """
+    global _LAST_EVENT_DECAY_FIT
     try:
         from scipy.optimize import curve_fit
 
         if stim_times is None or len(stim_times) == 0:
-            return None
+            return None, None
 
         last_st = float(stim_times[-1]) + float(event_t0_s)
         # Find the local peak of the last event within a short window
         peak_search_end = min(last_st + max(0.5 * isi, 0.010), t[-1])
         peak_mask = (t >= last_st) & (t <= peak_search_end)
         if not np.any(peak_mask):
-            return None
+            return None, None
 
         peak_idx_rel = int(np.argmax(y[peak_mask]))
         peak_idx = np.where(peak_mask)[0][0] + peak_idx_rel
@@ -382,7 +387,7 @@ def estimate_tau_superslow_from_last_event_decay(
         # Decay window: start 5ms after peak to avoid immediate transient
         decay_start = peak_t + 0.005
         if decay_start >= t[-1]:
-            return None
+            return None, None
 
         # Determine end of decay: when signal returns to baseline, else end of trace
         decay_end = float(t[-1])
@@ -392,7 +397,7 @@ def estimate_tau_superslow_from_last_event_decay(
             if np.isfinite(baseline):
                 amp = peak_y - baseline
                 if not np.isfinite(amp) or amp <= 0:
-                    return None
+                    return None, None
                 pre_mask = t < float(stim_times[0])
                 if np.sum(pre_mask) >= 5:
                     noise = float(np.nanmedian(np.abs(y[pre_mask] - baseline)))
@@ -416,7 +421,7 @@ def estimate_tau_superslow_from_last_event_decay(
 
         decay_mask = (t >= decay_start) & (t <= decay_end)
         if np.sum(decay_mask) < min_decay_points:
-            return None
+            return None, None
 
         t_decay = t[decay_mask] - decay_start
         y_decay = y[decay_mask]
@@ -430,63 +435,99 @@ def estimate_tau_superslow_from_last_event_decay(
         # Skip if no clear decay signal
         peak_decay = float(np.nanmax(y_decay_zeroed))
         if not np.isfinite(peak_decay) or peak_decay <= 0:
-            return None
+            return None, None
 
-        def biexp(t, a_fast, tau_fast, a_slow, tau_slow):
-            return a_fast * np.exp(-t / max(tau_fast, 1e-6)) + a_slow * np.exp(-t / max(tau_slow, 1e-6))
+        def biexp_fixed_fast(t, a_fast, a_slow, tau_slow):
+            return a_fast * np.exp(-t / max(tau_fast_s, 1e-6)) + a_slow * np.exp(-t / max(tau_slow, 1e-6))
 
         # Initial guesses
         a0_fast = peak_decay * 0.6
         a0_slow = peak_decay * 0.4
-        tau_fast0 = 0.005
         tau_slow0 = 0.050
 
         try:
-            popt, _ = curve_fit(
-                biexp,
-                t_decay,
-                y_decay_zeroed,
-                p0=[a0_fast, tau_fast0, a0_slow, tau_slow0],
-                bounds=(
-                    [0.0, 0.001, 0.0, 0.010],  # tau_fast >=1ms, tau_slow >=10ms
-                    [np.inf, 0.050, np.inf, 0.400],
-                ),
-                maxfev=2000,
-            )
-            tau_fast = float(popt[1])
-            tau_slow = float(popt[3])
-            tau_superslow = max(tau_fast, tau_slow)
-
-            try:
-                from smoothing import progress_print
-                progress_print(f"[last-event] Estimated tau_superslow from biexp decay: {tau_superslow*1000:.1f} ms")
-            except Exception:
-                pass
-            return tau_superslow
-        except Exception:
-            # Fallback to single exponential on last-event decay
-            def exp_decay(t, a, tau):
-                return a * np.exp(-t / max(tau, 1e-6))
-            try:
+            tau_fast_s = float(tau_fast_s) if tau_fast_s is not None else np.nan
+            if np.isfinite(tau_fast_s) and tau_fast_s > 0:
+                tau_slow_min = max(0.010, tau_fast_s * 1.05)
                 popt, _ = curve_fit(
-                    exp_decay,
+                    biexp_fixed_fast,
                     t_decay,
                     y_decay_zeroed,
-                    p0=[peak_decay, 0.050],
-                    bounds=([0.0, 0.010], [np.inf, 0.400]),
-                    maxfev=1000,
+                    p0=[a0_fast, a0_slow, tau_slow0],
+                    bounds=(
+                        [0.0, 0.0, tau_slow_min],
+                        [np.inf, np.inf, 0.400],
+                    ),
+                    maxfev=2000,
                 )
-                tau_slow = float(popt[1])
+                a_fast = float(popt[0])
+                a_slow = float(popt[1])
+                tau_slow = float(popt[2])
+                tau_superslow = tau_slow
+                denom = max(a_fast + a_slow, 1e-12)
+                frac_superslow = max(0.0, min(1.0, a_slow / denom))
+
                 try:
                     from smoothing import progress_print
-                    progress_print(f"[last-event] Estimated tau_superslow from single-exp decay: {tau_slow*1000:.1f} ms")
+                    progress_print(
+                        "[last-event] Estimated tau_superslow from fixed-fast decay: "
+                        f"tau_fast={tau_fast_s*1000:.1f}ms, tau_superslow={tau_superslow*1000:.1f}ms, "
+                        f"frac_superslow={frac_superslow:.2f}"
+                    )
                 except Exception:
                     pass
-                return tau_slow
+                try:
+                    _LAST_EVENT_DECAY_FIT = {
+                        't_start': float(decay_start),
+                        't_end': float(decay_end),
+                        'baseline': float(baseline),
+                        'a_fast': float(a_fast),
+                        'tau_fast': float(tau_fast_s),
+                        'a_slow': float(a_slow),
+                        'tau_slow': float(tau_slow),
+                    }
+                except Exception:
+                    pass
+                return tau_superslow, frac_superslow
+        except Exception:
+            pass
+
+        # Fallback to single exponential on last-event decay
+        def exp_decay(t, a, tau):
+            return a * np.exp(-t / max(tau, 1e-6))
+        try:
+            popt, _ = curve_fit(
+                exp_decay,
+                t_decay,
+                y_decay_zeroed,
+                p0=[peak_decay, 0.050],
+                bounds=([0.0, 0.010], [np.inf, 0.400]),
+                maxfev=1000,
+            )
+            tau_slow = float(popt[1])
+            a_slow = float(popt[0])
+            try:
+                from smoothing import progress_print
+                progress_print(f"[last-event] Estimated tau_superslow from single-exp decay: {tau_slow*1000:.1f} ms")
             except Exception:
-                return None
+                pass
+            try:
+                _LAST_EVENT_DECAY_FIT = {
+                    't_start': float(decay_start),
+                    't_end': float(decay_end),
+                    'baseline': float(baseline),
+                    'a_fast': 0.0,
+                    'tau_fast': np.nan,
+                    'a_slow': float(a_slow),
+                    'tau_slow': float(tau_slow),
+                }
+            except Exception:
+                pass
+            return tau_slow, None
+        except Exception:
+            return None, None
     except Exception:
-        return None
+        return None, None
 
 
 def _calculate_nnls_weights(
@@ -803,7 +844,7 @@ def fit_amplitudes_with_template_variants(
             n_at_max = np.sum(dom_jitters >= jitter_max - 0.0005)
             frac_saturated = (n_at_min + n_at_max) / n_events
             
-            progress_print(f"[NNLS] Iter {iteration+1}: Jitter saturation ({frac_saturated*100:.0f}% at limits, {n_at_max} at max) [diagnostic only]")
+            # Jitter saturation diagnostics are suppressed to reduce log noise.
             
             # === Diagnostic 1: Post-train decay check (diagnostic only, no adjustment) ===
             # Kinetics adjustment via tau_d scaling is ineffective due to area normalization
@@ -819,9 +860,7 @@ def fit_amplitudes_with_template_variants(
                 mean_yhat = np.mean(yhat_iter[post_mask]) + 1e-9
                 relative_bias = mean_resid / mean_yhat
                 
-                if abs(relative_bias) > 0.2:
-                    direction = "under" if relative_bias > 0 else "over"
-                    progress_print(f"[NNLS] Iter {iteration+1}: Post-train {direction}prediction ({abs(relative_bias)*100:.0f}%) [diagnostic only]")
+                # Post-train bias diagnostics are suppressed to reduce log noise.
             
             # Define train window for analysis
             train_start = float(stim_times[0])
@@ -1505,7 +1544,7 @@ def extract_metrics(
       - template_variant_ratios: list[float] — slow fraction grid (bi‑exp and tri‑exp)
       - template_variant_superslow_fracs: list[float] — tri‑exp superslow fractions
         at the final event (ramps monotonically across the train)
-      - superslow_min_ratio: float (default 1.2) — disable superslow variants if
+      - superslow_min_ratio: float (default 1.0) — disable superslow variants if
         tau_superslow < tau_slow * ratio
       - plot: dict with keys
           - enabled: bool (default False)
@@ -1660,7 +1699,7 @@ def extract_metrics(
                 for p in spec['params']:
                     if p == 'amp':
                         pars.append(1.0)
-                    elif p == 't_peak':
+                    elif p == 't_onset':
                         pars.append(0.0)
                     else:
                         pars.append(params_fixed[p])
@@ -1736,7 +1775,7 @@ def extract_metrics(
                 # Base kernel uses bi-exponential iGluSnFR; superslow is reserved for NNLS variants.
                 base_spec, make_fixed, _ = _build_kernel_from_library('iglusnfr')
                 model_spec = base_spec  # Progression rules follow bi-exp kinetics
-                allowed_base = set(base_spec['params']) - {'amp', 't_peak'}
+                allowed_base = set(base_spec['params']) - {'amp', 't_onset'}
                 allowed_extra = {'tau_decay_superslow', 'frac_slow'}
                 unknown = set(em_settings.keys()) - (allowed_base | allowed_extra)
                 if unknown:
@@ -1774,7 +1813,7 @@ def extract_metrics(
 
             spec, make_fixed, _ = _build_kernel_from_library(lib_name)
             model_spec = spec  # Store for progression rules
-            allowed = set(spec['params']) - {'amp', 't_peak'}
+            allowed = set(spec['params']) - {'amp', 't_onset'}
             unknown = set(em_settings.keys()) - allowed
             if unknown:
                 raise ValueError(f"Unknown event_model_settings for '{lib_name}': {sorted(unknown)}. Allowed keys: {sorted(allowed)}")
@@ -1954,7 +1993,7 @@ def extract_metrics(
                             tau_superslow_s,  # tau_decay_superslow (seconds)
                             frac_fast,  # frac_fast varies
                             frac_intermediate,  # frac_slow (intermediate)
-                            0.0,  # t_peak
+                            0.0,  # t_onset
                         ]
                         y = model_func(dt_ms, *params)
                         peak_val = np.max(y) if np.any(y > 0) else 1.0
@@ -1983,7 +2022,7 @@ def extract_metrics(
                             tau_fast_ms,  # tau_decay_fast (tau_d*1000)
                             base_params['tau_decay_slow'],  # tau_decay_slow (in seconds, NOT *1000)
                             frac_fast,  # frac_fast varies across templates
-                            0.0,  # t_peak
+                            0.0,  # t_onset
                         ]
                         y = model_func(dt_ms, *params)
                         peak_val = np.max(y) if np.any(y > 0) else 1.0
@@ -2185,7 +2224,7 @@ def extract_metrics(
                             extra_params = {
                                 k: float(v)
                                 for k, v in params_dict.items()
-                                if k not in {'amp', 't_peak', '_recut'}
+                                if k not in {'amp', 't_onset', '_recut'}
                             }
                 except Exception:
                     extra_params = None
@@ -2207,7 +2246,7 @@ def extract_metrics(
             filtered_params: Dict[str, float] = {}
             if isinstance(extra, dict):
                 for key, val in extra.items():
-                    if key in {'amp', 't_peak', '_recut'}:
+                    if key in {'amp', 't_onset', '_recut'}:
                         continue
                     try:
                         filtered_params[key] = float(val)
@@ -2675,14 +2714,14 @@ def extract_metrics(
                 global_fit_params = {
                     k: float(v)
                     for k, v in fitted.items()
-                    if k != 'amp' and k != 't_peak' and k != '_recut'
+                    if k != 'amp' and k != 't_onset' and k != '_recut'
                 }
             except Exception:
                 global_fit_params = {}
 
             tau_r = float(fitted.get('tau_rise', 0.002))
             tau_d0 = float(fitted.get('tau_decay', fitted.get('tau_decay_fast', 0.010)))
-            event_t0_s = float(fitted.get('t_peak', 0.0)) / 1000.0
+            event_t0_s = float(fitted.get('t_onset', 0.0)) / 1000.0
 
 
             # Carry over model-specific parameters (only if not explicitly set by user)
@@ -2691,7 +2730,7 @@ def extract_metrics(
                 cfg['event_model_settings'].setdefault('n_coop', float(fitted['n_coop']))
             elif event_model not in varying_supported_names:
                 for k, v in fitted.items():
-                    if k not in ('amp', 't_peak', '_recut') and np.isfinite(v):
+                    if k not in ('amp', 't_onset', '_recut') and np.isfinite(v):
                         # Only set if user didn't explicitly provide this parameter
                         cfg['event_model_settings'].setdefault(k, float(v))
 
@@ -2701,6 +2740,8 @@ def extract_metrics(
                 param_bounds = cfg.get('parameter_bounds', {}) or {}
                 if 'tau_decay_superslow' not in em_settings:
                     tau_superslow_setting = None
+                    min_superslow_frac = None
+                    superslow_disabled = False
                     bound = param_bounds.get('tau_decay_superslow')
                     if bound and isinstance(bound, (tuple, list)) and len(bound) == 2:
                         lower, upper = float(bound[0]), float(bound[1])
@@ -2710,8 +2751,18 @@ def extract_metrics(
                             else:
                                 tau_superslow_setting = (lower + upper) / 2.0
                     if tau_superslow_setting is None:
-                        tau_superslow_setting = estimate_tau_superslow_from_last_event_decay(
-                            t, y_avg, stim_times, isi, event_t0_s=event_t0_s
+                        tau_fast_fit = None
+                        try:
+                            tau_fast_fit = float(fitted.get('tau_decay_fast', np.nan))
+                        except Exception:
+                            tau_fast_fit = None
+                        if tau_fast_fit is None or not np.isfinite(tau_fast_fit):
+                            try:
+                                tau_fast_fit = float(em_settings.get('tau_decay_fast', np.nan))
+                            except Exception:
+                                tau_fast_fit = None
+                        tau_superslow_setting, min_superslow_frac = estimate_tau_superslow_from_last_event_decay(
+                            t, y_avg, stim_times, isi, event_t0_s=event_t0_s, tau_fast_s=tau_fast_fit
                         )
                     # Enforce superslow >= slow and optionally disable superslow if too close to slow
                     tau_slow_fit = None
@@ -2726,13 +2777,14 @@ def extract_metrics(
                         except Exception:
                             tau_slow_fit = None
 
-                    min_ratio = float(cfg.get('superslow_min_ratio', 1.2))
+                    min_ratio = float(cfg.get('superslow_min_ratio', 1.0))
                     if not np.isfinite(min_ratio) or min_ratio < 1.0:
                         min_ratio = 1.0
 
                     if tau_superslow_setting is None:
                         cfg['template_variant_superslow_fracs'] = [0.0]
                         triexp_variant_grid = None
+                        superslow_disabled = True
                         progress_print("[tri-exp] No superslow tau estimate; disabling superslow variants.")
                     else:
                         if tau_slow_fit is not None and np.isfinite(tau_slow_fit):
@@ -2741,11 +2793,34 @@ def extract_metrics(
                             if tau_superslow_setting < tau_slow_fit * min_ratio:
                                 cfg['template_variant_superslow_fracs'] = [0.0]
                                 triexp_variant_grid = None
+                                superslow_disabled = True
                                 progress_print(
                                     "[tri-exp] Superslow tau too close to slow "
                                     f"({tau_superslow_setting*1000:.1f}ms < {min_ratio:.2f}x {tau_slow_fit*1000:.1f}ms); "
                                     "disabling superslow variants."
                                 )
+                        if (not superslow_disabled) and min_superslow_frac is not None and np.isfinite(min_superslow_frac):
+                            min_superslow_frac = float(np.clip(min_superslow_frac, 0.0, 1.0))
+                            ss_fracs = cfg.get('template_variant_superslow_fracs', [0.0])
+                            if not isinstance(ss_fracs, (list, tuple, np.ndarray)):
+                                ss_fracs = [ss_fracs]
+                            ss_filtered = []
+                            for val in ss_fracs:
+                                try:
+                                    fval = float(val)
+                                except Exception:
+                                    continue
+                                if np.isfinite(fval) and fval + 1e-9 >= min_superslow_frac:
+                                    ss_filtered.append(fval)
+                            ss_filtered = sorted(set(ss_filtered))
+                            if not ss_filtered:
+                                ss_filtered = [min_superslow_frac]
+                            cfg['template_variant_superslow_fracs'] = ss_filtered
+                            triexp_variant_grid = None
+                            progress_print(
+                                "[tri-exp] Enforcing min superslow fraction at last event: "
+                                f"{min_superslow_frac:.2f} (kept {len(ss_filtered)} variants)"
+                            )
                         cfg['event_model_settings'].setdefault('tau_decay_superslow', float(tau_superslow_setting))
 
             # REBUILD variant kernel builder with fitted parameters
@@ -2854,7 +2929,7 @@ def extract_metrics(
                                 tau_superslow_s,  # tau_decay_superslow (seconds)
                                 frac_fast,  # fast fraction varies
                                 frac_intermediate,  # intermediate fraction
-                                0.0,  # t_peak
+                                0.0,  # t_onset
                             ]
                             y = model_func(dt_ms, *params)
                             peak_val = np.max(y) if np.any(y > 0) else 1.0
@@ -2883,7 +2958,7 @@ def extract_metrics(
                                 tau_fast_ms,  # FITTED fast decay (tau_d*1000)
                                 fitted_params['tau_decay_slow'],  # FITTED slow decay (in seconds, NOT *1000)
                                 frac_fast,  # frac_fast varies across templates
-                                0.0,  # t_peak
+                                0.0,  # t_onset
                             ]
                             y = model_func(dt_ms, *params)
                             peak_val = np.max(y) if np.any(y > 0) else 1.0
@@ -2927,7 +3002,11 @@ def extract_metrics(
 
         ev_model_name, n_coop_effective = _apply_event_model_from_cfg(verbose=False)  # Suppress duplicate message
         is_varying_model = ev_model_name in varying_supported_names
-        progress_print(f"[fit][global] recut tau_r={tau_r*1000:.2f}ms tau_d={tau_d0*1000:.2f}ms model={event_model}")
+        progress_print(
+            f"[fit][global] recut tau_r={tau_r*1000:.2f}ms "
+            f"tau_d={tau_d0*1000:.2f}ms "
+            f"t_onset={event_t0_s*1000:.2f}ms model={event_model}"
+        )
 
         # Global fit_source: anchor global tau to middle event, then constrain per-event fits
         if dec_mode == 'fixed':
@@ -3570,17 +3649,49 @@ def extract_metrics(
     # Debug: check why variants might not be used
     _use_var = cfg.get('use_template_variants', False)
     _builder_set = _VARIANT_KERNEL_BUILDER is not None
-    try:
-        progress_print(f"[NNLS DEBUG] use_template_variants={_use_var}, _VARIANT_KERNEL_BUILDER is not None={_builder_set}")
-        if not _use_var:
-            progress_print(f"[NNLS DEBUG] 'use_template_variants' not found in cfg or False")
-        if not _builder_set:
-            progress_print(f"[NNLS DEBUG] _VARIANT_KERNEL_BUILDER is None!")
-    except Exception:
-        pass
+    # NNLS debug logging intentionally suppressed to reduce noise.
     # Check if we should use the variant-based fitting approach
     use_variants_approach = cfg.get('use_template_variants', False) and _VARIANT_KERNEL_BUILDER is not None
     jitter_variant_ms = cfg.get('jitter_variant_ms', None)
+
+    # Constrain jitter so t_onset stays within bounds when specified
+    t_onset_bounds = cfg.get('parameter_bounds', {}).get('t_onset')
+    if jitter_variant_ms is not None and t_onset_bounds is not None:
+        try:
+            if isinstance(t_onset_bounds, (tuple, list)) and len(t_onset_bounds) == 2:
+                t_onset_min, t_onset_max = float(t_onset_bounds[0]), float(t_onset_bounds[1])
+                if np.isfinite(t_onset_min) or np.isfinite(t_onset_max):
+                    event_t0_ms = float(event_t0_s) * 1000.0
+                    jitter_arr = np.asarray(jitter_variant_ms, float)
+                    allowed = []
+                    for j in jitter_arr:
+                        t_onset_ms = event_t0_ms + float(j)
+                        if np.isfinite(t_onset_min) and t_onset_ms < t_onset_min - 1e-9:
+                            continue
+                        if np.isfinite(t_onset_max) and t_onset_ms > t_onset_max + 1e-9:
+                            continue
+                        allowed.append(float(j))
+                    if not allowed:
+                        if np.isfinite(event_t0_ms):
+                            if ((not np.isfinite(t_onset_min) or event_t0_ms >= t_onset_min - 1e-9)
+                                    and (not np.isfinite(t_onset_max) or event_t0_ms <= t_onset_max + 1e-9)):
+                                allowed = [0.0]
+                            else:
+                                clamped = event_t0_ms
+                                if np.isfinite(t_onset_min) and clamped < t_onset_min:
+                                    clamped = t_onset_min
+                                if np.isfinite(t_onset_max) and clamped > t_onset_max:
+                                    clamped = t_onset_max
+                                allowed = [float(clamped - event_t0_ms)]
+                        else:
+                            allowed = [0.0]
+                    jitter_variant_ms = np.array(sorted(set(allowed)), float)
+                    progress_print(
+                        "[NNLS] Jitter constrained by t_onset bounds "
+                        f"({t_onset_min:.2f}-{t_onset_max:.2f} ms): {len(jitter_variant_ms)} shifts"
+                    )
+        except Exception:
+            pass
 
     # Also use variants approach if jitter_variant_ms is specified (even without template variants)
     if jitter_variant_ms is not None and not use_variants_approach:
@@ -3657,6 +3768,11 @@ def extract_metrics(
                         progress_print(f"[NNLS] Dominant slow fractions per event: {[f'{r:.1f}' for r in dominant_ratios]}")
                 if jitter_variant_ms is not None:
                     progress_print(f"[NNLS] Dominant jitter (ms) per event: {[f'{j:.2f}' for j in dominant_jitters]}")
+                    try:
+                        t_onset_ms = [event_t0_s * 1000.0 + float(j) for j in dominant_jitters]
+                        progress_print(f"[NNLS] t_onset (ms) per event: {[f'{tp:.2f}' for tp in t_onset_ms]}")
+                    except Exception:
+                        pass
             else:
                 # Old format (backward compatibility)
                 dominant_idx = variant_info_avg.get('dominant_variant_idx', [])
@@ -3880,23 +3996,23 @@ def extract_metrics(
                 popt = None
                 if _name in {'double_exp','cooperative','bilinear'}:
                     # Use the kinetics selected for this run (tau_r, tau_d0)
-                    # Respect any fitted t_peak so the overlay shifts correctly
-                    t_peak_ms = 0.0
+                    # Respect any fitted t_onset so the overlay shifts correctly
+                    t_onset_ms = 0.0
                     try:
                         if 'fitted' in locals() and fitted is not None:
-                            t_peak_ms = float(fitted.get('t_peak', 0.0))
+                            t_onset_ms = float(fitted.get('t_onset', 0.0))
                     except Exception:
-                        t_peak_ms = 0.0
+                        t_onset_ms = 0.0
                     if _name == 'double_exp':
-                        # [amp, tau_rise(s), tau_decay(s), t_peak(ms)]
-                        pars = [1.0, float(tau_r), float(tau_d0), t_peak_ms]
+                        # [amp, tau_rise(s), tau_decay(s), t_onset(ms)]
+                        pars = [1.0, float(tau_r), float(tau_d0), t_onset_ms]
                     elif _name == 'cooperative':
                         ems = cfg.get('event_model_settings', {}) or {}
                         n_used = float(ems.get('n_coop', 2.0))
-                        # [amp, tau_rise(s), tau_decay(s), n_coop, t_peak(ms)]
-                        pars = [1.0, float(tau_r), float(tau_d0), n_used, t_peak_ms]
+                        # [amp, tau_rise(s), tau_decay(s), n_coop, t_onset(ms)]
+                        pars = [1.0, float(tau_r), float(tau_d0), n_used, t_onset_ms]
                     else:  # bilinear expects ms values for rise/decay durations
-                        pars = [1.0, float(tau_r)*1000.0, float(tau_d0)*1000.0, t_peak_ms]
+                        pars = [1.0, float(tau_r)*1000.0, float(tau_d0)*1000.0, t_onset_ms]
                     yshape = spec['func'](tf, *pars)
                     denom = float(np.sum(yshape**2)) if np.isfinite(yshape).any() else 0.0
                     amp_ls = float(np.sum(yf*yshape))/denom if denom > 0 else 1.0
@@ -3910,18 +4026,18 @@ def extract_metrics(
                     # order expected by the spec and only solve a linear LS
                     # for amplitude so the overlay matches scale.
                     params = []
-                    t_peak_ms = 0.0
+                    t_onset_ms = 0.0
                     try:
                         if 'fitted' in locals() and fitted is not None:
-                            t_peak_ms = float(fitted.get('t_peak', 0.0))
+                            t_onset_ms = float(fitted.get('t_onset', 0.0))
                     except Exception:
-                        t_peak_ms = 0.0
+                        t_onset_ms = 0.0
                     ems = cfg.get('event_model_settings', {}) or {}
                     for name in spec['params']:
                         if name == 'amp':
                             params.append(1.0)
-                        elif name == 't_peak':
-                            params.append(t_peak_ms)
+                        elif name == 't_onset':
+                            params.append(t_onset_ms)
                         else:
                             # Prefer values from the recent global fit if available;
                             # then explicit user overrides in event_model_settings;
@@ -3948,9 +4064,9 @@ def extract_metrics(
                     yhat_ev = spec['func'](tf, *popt)
                 axL.plot(tf, yhat_ev, color='crimson', ls='--', lw=1.8, label=_name)
                 try:
-                    # Omit 't_peak' and stack vertically; include amp at top for context
+                    # Omit 't_onset' and stack vertically; include amp at top for context
                     pairs = [(n, v) for n, v in zip(spec['params'], popt)]
-                    pairs = [(n, v) for n, v in pairs if n != 't_peak']
+                    pairs = [(n, v) for n, v in pairs if n != 't_onset']
                     txt = "\n".join(f"{n}={v:.3g}" for n, v in pairs)
                     axL.text(0.98, 0.98, txt, transform=axL.transAxes, fontsize=8,
                              va='top', ha='right', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
@@ -4083,9 +4199,19 @@ def extract_metrics(
             peak_vals: list = []
             resid_vals: list = []
             for p, st in enumerate(stim_times):
-                tp, vp = pick_peak_on_series(t, y_for_peaks, float(st), win_ms, pre_ms)
+                series_for_peak = y_for_peaks
+                if meas == 'NNLS' and baseline_prev_only:
+                    try:
+                        series_for_peak = y_for_peaks - baseline_prev_only[p]
+                    except Exception:
+                        series_for_peak = y_for_peaks
+                tp, _ = pick_peak_on_series(t, series_for_peak, float(st), win_ms, pre_ms)
                 peak_ts.append(float(tp))
-                peak_vals.append(float(vp))
+                try:
+                    i0 = int(np.argmin(np.abs(t - tp)))
+                    peak_vals.append(float(y_for_peaks[i0]))
+                except Exception:
+                    peak_vals.append(float(y_for_peaks[0]) if y_for_peaks is not None else np.nan)
                 # Residual-under-peak = baseline from prior pulses at that time
                 try:
                     i0 = int(np.argmin(np.abs(t - tp)))
@@ -4122,6 +4248,29 @@ def extract_metrics(
                 ax.plot(t_fit, y_fit, 'g--', lw=2.0, alpha=0.8, label=f'post-train fit (τ={tau*1000:.1f}ms)')
         except Exception:
             pass
+        # Overlay last-event superslow decay fit for tri-exp (orange dashed line)
+        if event_model == 'iglusnfr_tri':
+            try:
+                global _LAST_EVENT_DECAY_FIT
+                if _LAST_EVENT_DECAY_FIT is not None:
+                    le_fit = _LAST_EVENT_DECAY_FIT
+                    t_start = le_fit['t_start']
+                    t_end = le_fit['t_end']
+                    baseline = le_fit['baseline']
+                    a_fast = le_fit.get('a_fast', 0.0)
+                    tau_fast = le_fit.get('tau_fast', np.nan)
+                    a_slow = le_fit.get('a_slow', 0.0)
+                    tau_slow = le_fit.get('tau_slow', np.nan)
+                    t_fit = np.linspace(t_start, t_end, 100)
+                    y_fit = np.full_like(t_fit, baseline, dtype=float)
+                    if np.isfinite(tau_fast) and a_fast > 0:
+                        y_fit += a_fast * np.exp(-(t_fit - t_start) / max(tau_fast, 1e-6))
+                    if np.isfinite(tau_slow) and a_slow > 0:
+                        y_fit += a_slow * np.exp(-(t_fit - t_start) / max(tau_slow, 1e-6))
+                    ax.plot(t_fit, y_fit, color='tab:orange', ls='--', lw=2.0, alpha=0.85,
+                            label=f'last-event fit (τ={tau_slow*1000:.1f}ms)')
+            except Exception:
+                pass
             
         ax.set_xlim(z0, z1)
         ax.set_xlabel('Time (s)')
@@ -4654,9 +4803,19 @@ def extract_metrics(
 
                 peak_ts_t, peak_vals_t, resid_vals_t = [], [], []
                 for pp, stp in enumerate(stim_times):
-                    tp, vp = pick_peak_on_series(t, y_for_peaks_t, float(stp), win_ms, pre_ms)
+                    series_for_peak_t = y_for_peaks_t
+                    if meas == 'NNLS' and baseline_prev_only_t:
+                        try:
+                            series_for_peak_t = y_for_peaks_t - baseline_prev_only_t[pp]
+                        except Exception:
+                            series_for_peak_t = y_for_peaks_t
+                    tp, _ = pick_peak_on_series(t, series_for_peak_t, float(stp), win_ms, pre_ms)
                     peak_ts_t.append(float(tp))
-                    peak_vals_t.append(float(vp))
+                    try:
+                        i0 = int(np.argmin(np.abs(t - tp)))
+                        peak_vals_t.append(float(y_for_peaks_t[i0]))
+                    except Exception:
+                        peak_vals_t.append(float(y_for_peaks_t[0]) if y_for_peaks_t is not None else np.nan)
                     try:
                         i0 = int(np.argmin(np.abs(t - tp)))
                         base_prev = baseline_prev_only_t[pp][i0] if baseline_prev_only_t else 0.0
@@ -4965,7 +5124,12 @@ def extract_metrics(
                 ax_resid.set_title("NNLS residual (avg - model)")
                 ax_resid.set_xlabel("Time (s)")
                 ax_resid.set_ylabel("Residual ΔF/F0")
-                ax_resid.legend(loc='upper right')
+                try:
+                    handles, labels = ax_resid.get_legend_handles_labels()
+                    if handles:
+                        ax_resid.legend(loc='upper right')
+                except Exception:
+                    pass
                 plt.tight_layout()
         except Exception:
             figure_nnls_residual = None

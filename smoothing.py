@@ -524,16 +524,16 @@ def build_median_recut_waveform(
             peak_idx = None
             if recenter_limits is not None:
                 try:
-                    t_peak, _ = pick_peak_on_series(
+                    t_onset, _ = pick_peak_on_series(
                         time, y, st, peak_win_ms, peak_search_pre_ms
                     )
                 except Exception:
-                    t_peak = np.nan
-                if np.isfinite(t_peak):
-                    if t_peak <= st:
+                    t_onset = np.nan
+                if np.isfinite(t_onset):
+                    if t_onset <= st:
                         peak_idx = zero_idx
                     else:
-                        rel = ((t_peak - st) + pre_s) / dt_os
+                        rel = ((t_onset - st) + pre_s) / dt_os
                         try:
                             peak_idx = int(round(rel))
                         except Exception:

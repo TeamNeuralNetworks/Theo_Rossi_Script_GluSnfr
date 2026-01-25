@@ -79,7 +79,7 @@ def fit_average_event(
     parameter_bounds : dict, optional
         Optional per-parameter bounds overrides. Keys should match model params
         (e.g., 'tau_decay_fast', 'tau_decay_slow'). Bounds use the same units
-        as the model spec (seconds for taus, milliseconds for t_peak).
+        as the model spec (seconds for taus, milliseconds for t_onset).
 
     Returns
     -------
@@ -312,7 +312,7 @@ def fit_average_event(
         # curve_fit sensitive to initial conditions
         try:
             if spec.get('name', '').lower() == 'iglusnfr':
-                # For iGluSnFR: amp, tau_rise, tau_decay_fast, tau_decay_slow, frac_fast, t_peak
+                # For iGluSnFR: amp, tau_rise, tau_decay_fast, tau_decay_slow, frac_fast, t_onset
                 amp0, tr0, tdf0, tds0, ff0, tp0 = [float(x) for x in p0]
                 lb, ub = spec['bounds']
                 
@@ -403,7 +403,7 @@ def fit_average_event(
         # Robust seeding for iGluSnFR TRI-EXPONENTIAL: grid search over key parameters
         try:
             if spec.get('name', '').lower() == 'iglusnfr_tri':
-                # For iGluSnFR_tri: amp, tau_rise, tau_decay_fast, tau_decay_slow, tau_decay_superslow, frac_fast, frac_slow, t_peak
+                # For iGluSnFR_tri: amp, tau_rise, tau_decay_fast, tau_decay_slow, tau_decay_superslow, frac_fast, frac_slow, t_onset
                 amp0, tr0, tdf0, tds0, tdss0, ff0, fs0, tp0 = [float(x) for x in p0]
                 lb, ub = spec['bounds']
                 
@@ -496,13 +496,13 @@ def fit_average_event(
             model_name = spec.get('name', '').lower()
             if model_name in ('iglusnfr', 'iglusnfr_tri'):
                 peak_idx = int(np.argmax(yf))
-                t_peak = float(tf[peak_idx])
+                t_onset = float(tf[peak_idx])
                 sigma = np.ones_like(yf)
                 # High weight (low sigma) for initial decay: peak to peak+5ms
-                fast_decay_mask = (tf >= t_peak) & (tf <= t_peak + 0.005)
+                fast_decay_mask = (tf >= t_onset) & (tf <= t_onset + 0.005)
                 sigma[fast_decay_mask] = 0.3  # ~3x higher weight
                 # Medium weight for mid decay: peak+5ms to peak+10ms
-                mid_decay_mask = (tf > t_peak + 0.005) & (tf <= t_peak + 0.010)
+                mid_decay_mask = (tf > t_onset + 0.005) & (tf <= t_onset + 0.010)
                 sigma[mid_decay_mask] = 0.6  # ~1.7x higher weight
                 # Standard weight for late decay and rise
                 # Boost early post-stim window to stabilize tau_rise
@@ -549,7 +549,7 @@ def fit_average_event(
         def _weighted_sse(params):
             y_fit = spec['func'](tf, *params)
             r = yf - y_fit
-            t_peak = float(params[-1])
+            t_onset = float(params[-1])
             weights = np.zeros_like(r)
             fit_mask = tf >= fit_start_ms
             if np.any(fit_mask):
@@ -557,7 +557,7 @@ def fit_average_event(
                 early_mask = (tf >= fit_start_ms) & (tf <= fit_start_ms + early_window_ms)
                 if np.any(early_mask):
                     weights[early_mask] = np.maximum(weights[early_mask], early_boost)
-                decay_mask = tf > t_peak
+                decay_mask = tf > t_onset
                 if np.any(decay_mask):
                     weights[decay_mask] = np.maximum(weights[decay_mask], decay_boost)
                 weights[fit_mask] = weights[fit_mask] * amp_weight[fit_mask]
@@ -704,7 +704,7 @@ def fit_average_event(
             if grid_search_best is not None:
                 y_fit = spec['func'](tf, *popt)
                 r = yf - y_fit
-                t_peak = float(popt[-1])
+                t_onset = float(popt[-1])
                 weights = np.zeros_like(r)
                 fit_mask = tf >= fit_start_ms
                 if np.any(fit_mask):
@@ -712,7 +712,7 @@ def fit_average_event(
                     early_mask = (tf >= fit_start_ms) & (tf <= fit_start_ms + early_window_ms)
                     if np.any(early_mask):
                         weights[early_mask] = np.maximum(weights[early_mask], early_boost)
-                    decay_mask = tf > t_peak
+                    decay_mask = tf > t_onset
                     if np.any(decay_mask):
                         weights[decay_mask] = np.maximum(weights[decay_mask], decay_boost)
                     weights[fit_mask] = weights[fit_mask] * amp_weight[fit_mask]

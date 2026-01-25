@@ -65,7 +65,11 @@ Examples (usage):
 """
 
 # Ensure repo root is on sys.path when running this script from the subfolder
-REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+try:
+    _here = os.path.dirname(__file__)
+except NameError:
+    _here = os.getcwd()
+REPO_ROOT = os.path.abspath(os.path.join(_here, os.pardir))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
@@ -321,7 +325,7 @@ options_presets = {
         # Superslow fraction at final event (ramps up monotonically across the train)
         'template_variant_superslow_fracs': [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
         # Disable superslow if it is too close to the slow tau
-        'superslow_min_ratio': 1.2,
+        'superslow_min_ratio': 1.0,
         # === Jitter Variants (NEW) ===
         # Enable temporal jitter search in milliseconds
         # Reduced range to prevent NNLS convergence issues

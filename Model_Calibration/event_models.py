@@ -27,7 +27,7 @@ from typing import Callable, Dict, Tuple, List
 import numpy as np
 
 # Global fit limits that can be tweaked by calling code. These bounds
-# are applied across models for common parameters like t_peak and tau
+# are applied across models for common parameters like t_onset and tau
 # values.  Three tau categories:
 #   - tau_primary: fast components (rise, fast decay): 0.5-10ms
 #   - tau_secondary: slow components (slow decay): 10-300ms
@@ -36,7 +36,7 @@ import numpy as np
 # For tri-exponential, tau_secondary is narrower (10-25ms) and tau_tertiary
 # handles the super-slow component.
 FIT_LIMITS: Dict[str, Tuple[float, float]] = {
-    't_peak': (-2.0, 10.0),          # Peak location: -2 to +10 ms
+    't_onset': (-2.0, 10.0),          # Peak location: -2 to +10 ms
     'tau': (0.001, 0.300),           # Generic tau up to 300ms
     'tau_primary': (0.0003, 0.010),  # Fast: 0.3-10ms (rise, fast decay) - allow very fast
     'tau_secondary': (0.008, 0.300), # Slow: 8-300ms (for bi-exponential or intermediate)
@@ -49,7 +49,7 @@ def set_fit_limits(**kwargs) -> None:
 
     Example::
 
-        set_fit_limits(t_peak=(0, 8), tau_secondary=(0.020, 0.500))
+        set_fit_limits(t_onset=(0, 8), tau_secondary=(0.020, 0.500))
     """
     for key, val in kwargs.items():
         if key in FIT_LIMITS and isinstance(val, (tuple, list)) and len(val) == 2:
@@ -62,8 +62,8 @@ def _apply_global_bounds(spec: Dict) -> Dict:
     lb = list(lb)
     ub = list(ub)
     for i, p in enumerate(spec['params']):
-        if p == 't_peak':
-            lb[i], ub[i] = FIT_LIMITS['t_peak']
+        if p == 't_onset':
+            lb[i], ub[i] = FIT_LIMITS['t_onset']
         elif 'tau' in p:
             # Tri-exponential: fast < slow < superslow
             if 'superslow' in p or 'super_slow' in p:
@@ -82,7 +82,7 @@ def _apply_global_bounds(spec: Dict) -> Dict:
     spec['bounds'] = (lb, ub)
     return spec
 
-def model_double_exp_constrained(t, amp, tau_rise, tau_decay, t_peak):
+def model_double_exp_constrained(t, amp, tau_rise, tau_decay, t_onset):
     """Classic double exponential: (exp(-t/tau_decay) - exp(-t/tau_rise)).
 
     Parameters in seconds; t in milliseconds.
@@ -90,9 +90,9 @@ def model_double_exp_constrained(t, amp, tau_rise, tau_decay, t_peak):
     """
     t = np.asarray(t)
     y = np.zeros_like(t, dtype=float)
-    m = t >= t_peak
+    m = t >= t_onset
     if np.any(m):
-        ts = (t[m] - t_peak) / 1000.0
+        ts = (t[m] - t_onset) / 1000.0
         tr = max(tau_rise, 1e-6)
         td = max(tau_decay, 1e-6)
         if td <= tr:
@@ -107,16 +107,16 @@ def model_double_exp_constrained(t, amp, tau_rise, tau_decay, t_peak):
     return y
 
 
-def model_cooperative_binding(t, amp, tau_rise, tau_decay, n_coop, t_peak):
+def model_cooperative_binding(t, amp, tau_rise, tau_decay, n_coop, t_onset):
     """Cooperative binding: Hill-like rise times exponential decay.
 
     Parameters in seconds (taus) and dimensionless n_coop; t in milliseconds.
     """
     t = np.asarray(t)
     y = np.zeros_like(t, dtype=float)
-    m = t >= t_peak
+    m = t >= t_onset
     if np.any(m):
-        ts = (t[m] - t_peak) / 1000.0
+        ts = (t[m] - t_onset) / 1000.0
         tr = max(tau_rise, 1e-6)
         td = max(tau_decay, 1e-6)
         n = max(n_coop, 0.5)
@@ -127,7 +127,7 @@ def model_cooperative_binding(t, amp, tau_rise, tau_decay, n_coop, t_peak):
     return y
 
 
-def model_two_step_binding(t, amp, tau_bind, tau_conform, tau_dissoc, t_peak):
+def model_two_step_binding(t, amp, tau_bind, tau_conform, tau_dissoc, t_onset):
     """Two-step binding model for iGluSnFR: binding → conformational change → dissociation.
     
     This model captures the biophysical mechanism where conformational change is rate-limiting.
@@ -139,9 +139,9 @@ def model_two_step_binding(t, amp, tau_bind, tau_conform, tau_dissoc, t_peak):
     """
     t = np.asarray(t)
     y = np.zeros_like(t, dtype=float)
-    m = t >= t_peak
+    m = t >= t_onset
     if np.any(m):
-        ts = (t[m] - t_peak) / 1000.0
+        ts = (t[m] - t_onset) / 1000.0
         tb = max(tau_bind, 1e-6)      
         tc = max(tau_conform, 1e-6)   
         td = max(tau_dissoc, 1e-6)    
@@ -153,9 +153,9 @@ def model_two_step_binding(t, amp, tau_bind, tau_conform, tau_dissoc, t_peak):
         rise = (np.exp(-ts / tb) - np.exp(-ts / tc)) / (tc - tb)
         
         # Optional: normalize so peak amplitude = 1 before applying amp
-        t_peak_rise = tb * tc / (tc - tb) * np.log(tc / tb)
-        if t_peak_rise > 0:
-            rise_max = (np.exp(-t_peak_rise / tb) - np.exp(-t_peak_rise / tc)) / (tc - tb)
+        peak_rise_t = tb * tc / (tc - tb) * np.log(tc / tb)
+        if peak_rise_t > 0:
+            rise_max = (np.exp(-peak_rise_t / tb) - np.exp(-peak_rise_t / tc)) / (tc - tb)
             rise = rise / rise_max
         
         dissoc = np.exp(-ts / td)
@@ -163,7 +163,7 @@ def model_two_step_binding(t, amp, tau_bind, tau_conform, tau_dissoc, t_peak):
     return y
 
 
-def model_single_exp_constrained(t, amp, tau_decay, t_peak):
+def model_single_exp_constrained(t, amp, tau_decay, t_onset):
     """Single exponential decay: instantaneous rise followed by exponential decay.
     
     Biological context: Models processes with instantaneous neurotransmitter release
@@ -176,14 +176,14 @@ def model_single_exp_constrained(t, amp, tau_decay, t_peak):
     """
     t = np.asarray(t)
     y = np.zeros_like(t, dtype=float)
-    m = t >= t_peak
+    m = t >= t_onset
     if np.any(m):
-        ts = (t[m] - t_peak) / 1000.0
+        ts = (t[m] - t_onset) / 1000.0
         y[m] = amp * np.exp(-ts / max(tau_decay, 1e-6))
     return y
 
 
-def model_alpha_constrained(t, amp, tau, t_peak):
+def model_alpha_constrained(t, amp, tau, t_onset):
     """Alpha function: (t/τ) * exp(-t/τ). Classic model for synaptic currents.
     
     Biological context: Originally developed to model miniature synaptic currents.
@@ -198,16 +198,16 @@ def model_alpha_constrained(t, amp, tau, t_peak):
     """
     t = np.asarray(t)
     y = np.zeros_like(t, dtype=float)
-    m = t >= t_peak
+    m = t >= t_onset
     if np.any(m):
-        ts = (t[m] - t_peak) / 1000.0
+        ts = (t[m] - t_onset) / 1000.0
         tau_s = max(tau, 1e-6)
         e_inv = 1.0 / np.e
         y[m] = amp * (ts / tau_s) * np.exp(-ts / tau_s) / e_inv
     return y
 
 
-def model_gamma_constrained(t, amp, n, tau, t_peak):
+def model_gamma_constrained(t, amp, n, tau, t_onset):
     """Gamma function: (t/τ)^n * exp(-t/τ). Models multi-step processes.
     
     Biological context: Represents cascaded processes with multiple rate-limiting steps:
@@ -221,9 +221,9 @@ def model_gamma_constrained(t, amp, n, tau, t_peak):
     """
     t = np.asarray(t)
     y = np.zeros_like(t, dtype=float)
-    m = t >= t_peak
+    m = t >= t_onset
     if np.any(m):
-        ts = (t[m] - t_peak) / 1000.0
+        ts = (t[m] - t_onset) / 1000.0
         tau_s = max(tau, 1e-6)
         n_safe = max(n, 0.1)
         x = ts / tau_s
@@ -235,7 +235,7 @@ def model_gamma_constrained(t, amp, n, tau, t_peak):
     return y
 
 
-def model_bilinear_constrained(t, amp, t_rise, t_decay, t_peak):
+def model_bilinear_constrained(t, amp, t_rise, t_decay, t_onset):
     """Bilinear rise + exponential decay: linear rise to peak, then exponential decay.
     
     Biological context: Models processes with rate-limited buildup:
@@ -248,19 +248,19 @@ def model_bilinear_constrained(t, amp, t_rise, t_decay, t_peak):
     """
     t = np.asarray(t)
     y = np.zeros_like(t, dtype=float)
-    rise_mask = (t >= t_peak) & (t <= t_peak + t_rise)
+    rise_mask = (t >= t_onset) & (t <= t_onset + t_rise)
     if np.any(rise_mask):
-        t_rel = t[rise_mask] - t_peak
+        t_rel = t[rise_mask] - t_onset
         y[rise_mask] = amp * (t_rel / max(t_rise, 0.1))
-    decay_mask = t > (t_peak + t_rise)
+    decay_mask = t > (t_onset + t_rise)
     if np.any(decay_mask):
-        ts = (t[decay_mask] - t_peak - t_rise) / 1000.0  # Convert to seconds
+        ts = (t[decay_mask] - t_onset - t_rise) / 1000.0  # Convert to seconds
         tau_s = max(t_decay / 1000.0, 1e-6)  # t_decay is in ms, convert to seconds
         y[decay_mask] = amp * np.exp(-ts / tau_s)
     return y
 
 
-def model_binding_kinetics(t, amp, kon, koff, tau_clear, t_peak):
+def model_binding_kinetics(t, amp, kon, koff, tau_clear, t_onset):
     """Binding kinetics with clearance: models receptor binding and dissociation.
     
     Biological context: Explicit modeling of neurotransmitter-receptor interactions:
@@ -274,9 +274,9 @@ def model_binding_kinetics(t, amp, kon, koff, tau_clear, t_peak):
     """
     t = np.asarray(t)
     y = np.zeros_like(t, dtype=float)
-    m = t >= t_peak
+    m = t >= t_onset
     if np.any(m):
-        ts = (t[m] - t_peak) / 1000.0
+        ts = (t[m] - t_onset) / 1000.0
         kon_s = max(kon, 1.0)
         koff_s = max(koff, 1.0)
         binding = 1 - np.exp(-ts * kon_s)
@@ -285,7 +285,7 @@ def model_binding_kinetics(t, amp, kon, koff, tau_clear, t_peak):
     return y
 
 
-def model_two_component_shared_rise(t, amp_fast, tau_rise, tau_fast, amp_slow, tau_slow, t_peak):
+def model_two_component_shared_rise(t, amp_fast, tau_rise, tau_fast, amp_slow, tau_slow, t_onset):
     """Two-component decay with shared rise time: models heterogeneous populations.
     
     Biological context: Represents mixed populations with different kinetics:
@@ -299,9 +299,9 @@ def model_two_component_shared_rise(t, amp_fast, tau_rise, tau_fast, amp_slow, t
     """
     t = np.asarray(t)
     y = np.zeros_like(t, dtype=float)
-    m = t >= t_peak
+    m = t >= t_onset
     if np.any(m):
-        ts = (t[m] - t_peak) / 1000.0
+        ts = (t[m] - t_onset) / 1000.0
         rise = 1 - np.exp(-ts / max(tau_rise, 1e-6))
         fast = amp_fast * np.exp(-ts / max(tau_fast, 1e-6))
         slow = amp_slow * np.exp(-ts / max(tau_slow, 1e-6))
@@ -309,7 +309,7 @@ def model_two_component_shared_rise(t, amp_fast, tau_rise, tau_fast, amp_slow, t
     return y
 
 
-def model_desensitization(t, amp, tau_rise, tau_decay, tau_recovery, desens_factor, t_peak):
+def model_desensitization(t, amp, tau_rise, tau_decay, tau_recovery, desens_factor, t_onset):
     """Desensitization model: activation with progressive reduction due to inactivation.
     
     Biological context: Models receptor or channel desensitization:
@@ -323,9 +323,9 @@ def model_desensitization(t, amp, tau_rise, tau_decay, tau_recovery, desens_fact
     """
     t = np.asarray(t)
     y = np.zeros_like(t, dtype=float)
-    m = t >= t_peak
+    m = t >= t_onset
     if np.any(m):
-        ts = (t[m] - t_peak) / 1000.0
+        ts = (t[m] - t_onset) / 1000.0
         rise = 1 - np.exp(-ts / max(tau_rise, 1e-6))
         decay = np.exp(-ts / max(tau_decay, 1e-6))
         rec = 1 - desens_factor * (1 - np.exp(-ts / max(tau_recovery, 1e-6)))
@@ -333,7 +333,7 @@ def model_desensitization(t, amp, tau_rise, tau_decay, tau_recovery, desens_fact
     return y
 
 
-def model_cooperative_plus_linear(t, amp_coop, tau_rise_coop, tau_decay_coop, n_coop, amp_linear, tau_decay_linear, t_peak):
+def model_cooperative_plus_linear(t, amp_coop, tau_rise_coop, tau_decay_coop, n_coop, amp_linear, tau_decay_linear, t_onset):
     """Cooperative + linear components: combines Hill-like and simple exponential kinetics.
     
     Biological context: Models mixed binding mechanisms:
@@ -347,9 +347,9 @@ def model_cooperative_plus_linear(t, amp_coop, tau_rise_coop, tau_decay_coop, n_
     """
     t = np.asarray(t)
     y = np.zeros_like(t, dtype=float)
-    m = t >= t_peak
+    m = t >= t_onset
     if np.any(m):
-        ts = (t[m] - t_peak) / 1000.0
+        ts = (t[m] - t_onset) / 1000.0
         tr = max(tau_rise_coop, 1e-6)
         n = max(n_coop, 0.5)
         norm_t = ts / tr
@@ -363,7 +363,7 @@ def model_cooperative_plus_linear(t, amp_coop, tau_rise_coop, tau_decay_coop, n_
     return y
 
 
-def model_diffusion_clearance(t, amp, tau_diff, tau_clear1, tau_clear2, frac_clear1, t_peak):
+def model_diffusion_clearance(t, amp, tau_diff, tau_clear1, tau_clear2, frac_clear1, t_onset):
     """Diffusion-limited rise with bi-exponential clearance.
     
     Biological context: Models spatially-distributed processes:
@@ -379,9 +379,9 @@ def model_diffusion_clearance(t, amp, tau_diff, tau_clear1, tau_clear2, frac_cle
     """
     t = np.asarray(t)
     y = np.zeros_like(t, dtype=float)
-    m = t >= t_peak
+    m = t >= t_onset
     if np.any(m):
-        ts = (t[m] - t_peak) / 1000.0
+        ts = (t[m] - t_onset) / 1000.0
         tau_d = max(tau_diff, 1e-6)
         rise = (ts / tau_d) * np.exp(-ts / tau_d)
         e_inv = 1.0 / np.e
@@ -392,7 +392,7 @@ def model_diffusion_clearance(t, amp, tau_diff, tau_clear1, tau_clear2, frac_cle
     return y
 
 
-def model_double_cooperative(t, amp, tau_rise1, tau_decay1, n1, tau_rise2, tau_decay2, n2, t_peak):
+def model_double_cooperative(t, amp, tau_rise1, tau_decay1, n1, tau_rise2, tau_decay2, n2, t_onset):
     """Sum of two cooperative binding components with different kinetics.
     
     Biological context: Represents multiple cooperative binding sites:
@@ -407,9 +407,9 @@ def model_double_cooperative(t, amp, tau_rise1, tau_decay1, n1, tau_rise2, tau_d
     """
     t = np.asarray(t)
     y = np.zeros_like(t, dtype=float)
-    m = t >= t_peak
+    m = t >= t_onset
     if np.any(m):
-        ts = (t[m] - t_peak) / 1000.0
+        ts = (t[m] - t_onset) / 1000.0
         tr1 = max(tau_rise1, 1e-6); n1s = max(n1, 0.5)
         tr2 = max(tau_rise2, 1e-6); n2s = max(n2, 0.5)
         x1 = ts / tr1; x2 = ts / tr2
@@ -421,7 +421,7 @@ def model_double_cooperative(t, amp, tau_rise1, tau_decay1, n1, tau_rise2, tau_d
     return y
 
 
-def model_heterogeneous_cooperative(t, amp, tau_rise1, tau_decay1, n1, frac1, tau_rise2, tau_decay2, n2, t_peak):
+def model_heterogeneous_cooperative(t, amp, tau_rise1, tau_decay1, n1, frac1, tau_rise2, tau_decay2, n2, t_onset):
     """Weighted sum of two cooperative components with adjustable fractions.
     
     Biological context: Heterogeneous receptor/sensor populations:
@@ -436,9 +436,9 @@ def model_heterogeneous_cooperative(t, amp, tau_rise1, tau_decay1, n1, frac1, ta
     """
     t = np.asarray(t)
     y = np.zeros_like(t, dtype=float)
-    m = t >= t_peak
+    m = t >= t_onset
     if np.any(m):
-        ts = (t[m] - t_peak) / 1000.0
+        ts = (t[m] - t_onset) / 1000.0
         tr1 = max(tau_rise1, 1e-6); tr2 = max(tau_rise2, 1e-6)
         n1s = max(n1, 0.5); n2s = max(n2, 0.5)
         x1 = ts / tr1; x2 = ts / tr2
@@ -453,7 +453,7 @@ def model_heterogeneous_cooperative(t, amp, tau_rise1, tau_decay1, n1, frac1, ta
 
 
 def model_two_component_cooperative(t, amp_fast, tau_rise_fast, tau_decay_fast, n_fast,
-                                    amp_slow, tau_rise_slow, tau_decay_slow, n_slow, t_peak):
+                                    amp_slow, tau_rise_slow, tau_decay_slow, n_slow, t_onset):
     """Two cooperative components with independent amplitudes and kinetics.
     
     Biological context: Most flexible model for heterogeneous cooperative systems:
@@ -468,9 +468,9 @@ def model_two_component_cooperative(t, amp_fast, tau_rise_fast, tau_decay_fast, 
     """
     t = np.asarray(t)
     y = np.zeros_like(t, dtype=float)
-    m = t >= t_peak
+    m = t >= t_onset
     if np.any(m):
-        ts = (t[m] - t_peak) / 1000.0
+        ts = (t[m] - t_onset) / 1000.0
         # fast component
         trf = max(tau_rise_fast, 1e-6); nf = max(n_fast, 0.5)
         xf = ts / trf
@@ -486,7 +486,7 @@ def model_two_component_cooperative(t, amp_fast, tau_rise_fast, tau_decay_fast, 
         y[m] = comp_f + comp_s
     return y
 
-def model_iglusnfr(t, amp, tau_rise, tau_decay_fast, tau_decay_slow, frac_fast, t_peak):
+def model_iglusnfr(t, amp, tau_rise, tau_decay_fast, tau_decay_slow, frac_fast, t_onset):
     """Optimized iGluSnFR S72A model with single rise and bi-exponential decay.
     
     Biophysical basis:
@@ -502,10 +502,10 @@ def model_iglusnfr(t, amp, tau_rise, tau_decay_fast, tau_decay_slow, frac_fast, 
     """
     t = np.asarray(t)
     y = np.zeros_like(t, dtype=float)
-    m = t >= t_peak
+    m = t >= t_onset
     
     if np.any(m):
-        ts = (t[m] - t_peak) / 1000.0
+        ts = (t[m] - t_onset) / 1000.0
         
         # Ensure valid time constants
         tr = max(tau_rise, 1e-6)
@@ -531,7 +531,7 @@ def model_iglusnfr(t, amp, tau_rise, tau_decay_fast, tau_decay_slow, frac_fast, 
 
 
 def model_iglusnfr_tri(t, amp, tau_rise, tau_decay_fast, tau_decay_slow, tau_decay_superslow,
-                       frac_fast, frac_slow, t_peak):
+                       frac_fast, frac_slow, t_onset):
     """Tri-exponential iGluSnFR model with fast, slow, and super-slow decay components.
     
     Biophysical basis:
@@ -550,10 +550,10 @@ def model_iglusnfr_tri(t, amp, tau_rise, tau_decay_fast, tau_decay_slow, tau_dec
     """
     t = np.asarray(t)
     y = np.zeros_like(t, dtype=float)
-    m = t >= t_peak
+    m = t >= t_onset
     
     if np.any(m):
-        ts = (t[m] - t_peak) / 1000.0
+        ts = (t[m] - t_onset) / 1000.0
         
         # Ensure valid time constants
         tr = max(tau_rise, 1e-6)
@@ -600,7 +600,7 @@ def get_event_model(name: str) -> Dict:
         return _apply_global_bounds({
             'name': 'double_exp',
             'func': model_double_exp_constrained,
-            'params': ['amp', 'tau_rise', 'tau_decay', 't_peak'],
+            'params': ['amp', 'tau_rise', 'tau_decay', 't_onset'],
             'bounds': ([0, 0.0005, 0.001, 0], [np.inf, 0.010, 0.200, 10]),
             'p0_func': lambda y, t: [float(np.nanmax(y)), 0.002, 0.020, float(t[np.nanargmax(y)])],
             'complexity': 4,
@@ -608,14 +608,14 @@ def get_event_model(name: str) -> Dict:
                 'tau_rise': 'monotonic_increasing',
                 'tau_decay': 'monotonic_increasing',
                 'amp': 'free',
-                't_peak': 'free',
+                't_onset': 'free',
             },
         })
     if nm in ('coop', 'cooperative', 'cooperative_binding'):
         return _apply_global_bounds({
             'name': 'cooperative',
             'func': model_cooperative_binding,
-            'params': ['amp', 'tau_rise', 'tau_decay', 'n_coop', 't_peak'],
+            'params': ['amp', 'tau_rise', 'tau_decay', 'n_coop', 't_onset'],
             'bounds': ([0, 0.001, 0.005, 0.5, 0], [np.inf, 0.020, 0.200, 5.0, 10]),
             'p0_func': lambda y, t: [float(np.nanmax(y)), 0.005, 0.030, 2.0, float(t[np.nanargmax(y)])],
             'complexity': 5,
@@ -624,7 +624,7 @@ def get_event_model(name: str) -> Dict:
             return _apply_global_bounds({
                 'name': 'two_step_binding',
                 'func': model_two_step_binding,
-                'params': ['amp', 'tau_bind', 'tau_conform', 'tau_dissoc', 't_peak'],
+                'params': ['amp', 'tau_bind', 'tau_conform', 'tau_dissoc', 't_onset'],
                 'bounds': ([0, 0.0001, 0.0008, 0.005, 0], [np.inf, 0.002, 0.015, 0.300, 10]),
                 'p0_func': lambda y, t: [float(np.nanmax(y)), 0.0005, 0.003, 0.040, float(t[np.nanargmax(y)])],
                 'complexity': 5,
@@ -633,7 +633,7 @@ def get_event_model(name: str) -> Dict:
         return _apply_global_bounds({
             'name': 'iglusnfr',
             'func': model_iglusnfr,
-            'params': ['amp', 'tau_rise', 'tau_decay_fast', 'tau_decay_slow', 'frac_fast', 't_peak'],
+            'params': ['amp', 'tau_rise', 'tau_decay_fast', 'tau_decay_slow', 'frac_fast', 't_onset'],
             # Widened bounds to capture full range of S72A kinetics
             # tau_rise: 0.1-15 ms (very fast to moderate)
             # tau_decay_fast: 2-30 ms (fast unbinding)
@@ -649,7 +649,7 @@ def get_event_model(name: str) -> Dict:
                 0.008,                                   # tau_decay_fast: 8 ms
                 0.035,                                   # tau_decay_slow: 35 ms
                 0.6,                                     # frac_fast: 60%
-                float(np.clip(t[np.nanargmax(y)], 0, 10))  # t_peak (clipped to bounds for robustness)
+                float(np.clip(t[np.nanargmax(y)], 0, 10))  # t_onset (clipped to bounds for robustness)
             ],
             'complexity': 6,
             # Per-parameter progression rules for train dynamics
@@ -662,7 +662,7 @@ def get_event_model(name: str) -> Dict:
                 'tau_decay_slow': 'monotonic_increasing',   # glutamate accumulation → slower decay
                 'frac_fast': 'free',                        # can vary either direction
                 'amp': 'free',                              # can increase or decrease
-                't_peak': 'free',                           # timing parameter
+                't_onset': 'free',                           # timing parameter
             },
         })
     if nm in ('iglusnfr_tri', 'iglusnfr_triexp', 'triexp'):
@@ -670,7 +670,7 @@ def get_event_model(name: str) -> Dict:
             'name': 'iglusnfr_tri',
             'func': model_iglusnfr_tri,
             'params': ['amp', 'tau_rise', 'tau_decay_fast', 'tau_decay_slow', 'tau_decay_superslow',
-                       'frac_fast', 'frac_slow', 't_peak'],
+                       'frac_fast', 'frac_slow', 't_onset'],
             # Tri-exponential with NON-OVERLAPPING ranges:
             # tau_rise: 0.5-5 ms
             # tau_decay_fast: 1-10 ms (intrinsic unbinding)
@@ -699,14 +699,14 @@ def get_event_model(name: str) -> Dict:
                 'frac_fast': 'monotonic_decreasing',        # Less fast component as train progresses
                 'frac_slow': 'free',
                 'amp': 'free',
-                't_peak': 'free',
+                't_onset': 'free',
             },
         })
     if nm in ('single', 'single_exp', 'single-exponential'):
         return _apply_global_bounds({
             'name': 'single_exp',
             'func': model_single_exp_constrained,
-            'params': ['amp', 'tau_decay', 't_peak'],
+            'params': ['amp', 'tau_decay', 't_onset'],
             'bounds': ([0, 0.001, 0], [np.inf, 0.200, 10]),
             'p0_func': lambda y, t: [float(np.nanmax(y)), 0.020, float(t[np.nanargmax(y)])],
             'complexity': 3,
@@ -715,7 +715,7 @@ def get_event_model(name: str) -> Dict:
         return _apply_global_bounds({
             'name': 'alpha',
             'func': model_alpha_constrained,
-            'params': ['amp', 'tau', 't_peak'],
+            'params': ['amp', 'tau', 't_onset'],
             'bounds': ([0, 0.001, 0], [np.inf, 0.100, 10]),
             'p0_func': lambda y, t: [float(np.nanmax(y)) * np.e, 0.010, float(t[np.nanargmax(y)])],
             'complexity': 3,
@@ -724,7 +724,7 @@ def get_event_model(name: str) -> Dict:
         return _apply_global_bounds({
             'name': 'gamma',
             'func': model_gamma_constrained,
-            'params': ['amp', 'n', 'tau', 't_peak'],
+            'params': ['amp', 'n', 'tau', 't_onset'],
             'bounds': ([0, 0.5, 0.001, 0], [np.inf, 8.0, 0.100, 10]),
             'p0_func': lambda y, t: [float(np.nanmax(y)) * 3.0, 2.0, 0.010, float(t[np.nanargmax(y)])],
             'complexity': 4,
@@ -733,7 +733,7 @@ def get_event_model(name: str) -> Dict:
         return _apply_global_bounds({
             'name': 'bilinear',
             'func': model_bilinear_constrained,
-            'params': ['amp', 't_rise', 't_decay', 't_peak'],
+            'params': ['amp', 't_rise', 't_decay', 't_onset'],
             'bounds': ([0, 0.1, 1, 0], [np.inf, 10, 100, 10]),
             'p0_func': lambda y, t: [float(np.nanmax(y)), 2.0, 20.0, float(t[np.nanargmax(y)])],
             'complexity': 4,
@@ -742,7 +742,7 @@ def get_event_model(name: str) -> Dict:
         return _apply_global_bounds({
             'name': 'binding_kinetics',
             'func': model_binding_kinetics,
-            'params': ['amp', 'kon', 'koff', 'tau_clear', 't_peak'],
+            'params': ['amp', 'kon', 'koff', 'tau_clear', 't_onset'],
             'bounds': ([0, 10, 1, 0.001, 0], [np.inf, 1000, 200, 0.200, 10]),
             'p0_func': lambda y, t: [float(np.nanmax(y)), 200, 50, 0.030, float(t[np.nanargmax(y)])],
             'complexity': 5,
@@ -751,7 +751,7 @@ def get_event_model(name: str) -> Dict:
         return _apply_global_bounds({
             'name': 'two_component',
             'func': model_two_component_shared_rise,
-            'params': ['amp_fast', 'tau_rise', 'tau_fast', 'amp_slow', 'tau_slow', 't_peak'],
+            'params': ['amp_fast', 'tau_rise', 'tau_fast', 'amp_slow', 'tau_slow', 't_onset'],
             'bounds': ([0, 0.0005, 0.001, 0, 0.010, 0], [np.inf, 0.010, 0.100, np.inf, 1.000, 10]),
             'p0_func': lambda y, t: [float(np.nanmax(y))*0.6, 0.002, 0.015, float(np.nanmax(y))*0.4, 0.080, float(t[np.nanargmax(y)])],
             'complexity': 6,
@@ -760,7 +760,7 @@ def get_event_model(name: str) -> Dict:
         return _apply_global_bounds({
             'name': 'desensitization',
             'func': model_desensitization,
-            'params': ['amp', 'tau_rise', 'tau_decay', 'tau_recovery', 'desens_factor', 't_peak'],
+            'params': ['amp', 'tau_rise', 'tau_decay', 'tau_recovery', 'desens_factor', 't_onset'],
             'bounds': ([0, 0.001, 0.005, 0.020, 0, 0], [np.inf, 0.010, 0.100, 1.000, 0.8, 10]),
             'p0_func': lambda y, t: [float(np.nanmax(y)), 0.003, 0.020, 0.100, 0.3, float(t[np.nanargmax(y)])],
             'complexity': 6,
@@ -769,7 +769,7 @@ def get_event_model(name: str) -> Dict:
         return _apply_global_bounds({
             'name': 'coop_plus_linear',
             'func': model_cooperative_plus_linear,
-            'params': ['amp_coop', 'tau_rise_coop', 'tau_decay_coop', 'n_coop', 'amp_linear', 'tau_decay_linear', 't_peak'],
+            'params': ['amp_coop', 'tau_rise_coop', 'tau_decay_coop', 'n_coop', 'amp_linear', 'tau_decay_linear', 't_onset'],
             'bounds': ([0, 0.001, 0.005, 0.5, 0, 0.010, 0], [np.inf, 0.020, 0.200, 5.0, np.inf, 0.500, 10]),
             'p0_func': lambda y, t: [float(np.nanmax(y))*0.8, 0.005, 0.030, 2.0, float(np.nanmax(y))*0.2, 0.100, float(t[np.nanargmax(y)])],
             'complexity': 7,
@@ -778,7 +778,7 @@ def get_event_model(name: str) -> Dict:
         return _apply_global_bounds({
             'name': 'diffusion_clearance',
             'func': model_diffusion_clearance,
-            'params': ['amp', 'tau_diff', 'tau_clear1', 'tau_clear2', 'frac_clear1', 't_peak'],
+            'params': ['amp', 'tau_diff', 'tau_clear1', 'tau_clear2', 'frac_clear1', 't_onset'],
             'bounds': ([0, 0.001, 0.005, 0.020, 0.1, 0], [np.inf, 0.020, 0.100, 0.500, 0.9, 10]),
             'p0_func': lambda y, t: [float(np.nanmax(y))*np.e, 0.003, 0.015, 0.080, 0.6, float(t[np.nanargmax(y)])],
             'complexity': 7,
@@ -787,7 +787,7 @@ def get_event_model(name: str) -> Dict:
         return _apply_global_bounds({
             'name': 'double_cooperative',
             'func': model_double_cooperative,
-            'params': ['amp', 'tau_rise1', 'tau_decay1', 'n1', 'tau_rise2', 'tau_decay2', 'n2', 't_peak'],
+            'params': ['amp', 'tau_rise1', 'tau_decay1', 'n1', 'tau_rise2', 'tau_decay2', 'n2', 't_onset'],
             'bounds': ([0, 0.001, 0.005, 0.5, 0.005, 0.020, 0.5, 0], [np.inf, 0.020, 0.100, 5.0, 0.100, 0.500, 5.0, 10]),
             'p0_func': lambda y, t: [float(np.nanmax(y)), 0.003, 0.015, 2.0, 0.010, 0.080, 1.5, float(t[np.nanargmax(y)])],
             'complexity': 8,
@@ -796,7 +796,7 @@ def get_event_model(name: str) -> Dict:
         return _apply_global_bounds({
             'name': 'hetero_coop',
             'func': model_heterogeneous_cooperative,
-            'params': ['amp', 'tau_rise1', 'tau_decay1', 'n1', 'frac1', 'tau_rise2', 'tau_decay2', 'n2', 't_peak'],
+            'params': ['amp', 'tau_rise1', 'tau_decay1', 'n1', 'frac1', 'tau_rise2', 'tau_decay2', 'n2', 't_onset'],
             'bounds': ([0, 0.001, 0.005, 0.5, 0.1, 0.005, 0.020, 0.5, 0], [np.inf, 0.020, 0.200, 5.0, 0.9, 0.100, 1.000, 5.0, 10]),
             'p0_func': lambda y, t: [float(np.nanmax(y)), 0.003, 0.020, 2.0, 0.6, 0.010, 0.080, 1.5, float(t[np.nanargmax(y)])],
             'complexity': 9,
@@ -805,7 +805,7 @@ def get_event_model(name: str) -> Dict:
         return _apply_global_bounds({
             'name': 'two_comp_coop',
             'func': model_two_component_cooperative,
-            'params': ['amp_fast', 'tau_rise_fast', 'tau_decay_fast', 'n_fast', 'amp_slow', 'tau_rise_slow', 'tau_decay_slow', 'n_slow', 't_peak'],
+            'params': ['amp_fast', 'tau_rise_fast', 'tau_decay_fast', 'n_fast', 'amp_slow', 'tau_rise_slow', 'tau_decay_slow', 'n_slow', 't_onset'],
             'bounds': ([0, 0.001, 0.005, 0.5, 0, 0.005, 0.020, 0.5, 0], [np.inf, 0.020, 0.100, 5.0, np.inf, 0.100, 1.000, 5.0, 10]),
             'p0_func': lambda y, t: [float(np.nanmax(y))*0.6, 0.003, 0.015, 2.0, float(np.nanmax(y))*0.4, 0.010, 0.080, 1.5, float(t[np.nanargmax(y)])],
             'complexity': 9,

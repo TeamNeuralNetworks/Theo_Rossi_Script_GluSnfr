@@ -42,7 +42,11 @@ Examples (usage):
 """
 
 # Ensure repo root is on sys.path when running this script from the subfolder
-REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+try:
+    _here = os.path.dirname(__file__)
+except NameError:
+    _here = os.getcwd()
+REPO_ROOT = os.path.abspath(os.path.join(_here, os.pardir))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
@@ -78,8 +82,10 @@ SUBFOLDERS = [
     "Theo_2_5_50Hz",
     "Theo_4_50Hz",
 ]
+
+SUBFOLDERS = ["Theo_4_50Hz"]
 folders = _build_data_folders(DATA_ROOT, SUBFOLDERS)
-root_out = os.path.join(DATA_ROOT, "Testout_BiExp")  # BiExp results
+root_out = os.path.join(DATA_ROOT, "Testout_BiExphica")  # BiExp results
 os.makedirs(root_out, exist_ok=True)
 
 # Per-folder train_start (seconds). Default 0.998; override selected folders to 0.498
@@ -207,6 +213,7 @@ for in_dir in folders:
                 'parameter_bounds': {
                     'tau_decay_fast': (0.003, 0.010),     # 3-10ms fast component
                     'tau_decay_slow': (0.010, 0.035),     # 10-35ms intermediate
+                    't_onset': (0.0, 3.0),  # ms
                     # tau_decay_superslow: auto from post-train decay (typically 30-50ms)
                 },
 
@@ -289,7 +296,7 @@ for in_dir in folders:
                 # Superslow fraction at final event (ramps up monotonically across the train)
                 'template_variant_superslow_fracs': [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
                 # Disable superslow if it is too close to the slow tau
-                'superslow_min_ratio': 1.2,
+                'superslow_min_ratio': 1.00,
                 # === Jitter Variants (NEW) ===
                 # Enable temporal jitter search in milliseconds
                 # Reduced range to prevent NNLS convergence issues
