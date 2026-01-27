@@ -1911,10 +1911,38 @@ def extract_metrics(
 
         ratios = cfg.get('template_variant_ratios', [0.2, 0.4, 0.6, 0.8])
         ss_fracs = cfg.get('template_variant_superslow_fracs', [0.0, 0.1, 0.2])
+        tau_slow_grid_ms = cfg.get('template_variant_tau_slow_ms', None)
         if not isinstance(ratios, (list, tuple, np.ndarray)):
             ratios = [ratios]
         if not isinstance(ss_fracs, (list, tuple, np.ndarray)):
             ss_fracs = [ss_fracs]
+        tau_slow_grid_s = None
+        if tau_slow_grid_ms is None:
+            param_bounds = cfg.get('parameter_bounds', {}) or {}
+            bound = param_bounds.get('tau_decay_slow')
+            if bound and isinstance(bound, (tuple, list)) and len(bound) == 2:
+                lower, upper = float(bound[0]), float(bound[1])
+                if np.isfinite(lower) and np.isfinite(upper) and (upper - lower) > 0.005:
+                    mid = 0.5 * (lower + upper)
+                    candidates = [lower, mid, upper, lower * 1.25, lower * 1.5, lower * 2.0]
+                    tau_slow_grid_s = []
+                    for c in candidates:
+                        if not np.isfinite(c):
+                            continue
+                        c = min(max(c, lower), upper)
+                        if c > 0:
+                            tau_slow_grid_s.append(c)
+                    tau_slow_grid_s = sorted(set(tau_slow_grid_s)) if tau_slow_grid_s else None
+        if tau_slow_grid_s is None and tau_slow_grid_ms is not None:
+            tau_slow_grid_s = []
+            for v in tau_slow_grid_ms:
+                try:
+                    val_s = float(v) / 1000.0
+                except Exception:
+                    continue
+                if np.isfinite(val_s) and val_s > 0:
+                    tau_slow_grid_s.append(val_s)
+            tau_slow_grid_s = sorted(set(tau_slow_grid_s)) if tau_slow_grid_s else None
         grid: List[Tuple[float, float]] = []
 
         for r in ratios:
@@ -1933,7 +1961,11 @@ def extract_metrics(
                     continue
                 if r + ss > 1.0 + 1e-9:
                     continue
-                grid.append((r, ss))
+                if tau_slow_grid_s:
+                    for tau_slow_s in tau_slow_grid_s:
+                        grid.append((r, ss, tau_slow_s))
+                else:
+                    grid.append((r, ss))
 
         if not grid:
             grid = [(0.3, 0.1)]
@@ -2010,10 +2042,11 @@ def extract_metrics(
                         frac_fast_base = np.clip(frac_fast_base, 0.0, 1.0)
                         frac_slow_base = np.clip(frac_slow_base, 0.0, 1.0 - frac_fast_base)
 
-                        # Interpret variant spec: tuple/list => (frac_slow, frac_superslow_max)
+                        # Interpret variant spec: tuple/list => (frac_slow, frac_superslow_max, tau_slow)
                         default_superslow = max(0.0, 1.0 - frac_fast_base - frac_slow_base)
                         frac_slow_val = None
                         frac_superslow_max = None
+                        tau_slow_override = None
                         if isinstance(frac_slow, (list, tuple)) and len(frac_slow) >= 2:
                             try:
                                 frac_slow_val = float(frac_slow[0])
@@ -2021,6 +2054,11 @@ def extract_metrics(
                             except Exception:
                                 frac_slow_val = None
                                 frac_superslow_max = None
+                            if len(frac_slow) >= 3:
+                                try:
+                                    tau_slow_override = float(frac_slow[2])
+                                except Exception:
+                                    tau_slow_override = None
                         elif np.isscalar(frac_slow):
                             try:
                                 frac_slow_val = float(frac_slow)
@@ -2051,6 +2089,10 @@ def extract_metrics(
                         if not np.isfinite(ratio_slow) or ratio_slow <= 1.0:
                             ratio_slow = 1.5
                         tau_slow_s = tau_fast_s * ratio_slow
+                        if tau_slow_override is not None and np.isfinite(tau_slow_override) and tau_slow_override > 0:
+                            tau_slow_s = float(tau_slow_override)
+                        if tau_slow_s <= tau_fast_s:
+                            tau_slow_s = tau_fast_s * 1.1
                         if tau_slow_s > tau_superslow_s:
                             tau_slow_s = tau_superslow_s * 0.6
                         params = [
@@ -2992,6 +3034,7 @@ def extract_metrics(
                             default_superslow = max(0.0, 1.0 - frac_fast_base - frac_slow_base)
                             frac_slow_val = None
                             frac_superslow_max = None
+                            tau_slow_override = None
                             if isinstance(frac_slow, (list, tuple)) and len(frac_slow) >= 2:
                                 try:
                                     frac_slow_val = float(frac_slow[0])
@@ -2999,6 +3042,11 @@ def extract_metrics(
                                 except Exception:
                                     frac_slow_val = None
                                     frac_superslow_max = None
+                                if len(frac_slow) >= 3:
+                                    try:
+                                        tau_slow_override = float(frac_slow[2])
+                                    except Exception:
+                                        tau_slow_override = None
                             elif np.isscalar(frac_slow):
                                 try:
                                     frac_slow_val = float(frac_slow)
@@ -3028,6 +3076,10 @@ def extract_metrics(
                             if not np.isfinite(ratio_slow) or ratio_slow <= 1.0:
                                 ratio_slow = 1.5
                             tau_slow_s = tau_fast_s * ratio_slow
+                            if tau_slow_override is not None and np.isfinite(tau_slow_override) and tau_slow_override > 0:
+                                tau_slow_s = float(tau_slow_override)
+                            if tau_slow_s <= tau_fast_s:
+                                tau_slow_s = tau_fast_s * 1.1
                             if tau_slow_s > tau_superslow_s:
                                 tau_slow_s = tau_superslow_s * 0.6
                             params = [
@@ -3952,7 +4004,14 @@ def extract_metrics(
                 dominant_jitters = variant_info_avg['dominant_jitter_ms']
                 if cfg.get('use_template_variants', False):
                     if event_model == 'iglusnfr_tri' and isinstance(dominant_ratios, list):
-                        fmt = [f"({r[0]:.2f},{r[1]:.2f})" if isinstance(r, (list, tuple)) and len(r) >= 2 else str(r) for r in dominant_ratios]
+                        fmt = []
+                        for r in dominant_ratios:
+                            if isinstance(r, (list, tuple)) and len(r) >= 3:
+                                fmt.append(f"({r[0]:.2f},{r[1]:.2f},{r[2]*1000:.1f}ms)")
+                            elif isinstance(r, (list, tuple)) and len(r) >= 2:
+                                fmt.append(f"({r[0]:.2f},{r[1]:.2f})")
+                            else:
+                                fmt.append(str(r))
                         progress_print(f"[NNLS] Dominant tri fractions per event: {fmt}")
                     else:
                         if (isinstance(dominant_ratios, list)
@@ -3976,7 +4035,14 @@ def extract_metrics(
                 if len(dominant_idx):
                     dominant_ratios = [variant_ratios[i] for i in dominant_idx]
                     if event_model == 'iglusnfr_tri':
-                        fmt = [f"({r[0]:.2f},{r[1]:.2f})" if isinstance(r, (list, tuple)) and len(r) >= 2 else str(r) for r in dominant_ratios]
+                        fmt = []
+                        for r in dominant_ratios:
+                            if isinstance(r, (list, tuple)) and len(r) >= 3:
+                                fmt.append(f"({r[0]:.2f},{r[1]:.2f},{r[2]*1000:.1f}ms)")
+                            elif isinstance(r, (list, tuple)) and len(r) >= 2:
+                                fmt.append(f"({r[0]:.2f},{r[1]:.2f})")
+                            else:
+                                fmt.append(str(r))
                         progress_print(f"[NNLS] Dominant tri fractions per event: {fmt}")
                     else:
                         if (isinstance(dominant_ratios, list)
