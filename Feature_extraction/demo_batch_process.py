@@ -206,7 +206,7 @@ for in_dir in folders:
                 'parameter_bounds': {
                     'tau_decay_fast': (0.001, 0.008),     # 1-8ms fast component
                     'tau_decay_slow': (0.008, 0.035),     # 8-35ms intermediate
-                    't_onset': (0.0, 5.0),  # ms
+                    # 't_onset': (0.0, 5.0),  # ms
                     # tau_decay_superslow: auto from post-train decay (typically 30-50ms)
                 },
 
@@ -256,12 +256,12 @@ for in_dir in folders:
                 'null_sim_max_points': 1000,
                 'null_min_post_zoom_s': 0.05,
 
-                # === Kinetics Grids ===
-                # Ultra-fast rise times for sharp iGluSnFR peaks
-                'kin_taur_grid_ms': [0.1, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.65, 0.8, 1.0, 1.5, 2.0, 3.0],
-                # Bi-exponential decay: fast and slow components
-                'kin_taud0_grid_ms': [1.2, 1.5, 1.8, 2.0, 2.5, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0, 15.0, 20.0, 25.0, 35.0, 50.0, 80.0, 120.0],
-                'kin_slope_grid_ms': [0.0, 0.25, 0.5, 1.0, 2.0, 3.0, 5.0],
+                # # === Kinetics Grids ===
+                # # Ultra-fast rise times for sharp iGluSnFR peaks
+                # 'kin_taur_grid_ms': [0.1, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.65, 0.8, 1.0, 1.5, 2.0, 3.0],
+                # # Bi-exponential decay: fast and slow components
+                # 'kin_taud0_grid_ms': [1.2, 1.5, 1.8, 2.0, 2.5, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0, 15.0, 20.0, 25.0, 35.0, 50.0, 80.0, 120.0],
+                # 'kin_slope_grid_ms': [0.0, 0.25, 0.5, 1.0, 2.0, 3.0, 5.0],
 
                 # === Bleach Correction ===
                 'bleach_huber_delta': 3.0,

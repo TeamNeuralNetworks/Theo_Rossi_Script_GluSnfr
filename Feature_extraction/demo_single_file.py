@@ -238,12 +238,19 @@ options_presets = {
         'event_model': 'iglusnfr',
         # Tri-exponential (fast 1-5ms, slow 10-25ms, superslow from post-train)
         
-        # === Parameter Bounds (auto-configured based on model) ===
+
+       # THIS GIVES THE CORRECT VALUES
         'parameter_bounds': {
-            'tau_decay_fast': (0.003, 0.005),     # 3-10ms fast component
-            'tau_decay_slow': (0.05, 0.01),     # 10-35ms intermediate
+            'tau_decay_fast': (0.003, 0.008),     # 3-10ms fast component
+            'tau_decay_slow': (0.008, 0.035),     # 8-35ms intermediate
             # tau_decay_superslow: auto from post-train decay (typically 30-50ms)
         },
+        # # THIS IS THE RANGE WE NEED TO USE, SO WE NEED THESE BOUNDS TO ALSO RETURN THE CORRECT VALUES
+        # 'parameter_bounds': {
+        #     'tau_decay_fast': (0.003, 0.008),     # 3-10ms fast component
+        #     'tau_decay_slow': (0.008, 0.035),     # 8-35ms intermediate
+        #     # tau_decay_superslow: auto from post-train decay (typically 30-50ms)
+        # },
         
         # Use all events for averaging
         'early_events_only': 0,

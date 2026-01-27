@@ -162,6 +162,8 @@ DEFAULTS.update({
     'template_variant_superslow_fracs': [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],  # Superslow fraction at final event
     'superslow_min_ratio': 1.0,  # Disable superslow variants if tau_superslow < tau_slow * ratio
     'allow_tau_slow_override': True,  # Allow last-event tau to replace recut tau_decay_slow when shorter
+    'template_variant_tau_slow_ms': None,  # Optional slow-tau grid (ms) for bi-exp template variants
+    'template_variant_select': 'soft',  # 'soft'|'hard' selection across template variants
 })
 
 # Parameter bounds: classical upper/lower limits for all fitted parameters
@@ -745,6 +747,7 @@ def fit_amplitudes_with_template_variants(
     jitter_variant_ms: Optional[np.ndarray] = None,
     residual_reweight_iters: int = 5,
     residual_reweight_tau: float = 2.0,
+    hard_select: bool = False,
 ):
     """Single-pass NNLS with multiple template variants per event.
 
@@ -772,6 +775,8 @@ def fit_amplitudes_with_template_variants(
         jitter_variant_ms: Optional array of temporal shifts in milliseconds
         residual_reweight_iters: Number of iterative refinement passes (default 3)
         residual_reweight_tau: Downweighting aggressiveness (default 2.0)
+        hard_select: If True, choose a single dominant variant per event and
+            re-fit amplitudes with a reduced design matrix.
 
     Returns:
         (amplitudes, shifts, design, reconstruction, components_list, variant_info)
@@ -924,6 +929,8 @@ def fit_amplitudes_with_template_variants(
                     weights = base_weights * residual_weight
                     weights = np.maximum(weights, 0.01 * np.max(base_weights))
 
+    weights_final = weights
+
     # Reshape to 3D: [n_events, n_template_variants, n_jitter_variants]
     a_variants_3d = a_variants.reshape(n_events, n_template_variants, n_jitter_variants)
 
@@ -948,9 +955,6 @@ def fit_amplitudes_with_template_variants(
             direction = "under" if mean_resid_post > 0 else "over"
             progress_print(f"[NNLS] Post-train residual: {direction}prediction by {abs(mean_resid_post):.3f} ({abs(relative_to_signal)*100:.1f}% of signal)")
 
-    # Aggregate results: sum amplitudes across all variant dimensions for each event
-    a_events = np.sum(a_variants_3d, axis=(1, 2))
-
     # Find dominant template variant and jitter for each event
     # Flatten last two dimensions to find overall max
     a_variants_2d_flat = a_variants_3d.reshape(n_events, -1)
@@ -961,29 +965,47 @@ def fit_amplitudes_with_template_variants(
     # Extract dominant jitter values
     d_events = np.array([jitter_variant_s[j_idx] for j_idx in dominant_jitter_idx], dtype=float)
 
-    # Build reconstruction using final (possibly adjusted) kinetics
-    yhat = X @ a_variants
+    if hard_select:
+        # Hard selection: choose the dominant variant per event, then refit amplitudes
+        X_hard = np.zeros((t.size, n_events), float)
+        for i_event in range(n_events):
+            st = float(stim_times[i_event])
+            tau_d = float(current_tau_d[i_event])
+            frac_slow = variant_ratios[dominant_template_idx[i_event]]
+            jitter_s = jitter_variant_s[dominant_jitter_idx[i_event]]
+            anchor = st + current_t0 + jitter_s
+            X_hard[:, i_event] = _build_variant_kernel(
+                t - anchor, tau_r_s, tau_d, frac_slow,
+                event_idx=i_event, n_events=n_events,
+            )
+        a_events = _nnls_weighted(X_hard, y, weights_final)
+        yhat = X_hard @ a_events
+        components = [a_events[i] * X_hard[:, i] for i in range(n_events)]
+        X_used = X_hard
+    else:
+        # Soft selection: sum across all template and jitter variants per event
+        a_events = np.sum(a_variants_3d, axis=(1, 2))
+        yhat = X @ a_variants
+        components = []
+        for i_event in range(n_events):
+            st = float(stim_times[i_event])
+            tau_d = float(current_tau_d[i_event])  # Use adjusted tau_d
 
-    # Build per-event components using adjusted kinetics
-    components = []
-    for i_event in range(n_events):
-        st = float(stim_times[i_event])
-        tau_d = float(current_tau_d[i_event])  # Use adjusted tau_d
-
-        # Sum contributions from all template and jitter variants for this event
-        comp_event = np.zeros_like(y)
-        for i_template, frac_slow in enumerate(variant_ratios):
-            for i_jitter, jitter_s in enumerate(jitter_variant_s):
-                idx = i_event * (n_template_variants * n_jitter_variants) + i_template * n_jitter_variants + i_jitter
-                amp_var = a_variants[idx]
-                if amp_var > 0:
-                    anchor = st + current_t0 + jitter_s  # Use adjusted t0
-                    k = _build_variant_kernel(
-                        t - anchor, tau_r_s, tau_d, frac_slow,
-                        event_idx=i_event, n_events=n_events,
-                    )
-                    comp_event += amp_var * k
-        components.append(comp_event)
+            # Sum contributions from all template and jitter variants for this event
+            comp_event = np.zeros_like(y)
+            for i_template, frac_slow in enumerate(variant_ratios):
+                for i_jitter, jitter_s in enumerate(jitter_variant_s):
+                    idx = i_event * (n_template_variants * n_jitter_variants) + i_template * n_jitter_variants + i_jitter
+                    amp_var = a_variants[idx]
+                    if amp_var > 0:
+                        anchor = st + current_t0 + jitter_s  # Use adjusted t0
+                        k = _build_variant_kernel(
+                            t - anchor, tau_r_s, tau_d, frac_slow,
+                            event_idx=i_event, n_events=n_events,
+                        )
+                        comp_event += amp_var * k
+            components.append(comp_event)
+        X_used = X
 
     # Diagnostic info: which variants were selected for each event
     # Sum over jitter dimension to get template variant distribution
@@ -1010,9 +1032,10 @@ def fit_amplitudes_with_template_variants(
         'kinetics_adjusted': kinetics_adjusted,
         'final_tau_d': current_tau_d,
         'final_t0': current_t0,
+        'hard_select': bool(hard_select),
     }
 
-    return a_events, d_events, X, yhat, components, variant_info
+    return a_events, d_events, X_used, yhat, components, variant_info
 
 
 def _build_variant_kernel(
@@ -2054,18 +2077,34 @@ def extract_metrics(
                     ) -> np.ndarray:
                         """Build bi-exponential iGluSnFR kernel with specific slow component fraction.
                         
-                        LEGACY: Match original unit handling exactly (tau_d*1000 but NOT tau_slow*1000)
-                        This preserves the working behavior of the original code.
+                        Parameters are in seconds; model time axis is milliseconds.
                         """
                         dt_ms = dt * 1000.0
-                        frac_fast = 1.0 - frac_slow
-                        # tau_d is in seconds, convert to ms (LEGACY behavior)
-                        tau_fast_ms = tau_d * 1000.0 if tau_d > 0 else base_params['tau_decay_fast']
+                        frac_slow_val = None
+                        tau_slow_override = None
+                        if isinstance(frac_slow, (list, tuple)) and len(frac_slow) >= 2:
+                            try:
+                                frac_slow_val = float(frac_slow[0])
+                                tau_slow_override = float(frac_slow[1])
+                            except Exception:
+                                frac_slow_val = None
+                                tau_slow_override = None
+                        else:
+                            try:
+                                frac_slow_val = float(frac_slow)
+                            except Exception:
+                                frac_slow_val = None
+                        if frac_slow_val is None or not np.isfinite(frac_slow_val):
+                            frac_slow_val = 0.5
+                        frac_fast = 1.0 - frac_slow_val
+                        tau_slow_use = base_params['tau_decay_slow']
+                        if tau_slow_override is not None and np.isfinite(tau_slow_override) and tau_slow_override > 0:
+                            tau_slow_use = float(tau_slow_override)
                         params = [
                             1.0,  # amp
                             tau_r,  # tau_rise from global fit
-                            tau_fast_ms,  # tau_decay_fast (tau_d*1000)
-                            base_params['tau_decay_slow'],  # tau_decay_slow (in seconds, NOT *1000)
+                            float(tau_d) if tau_d > 0 else base_params['tau_decay_fast'],  # tau_decay_fast (seconds)
+                            tau_slow_use,  # tau_decay_slow (seconds)
                             frac_fast,  # frac_fast varies across templates
                             0.0,  # t_onset
                         ]
@@ -3004,17 +3043,34 @@ def extract_metrics(
                         ) -> np.ndarray:
                             """Build iGluSnFR kernel with specific slow component fraction using FITTED kinetics.
                             
-                            LEGACY: Match original unit handling exactly (tau_d*1000 but NOT tau_slow*1000)
+                            Parameters are in seconds; model time axis is milliseconds.
                             """
                             dt_ms = dt * 1000.0
-                            frac_fast = 1.0 - frac_slow
-                            # tau_d is in seconds, convert to ms (LEGACY behavior)
-                            tau_fast_ms = tau_d * 1000.0 if tau_d > 0 else fitted_params['tau_decay_fast']
+                            frac_slow_val = None
+                            tau_slow_override = None
+                            if isinstance(frac_slow, (list, tuple)) and len(frac_slow) >= 2:
+                                try:
+                                    frac_slow_val = float(frac_slow[0])
+                                    tau_slow_override = float(frac_slow[1])
+                                except Exception:
+                                    frac_slow_val = None
+                                    tau_slow_override = None
+                            else:
+                                try:
+                                    frac_slow_val = float(frac_slow)
+                                except Exception:
+                                    frac_slow_val = None
+                            if frac_slow_val is None or not np.isfinite(frac_slow_val):
+                                frac_slow_val = 0.5
+                            frac_fast = 1.0 - frac_slow_val
+                            tau_slow_use = fitted_params['tau_decay_slow']
+                            if tau_slow_override is not None and np.isfinite(tau_slow_override) and tau_slow_override > 0:
+                                tau_slow_use = float(tau_slow_override)
                             params = [
                                 1.0,  # amp (will be normalized)
                                 tau_r,  # tau_rise from global fit
-                                tau_fast_ms,  # FITTED fast decay (tau_d*1000)
-                                fitted_params['tau_decay_slow'],  # FITTED slow decay (in seconds, NOT *1000)
+                                float(tau_d) if tau_d > 0 else fitted_params['tau_decay_fast'],  # FITTED fast decay (seconds)
+                                tau_slow_use,  # FITTED slow decay (seconds)
                                 frac_fast,  # frac_fast varies across templates
                                 0.0,  # t_onset
                             ]
@@ -3747,11 +3803,72 @@ def extract_metrics(
 
     if use_variants_approach:
         # Use template variants approach: single NNLS with multiple templates per event
+        expanded_variants = False
         if cfg.get('use_template_variants', False) and _VARIANT_KERNEL_BUILDER is not None:
             if event_model == 'iglusnfr_tri':
                 variant_ratios = _build_triexp_variant_grid()
             else:
                 variant_ratios = cfg.get('template_variant_ratios', [0.2, 0.4, 0.6, 0.8])
+                # Optional: expand slow-fraction variants across a slow-tau grid (bi-exp only)
+                # This stabilizes NNLS when tau_decay_slow bounds are wide.
+                tau_slow_grid_ms = cfg.get('template_variant_tau_slow_ms', None)
+                ratios_list = list(variant_ratios) if variant_ratios is not None else []
+                has_tau_override = any(
+                    isinstance(v, (tuple, list)) and len(v) >= 2 for v in ratios_list
+                )
+                tau_grid_s = None
+                if (not has_tau_override) and tau_slow_grid_ms is None:
+                    param_bounds = cfg.get('parameter_bounds', {}) or {}
+                    bound = param_bounds.get('tau_decay_slow')
+                    if bound and isinstance(bound, (tuple, list)) and len(bound) == 2:
+                        lower, upper = float(bound[0]), float(bound[1])
+                        if np.isfinite(lower) and np.isfinite(upper) and (upper - lower) > 0.005:
+                            mid = 0.5 * (lower + upper)
+                            candidates = [lower, mid, upper, lower * 1.25, lower * 1.5, lower * 2.0]
+                            try:
+                                tau_fast = float(tau_d_vec[0]) if np.size(tau_d_vec) else np.nan
+                            except Exception:
+                                tau_fast = np.nan
+                            if np.isfinite(tau_fast) and tau_fast > 0:
+                                for r in (2.0, 2.5, 3.0, 4.0):
+                                    candidates.append(tau_fast * r)
+                            tau_grid_s = []
+                            for c in candidates:
+                                if not np.isfinite(c):
+                                    continue
+                                c = min(max(c, lower), upper)
+                                if c > 0:
+                                    tau_grid_s.append(c)
+                            tau_grid_s = sorted(set(tau_grid_s))
+                if (not has_tau_override) and tau_grid_s is None and tau_slow_grid_ms is not None:
+                    tau_grid_s = []
+                    for v in tau_slow_grid_ms:
+                        try:
+                            val_s = float(v) / 1000.0
+                        except Exception:
+                            continue
+                        if np.isfinite(val_s) and val_s > 0:
+                            tau_grid_s.append(val_s)
+                    tau_grid_s = sorted(set(tau_grid_s))
+                expanded_variants = False
+                if (not has_tau_override) and tau_grid_s:
+                    base_ratios = ratios_list
+                    expanded = []
+                    for r in base_ratios:
+                        try:
+                            r_val = float(r)
+                        except Exception:
+                            continue
+                        for tau_slow_s in tau_grid_s:
+                            expanded.append((r_val, tau_slow_s))
+                    if expanded:
+                        variant_ratios = expanded
+                        expanded_variants = True
+                        try:
+                            fmt = ", ".join(f"{v*1000:.1f}" for v in tau_grid_s)
+                            progress_print(f"[NNLS] Added tau_slow variants (ms): [{fmt}]")
+                        except Exception:
+                            pass
         else:
             # Jitter-only mode: determine optimal template ratio first if needed
             # For iGluSnFR, quickly test a few ratios to find the best one for this data
@@ -3793,6 +3910,18 @@ def extract_metrics(
             jitter_arr = np.asarray(jitter_variant_ms, float)
             progress_print(f"[NNLS] Using jitter variants with {len(jitter_arr)} shifts per event")
 
+        # Choose variant selection strategy (soft mix vs hard per-event selection)
+        variant_select = str(cfg.get('template_variant_select', 'soft')).strip().lower()
+        if variant_select in ('hard', 'dominant', 'winner'):
+            hard_select = True
+        else:
+            hard_select = False
+        if hard_select:
+            try:
+                progress_print("[NNLS] Hard-selecting dominant template per event")
+            except Exception:
+                pass
+
         a_avg, d_avg, X_avg, yhat_avg, comp_avg, variant_info_avg = fit_amplitudes_with_template_variants(
             y_avg, t, stim_times, tau_r, tau_d_vec,
             variant_ratios=variant_ratios,
@@ -3801,6 +3930,7 @@ def extract_metrics(
             isi=isi,
             event_t0_s=event_t0_s,
             jitter_variant_ms=jitter_variant_ms,
+            hard_select=hard_select,
         )
         # Report which variants were selected
         try:
@@ -3813,7 +3943,14 @@ def extract_metrics(
                         fmt = [f"({r[0]:.2f},{r[1]:.2f})" if isinstance(r, (list, tuple)) and len(r) >= 2 else str(r) for r in dominant_ratios]
                         progress_print(f"[NNLS] Dominant tri fractions per event: {fmt}")
                     else:
-                        progress_print(f"[NNLS] Dominant slow fractions per event: {[f'{r:.1f}' for r in dominant_ratios]}")
+                        if (isinstance(dominant_ratios, list)
+                                and dominant_ratios
+                                and isinstance(dominant_ratios[0], (list, tuple))
+                                and len(dominant_ratios[0]) >= 2):
+                            fmt = [f"{r[0]:.2f}@{r[1]*1000:.1f}ms" for r in dominant_ratios]
+                            progress_print(f"[NNLS] Dominant slow fraction/τslow per event: {fmt}")
+                        else:
+                            progress_print(f"[NNLS] Dominant slow fractions per event: {[f'{r:.1f}' for r in dominant_ratios]}")
                 if jitter_variant_ms is not None:
                     progress_print(f"[NNLS] Dominant jitter (ms) per event: {[f'{j:.2f}' for j in dominant_jitters]}")
                     try:
@@ -3830,7 +3967,14 @@ def extract_metrics(
                         fmt = [f"({r[0]:.2f},{r[1]:.2f})" if isinstance(r, (list, tuple)) and len(r) >= 2 else str(r) for r in dominant_ratios]
                         progress_print(f"[NNLS] Dominant tri fractions per event: {fmt}")
                     else:
-                        progress_print(f"[NNLS] Dominant slow fractions per event: {[f'{r:.1f}' for r in dominant_ratios]}")
+                        if (isinstance(dominant_ratios, list)
+                                and dominant_ratios
+                                and isinstance(dominant_ratios[0], (list, tuple))
+                                and len(dominant_ratios[0]) >= 2):
+                            fmt = [f"{r[0]:.2f}@{r[1]*1000:.1f}ms" for r in dominant_ratios]
+                            progress_print(f"[NNLS] Dominant slow fraction/τslow per event: {fmt}")
+                        else:
+                            progress_print(f"[NNLS] Dominant slow fractions per event: {[f'{r:.1f}' for r in dominant_ratios]}")
         except Exception:
             pass
     else:
