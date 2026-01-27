@@ -83,7 +83,7 @@ SUBFOLDERS = [
     "Theo_4_50Hz",
 ]
 
-SUBFOLDERS = ["Theo_2_5_50Hz"]
+# SUBFOLDERS = ["WT_Theo"]
 folders = _build_data_folders(DATA_ROOT, SUBFOLDERS)
 root_out = os.path.join(DATA_ROOT, "Testout_TriExp")  # TriExp results
 os.makedirs(root_out, exist_ok=True)
@@ -258,9 +258,9 @@ for in_dir in folders:
 
                 # === Kinetics Grids ===
                 # Ultra-fast rise times for sharp iGluSnFR peaks
-                'kin_taur_grid_ms': [0.1, 0.2, 0.3, 0.5, 0.8, 1.0, 1.5, 2.0, 3.0],
+                'kin_taur_grid_ms': [0.1, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.65, 0.8, 1.0, 1.5, 2.0, 3.0],
                 # Bi-exponential decay: fast and slow components
-                'kin_taud0_grid_ms': [2.0, 4.0, 6.0, 8.0, 10.0, 15.0, 20.0, 25.0, 35.0, 50.0, 80.0, 120.0],
+                'kin_taud0_grid_ms': [1.2, 1.5, 1.8, 2.0, 2.5, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0, 15.0, 20.0, 25.0, 35.0, 50.0, 80.0, 120.0],
                 'kin_slope_grid_ms': [0.0, 0.25, 0.5, 1.0, 2.0, 3.0, 5.0],
 
                 # === Bleach Correction ===
@@ -293,7 +293,7 @@ for in_dir in folders:
                 # === Jitter Variants (NEW) ===
                 # Enable temporal jitter search in milliseconds
                 # Reduced range to prevent NNLS convergence issues
-                'jitter_variant_ms': np.arange(-3.0, 3.1, 1.0),  # ±3ms in 1ms steps (7 values)
+                'jitter_variant_ms': np.arange(-3.0, 3.1, 0.5),  # ±3ms in 0.5ms steps (13 values)
             },
             'double_exp_default': {
                 # === Preprocessing ===
@@ -323,7 +323,7 @@ for in_dir in folders:
                 # - 'inflection': Find inflection point (minimum derivative) - default
                 # - 'baseline_threshold': Exclude all points below baseline + threshold * peak
                 # - 'none': No onset masking
-                'onset_method': 'inflection',  # Use default inflection method for 20Hz
+                'onset_method': 'baseline_threshold',  # Use default inflection method for 20Hz
                 'onset_baseline_threshold': 0.15,  # 15% above baseline (adjustable 0.1-0.3)
 
                 # === PPR Safety ===

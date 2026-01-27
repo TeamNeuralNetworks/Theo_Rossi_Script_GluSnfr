@@ -89,8 +89,14 @@ xlsx_path = os.path.join(
 #     "241212_Fibre1_PortionB_bouton9.xlsx",
 # )
 
+xlsx_path = os.path.join(
+    DATA_ROOT,
+    "WT_Anthime",
+    "241212_Fibre1_PortionC_bouton8.xlsx",
+)
+
 START = 0.498
-# START = START + 0.5
+START = START + 0.5
 
 # === Inter-Stimulus Interval (ISI) ===
 # Set this based on your stimulation frequency:
@@ -113,9 +119,9 @@ ISI_MS = ISI * 1000.0  # Convert to milliseconds
 # Peak detection window: should be < ISI to avoid next pulse
 # Use 50-70% of ISI for fast stim, capped at 25ms for slow stim
 if ISI_MS < 30.0:
-    PEAK_WINDOW_MS = max(8.0, ISI_MS * 0.5)  # 50% of ISI, min 8ms
+    PEAK_WINDOW_MS = max(8.0, ISI_MS * 0.9)  # 50% of ISI, min 8ms
 else:
-    PEAK_WINDOW_MS = min(25.0, ISI_MS * 0.3)  # Standard window for slow stim
+    PEAK_WINDOW_MS = min(25.0, ISI_MS * 0.9)  # Standard window for slow stim
 
 # Zoom windows for plotting and analysis
 # For fast stim: limit to avoid excessive overlap visualization
@@ -140,80 +146,80 @@ trials = _trials[valid, :]
 
 # Define option presets with defaults clearly indicated
 options_presets = {
-    'double_exp_default': {
-        # === Preprocessing ===
-        'normalize_dff': True,  # bool (default: True) - apply ΔF/F0 normalization
-        'bleach': True,  # bool (default: True) - correct slow bleaching
-        'sg_window': 9,  # int (default: 9) - Savitzky-Golay window size
-        'sg_poly': 2,  # int (default: 2) - Savitzky-Golay polynomial order
+    # 'double_exp_default': {
+    #     # === Preprocessing ===
+    #     'normalize_dff': True,  # bool (default: True) - apply ΔF/F0 normalization
+    #     'bleach': True,  # bool (default: True) - correct slow bleaching
+    #     'sg_window': 9,  # int (default: 9) - Savitzky-Golay window size
+    #     'sg_poly': 2,  # int (default: 2) - Savitzky-Golay polynomial order
         
-        # === Kinetics Estimation ===
-        'fit_source': 'average',  # (default: 'global') 'global'|'average'|'individual'
-        'decay_progression_mode': 'linear',  # (default: 'linear') 'fixed'|'free_monotonic'|'linear'
-        'anchor_final_tau': True,  # bool (default: True) - anchor final tau in progression fitting
-        'anchor_first_tau': False,  # bool (default: False) - anchor first tau in progression fitting
+    #     # === Kinetics Estimation ===
+    #     'fit_source': 'average',  # (default: 'global') 'global'|'average'|'individual'
+    #     'decay_progression_mode': 'linear',  # (default: 'linear') 'fixed'|'free_monotonic'|'linear'
+    #     'anchor_final_tau': True,  # bool (default: True) - anchor final tau in progression fitting
+    #     'anchor_first_tau': False,  # bool (default: False) - anchor first tau in progression fitting
         
-        # === Event Model ===
-        'event_model': 'iglusnfr',  # (default: 'double_exp') 'double_exp'|'cooperative'|'bilinear'|'single_exp'|'two_step_binding'|'alpha'|'gamma'|'binding_kinetics'|'two_component'|'desensitization'|'coop_plus_linear'|'diffusion_clearance'|'double_cooperative'|'hetero_coop'|'two_comp_coop'
-        'event_model_settings': {},  # dict (default: {}) - model-specific params - see event_models.py for details (e.g., {'n_coop': 2.0})
+    #     # === Event Model ===
+    #     'event_model': 'iglusnfr',  # (default: 'double_exp') 'double_exp'|'cooperative'|'bilinear'|'single_exp'|'two_step_binding'|'alpha'|'gamma'|'binding_kinetics'|'two_component'|'desensitization'|'coop_plus_linear'|'diffusion_clearance'|'double_cooperative'|'hetero_coop'|'two_comp_coop'
+    #     'event_model_settings': {},  # dict (default: {}) - model-specific params - see event_models.py for details (e.g., {'n_coop': 2.0})
         
-        # === Recut/Averaging ===
-        'recut_projection': 'mean',  # (default: 'median') 'mean'|'median'|'std'|'robust_mean'
-        'recut_oversample': 50,  # int ≥1 (default: 1) - interpolation factor
-        'recut_peak_recenter': 0,  # int|tuple|None (default: 0) - peak realignment (0=disabled)
-        'recut_snippets': True,  # bool (default: False) - return snippets for plotting
+    #     # === Recut/Averaging ===
+    #     'recut_projection': 'mean',  # (default: 'median') 'mean'|'median'|'std'|'robust_mean'
+    #     'recut_oversample': 50,  # int ≥1 (default: 1) - interpolation factor
+    #     'recut_peak_recenter': 0,  # int|tuple|None (default: 0) - peak realignment (0=disabled)
+    #     'recut_snippets': True,  # bool (default: False) - return snippets for plotting
         
-        # === NNLS Fitting ===
-        'nnls_weight_mode': 'savgol',  # (default: 'uniform') 'uniform'|'linear'|'exponential'|'savgol'
-        'nnls_weight_tau_s': None,  # float|None (default: None=auto) - time constant (for linear or exponential modes)
-        'fit_diagnostic_plot': True,  # bool (default: False) - weight + τd diagnostics
-        'huber_delta': 5.5,  # float (default: 5.5) - robust fitting threshold
-        'irls_iters': 20,  # int (default: 6) - IRLS iterations
+    #     # === NNLS Fitting ===
+    #     'nnls_weight_mode': 'savgol',  # (default: 'uniform') 'uniform'|'linear'|'exponential'|'savgol'
+    #     'nnls_weight_tau_s': None,  # float|None (default: None=auto) - time constant (for linear or exponential modes)
+    #     'fit_diagnostic_plot': True,  # bool (default: False) - weight + τd diagnostics
+    #     'huber_delta': 5.5,  # float (default: 5.5) - robust fitting threshold
+    #     'irls_iters': 20,  # int (default: 6) - IRLS iterations
         
-        # === Time Windows ===
-        'pre_zoom_s': 0.20,  # float (default: 0.15) - pre-train window
-        'post_zoom_s': 0.20,  # float (default: 0.60) - post-train window
-        'f0_window_s': 1.0,  # float (default: 0.4) - baseline window
+    #     # === Time Windows ===
+    #     'pre_zoom_s': 0.20,  # float (default: 0.15) - pre-train window
+    #     'post_zoom_s': 0.20,  # float (default: 0.60) - post-train window
+    #     'f0_window_s': 1.0,  # float (default: 0.4) - baseline window
         
-        # === Peak Detection ===
-        'peak_window_ms': 20.0,  # float (default: 25.0) - peak search window
-        'peak_avg_points': 5,  # int (default: 5) - points to average at peak
-        'pre_peak_ms': 0.0,  # float (default: 0.0) - pre-peak offset
+    #     # === Peak Detection ===
+    #     'peak_window_ms': 20.0,  # float (default: 25.0) - peak search window
+    #     'peak_avg_points': 5,  # int (default: 5) - points to average at peak
+    #     'pre_peak_ms': 0.0,  # float (default: 0.0) - pre-peak offset
         
-        # === Thresholding ===
-        'measurement': 'NNLS',  # (default: 'NNLS') 'NNLS'|'SAVGOL'|'RAW' - series for p-values
-        'fail_method': 'NNLS',  # (default: None) 'NNLS'|'SAVGOL'|'RAW'|None - failure classification (None=use measurement)
-        'threshold_mode': 'sd',  # (default: 'auto') 'auto'|'mad'|'sd' - threshold rule (auto=MAD for NNLS, SD for SAVGOL)
-        'null_N': 3.0,  # float (default: 3.0) - threshold multiplier
-        'null_sim_max_points': 1000,  # int (default: 1000) - max null samples
-        'null_min_post_zoom_s': 0.05,  # float (default: 0.05) - min post window for null
+    #     # === Thresholding ===
+    #     'measurement': 'NNLS',  # (default: 'NNLS') 'NNLS'|'SAVGOL'|'RAW' - series for p-values
+    #     'fail_method': 'NNLS',  # (default: None) 'NNLS'|'SAVGOL'|'RAW'|None - failure classification (None=use measurement)
+    #     'threshold_mode': 'sd',  # (default: 'auto') 'auto'|'mad'|'sd' - threshold rule (auto=MAD for NNLS, SD for SAVGOL)
+    #     'null_N': 3.0,  # float (default: 3.0) - threshold multiplier
+    #     'null_sim_max_points': 1000,  # int (default: 1000) - max null samples
+    #     'null_min_post_zoom_s': 0.05,  # float (default: 0.05) - min post window for null
         
-        # === Kinetics Grids ===
-        'kin_taur_grid_ms': [0.6, 0.8, 1.0, 1.2, 1.5, 2.0],  # list[float] (default: [0.6, 0.8, 1.0, 1.2, 1.5, 2.0])
-        'kin_taud0_grid_ms': [1.6, 2.0, 2.5, 3.0, 4.0, 6.0, 8.0, 10.0, 12.5, 15.0, 18.0, 22.0, 28.0, 35.0, 45.0, 60.0],  # list[float] (default: [1.6, 2.0, ..., 60.0])
-        'kin_slope_grid_ms': [0.0, 0.25, 0.5, 1.0, 2.0, 3.0, 5.0],  # list[float] (default: [0.0, 0.25, 0.5, 1.0, 2.0, 3.0, 5.0])
+    #     # === Kinetics Grids ===
+    #     'kin_taur_grid_ms': [0.6, 0.8, 1.0, 1.2, 1.5, 2.0],  # list[float] (default: [0.6, 0.8, 1.0, 1.2, 1.5, 2.0])
+    #     'kin_taud0_grid_ms': [1.6, 2.0, 2.5, 3.0, 4.0, 6.0, 8.0, 10.0, 12.5, 15.0, 18.0, 22.0, 28.0, 35.0, 45.0, 60.0],  # list[float] (default: [1.6, 2.0, ..., 60.0])
+    #     'kin_slope_grid_ms': [0.0, 0.25, 0.5, 1.0, 2.0, 3.0, 5.0],  # list[float] (default: [0.0, 0.25, 0.5, 1.0, 2.0, 3.0, 5.0])
         
-        # === Bleach Correction ===
-        'bleach_huber_delta': 3.0,  # float (default: 3.0) - robust fitting threshold
-        'bleach_tau_range_factor': (0.25, 4.0),  # tuple[float,float] (default: (0.25, 4.0)) - tau range multipliers
-        'bleach_n_tau': 25,  # int (default: 25) - number of tau values to test
+    #     # === Bleach Correction ===
+    #     'bleach_huber_delta': 3.0,  # float (default: 3.0) - robust fitting threshold
+    #     'bleach_tau_range_factor': (0.25, 4.0),  # tuple[float,float] (default: (0.25, 4.0)) - tau range multipliers
+    #     'bleach_n_tau': 25,  # int (default: 25) - number of tau values to test
         
-        # === Plotting ===
-        'plot': {
-            'enabled': True,  # bool (default: False) - create plots
-            'traces': ['raw', 'nnls'],  # list[str] (default: ['nnls']) - traces to show
-            'show_decay': True,  # bool (default: True) - show decay components
-            'trials': True,  # bool (default: False) - plot individual trials
-            'baseline': True,  # bool (default: False) - show baseline diagnostics
-            'residuals': True,  # bool (default: False) - show residual analysis
-            'plot_peaks_details': True,  # bool (default: False) - show peak markers and residuals
-        },
+    #     # === Plotting ===
+    #     'plot': {
+    #         'enabled': True,  # bool (default: False) - create plots
+    #         'traces': ['raw', 'nnls'],  # list[str] (default: ['nnls']) - traces to show
+    #         'show_decay': True,  # bool (default: True) - show decay components
+    #         'trials': True,  # bool (default: False) - plot individual trials
+    #         'baseline': True,  # bool (default: False) - show baseline diagnostics
+    #         'residuals': True,  # bool (default: False) - show residual analysis
+    #         'plot_peaks_details': True,  # bool (default: False) - show peak markers and residuals
+    #     },
 
-        # === Jitter Variants (Optional) ===
-        # For grid search of temporal shifts in milliseconds
-        # Set to None to disable jitter search
-        'jitter_variant_ms': None,  # Example: np.arange(-1.0, 1.1, 0.2)
-    },
+    #     # === Jitter Variants (Optional) ===
+    #     # For grid search of temporal shifts in milliseconds
+    #     # Set to None to disable jitter search
+    #     'jitter_variant_ms': None,  # Example: np.arange(-1.0, 1.1, 0.2)
+    # },
 
     'iglusnfr_optimized': {
         # === Preprocessing ===
@@ -229,20 +235,13 @@ options_presets = {
         'anchor_first_tau': False,
 
         # === Event Model ===
-        'event_model': 'iglusnfr_tri',
+        'event_model': 'iglusnfr',
         # Tri-exponential (fast 1-5ms, slow 10-25ms, superslow from post-train)
         
-        # === Event Model Settings (initial tau values for NNLS kernels) ===
-        'event_model_settings': {
-            'tau_decay_fast': 0.003,     # 3ms fast component (reasonable for iGluSnFR3v)
-            'tau_decay_slow': 0.015,     # 15ms intermediate component
-            # tau_decay_superslow: comes from post-train decay fitting
-        },
-
         # === Parameter Bounds (auto-configured based on model) ===
         'parameter_bounds': {
-            'tau_decay_fast': (0.003, 0.010),     # 3-10ms fast component
-            'tau_decay_slow': (0.010, 0.035),     # 10-35ms intermediate
+            'tau_decay_fast': (0.003, 0.005),     # 3-10ms fast component
+            'tau_decay_slow': (0.05, 0.01),     # 10-35ms intermediate
             # tau_decay_superslow: auto from post-train decay (typically 30-50ms)
         },
         
@@ -260,8 +259,8 @@ options_presets = {
         # - 'inflection': Find inflection point (minimum derivative) - default
         # - 'baseline_threshold': Exclude all points below baseline + threshold * peak
         # - 'none': No onset masking
-        'onset_method': 'baseline_threshold',  # Use aggressive baseline masking for 50Hz
-        'onset_baseline_threshold': 0.15,  # 15% above baseline (adjustable 0.1-0.3)
+        'onset_method': 'baseline_threshold',  # aggressive baseline masking for 50Hz
+        'onset_baseline_threshold': 0.10,  # 10% above baseline (adjustable 0.1-0.3)
 
         # === PPR Safety ===
         # Floor amplitudes to noise threshold before PPR calculation
@@ -292,12 +291,12 @@ options_presets = {
         'null_sim_max_points': 1000,
         'null_min_post_zoom_s': 0.05,
 
-        # === Kinetics Grids ===
-        # Ultra-fast rise times for sharp iGluSnFR peaks
-        'kin_taur_grid_ms': [0.1, 0.2, 0.3, 0.5, 0.8, 1.0, 1.5, 2.0, 3.0],
-        # Bi-exponential decay: fast and slow components
-        'kin_taud0_grid_ms': [2.0, 4.0, 6.0, 8.0, 10.0, 15.0, 20.0, 25.0, 35.0, 50.0, 80.0, 120.0],
-        'kin_slope_grid_ms': [0.0, 0.25, 0.5, 1.0, 2.0, 3.0, 5.0],
+        # # === Kinetics Grids ===
+        # # Ultra-fast rise times for sharp iGluSnFR peaks
+        # 'kin_taur_grid_ms': [0.1, 0.2, 0.3, 0.5, 0.8, 1.0, 1.5, 2.0, 3.0],
+        # # Bi-exponential decay: fast and slow components
+        # 'kin_taud0_grid_ms': [2.0, 4.0, 6.0, 8.0, 10.0, 15.0, 20.0, 25.0, 35.0, 50.0, 80.0, 120.0],
+        # 'kin_slope_grid_ms': [0.0, 0.25, 0.5, 1.0, 2.0, 3.0, 5.0],
 
         # === Bleach Correction ===
         'bleach_huber_delta': 3.0,

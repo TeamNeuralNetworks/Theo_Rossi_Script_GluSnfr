@@ -1581,6 +1581,51 @@ def extract_metrics(
             cfg['fit_diagnostic_plot'] = bool(opts.get('nnls_show_weights', False))
         except Exception:
             cfg['fit_diagnostic_plot'] = bool(cfg.get('fit_diagnostic_plot', False))
+    # Auto-build kinetics grids from bounds when grids are not explicitly provided
+    def _grid_from_bounds_ms(bound, n=10):
+        if not isinstance(bound, (tuple, list)) or len(bound) != 2:
+            return None
+        lo, hi = float(bound[0]), float(bound[1])
+        if not np.isfinite(lo) or not np.isfinite(hi):
+            return None
+        if abs(hi - lo) < 1e-12:
+            return [lo * 1000.0]
+        return list(np.linspace(lo, hi, int(n)) * 1000.0)
+
+    param_bounds = cfg.get('parameter_bounds', {}) or {}
+    decay_bound_key = None
+    for _k in ('tau_decay_fast', 'tau_decay', 'tau_decay_slow'):
+        if _k in param_bounds:
+            decay_bound_key = _k
+            break
+
+    if 'kin_taur_grid_ms' not in opts:
+        auto_grid = _grid_from_bounds_ms(param_bounds.get('tau_rise'))
+        if auto_grid is not None:
+            cfg['kin_taur_grid_ms'] = auto_grid
+    else:
+        bound = param_bounds.get('tau_rise')
+        auto_grid = _grid_from_bounds_ms(bound)
+        if auto_grid is not None:
+            lo_ms, hi_ms = min(auto_grid), max(auto_grid)
+            grid = [v for v in cfg.get('kin_taur_grid_ms', []) if lo_ms - 1e-9 <= float(v) <= hi_ms + 1e-9]
+            if not grid:
+                grid = auto_grid
+            cfg['kin_taur_grid_ms'] = grid
+
+    if 'kin_taud0_grid_ms' not in opts:
+        auto_grid = _grid_from_bounds_ms(param_bounds.get(decay_bound_key)) if decay_bound_key else None
+        if auto_grid is not None:
+            cfg['kin_taud0_grid_ms'] = auto_grid
+    else:
+        bound = param_bounds.get(decay_bound_key) if decay_bound_key else None
+        auto_grid = _grid_from_bounds_ms(bound) if bound is not None else None
+        if auto_grid is not None:
+            lo_ms, hi_ms = min(auto_grid), max(auto_grid)
+            grid = [v for v in cfg.get('kin_taud0_grid_ms', []) if lo_ms - 1e-9 <= float(v) <= hi_ms + 1e-9]
+            if not grid:
+                grid = auto_grid
+            cfg['kin_taud0_grid_ms'] = grid
     interpolated_settings: List[Dict[str, Any]] = []
     global_fit_params: Dict[str, float] = {}
     recut_slow_replaced = False

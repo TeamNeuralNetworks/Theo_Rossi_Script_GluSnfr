@@ -298,6 +298,18 @@ def fit_average_event(
             # If anything goes wrong, keep original p0
             pass
         
+        def _grid_from_bounds(lo, hi, default_vals, n=10):
+            try:
+                lo_f = float(lo)
+                hi_f = float(hi)
+            except Exception:
+                lo_f, hi_f = np.nan, np.nan
+            if np.isfinite(lo_f) and np.isfinite(hi_f):
+                if abs(hi_f - lo_f) < 1e-12:
+                    return np.array([lo_f], float)
+                return np.linspace(lo_f, hi_f, int(n))
+            return np.array([_clip(x, lo, hi) for x in default_vals], float)
+
         # Robust seeding for iGluSnFR: grid search over key parameters
         grid_search_best = None
         tau_rise_grid = None
@@ -321,9 +333,9 @@ def fit_average_event(
                 
                 # Grids for key parameters with NON-OVERLAPPING ranges
                 # tau_rise: 0.5-3ms, tau_fast: 1.5-7ms (tighter), tau_slow: 15-150ms
-                tau_rise_grid = np.array([_clip(x, lb[1], ub[1]) for x in (0.0005, 0.001, 0.0015, 0.002, 0.003)])
-                tau_fast_grid = np.array([_clip(x, lb[2], ub[2]) for x in (0.0015, 0.002, 0.003, 0.004, 0.005, 0.007)])
-                tau_slow_grid = np.array([_clip(x, lb[3], ub[3]) for x in (0.015, 0.025, 0.040, 0.060, 0.100, 0.150)])
+                tau_rise_grid = _grid_from_bounds(lb[1], ub[1], (0.0005, 0.001, 0.0015, 0.002, 0.003))
+                tau_fast_grid = _grid_from_bounds(lb[2], ub[2], (0.0015, 0.002, 0.003, 0.004, 0.005, 0.007))
+                tau_slow_grid = _grid_from_bounds(lb[3], ub[3], (0.015, 0.025, 0.040, 0.060, 0.100, 0.150))
                 frac_fast_grid = np.array([_clip(x, lb[4], ub[4]) for x in (0.4, 0.55, 0.7, 0.85)])
                 
                 # Find peak location in data
@@ -412,11 +424,11 @@ def fit_average_event(
                 
                 # Grids for key parameters with NON-OVERLAPPING ranges
                 # tau_rise: 0.3-3ms, tau_fast: 0.5-8ms, tau_slow: 8-35ms, tau_superslow: 25-100ms
-                tau_rise_grid = np.array([_clip(x, lb[1], ub[1]) for x in (0.0003, 0.0005, 0.001, 0.002, 0.003)])
-                tau_fast_grid = np.array([_clip(x, lb[2], ub[2]) for x in (0.0005, 0.001, 0.002, 0.004, 0.006, 0.008)])
-                tau_slow_grid = np.array([_clip(x, lb[3], ub[3]) for x in (0.010, 0.015, 0.020, 0.030)])
-                # tau_superslow often fixed from post-train decay, use narrower grid
-                tau_superslow_grid = np.array([_clip(x, lb[4], ub[4]) for x in (0.030, 0.050, 0.080, 0.120)])
+                tau_rise_grid = _grid_from_bounds(lb[1], ub[1], (0.0003, 0.0005, 0.001, 0.002, 0.003))
+                tau_fast_grid = _grid_from_bounds(lb[2], ub[2], (0.0005, 0.001, 0.002, 0.004, 0.006, 0.008))
+                tau_slow_grid = _grid_from_bounds(lb[3], ub[3], (0.010, 0.015, 0.020, 0.030))
+                # tau_superslow often fixed from post-train decay, use narrower grid unless bounded
+                tau_superslow_grid = _grid_from_bounds(lb[4], ub[4], (0.030, 0.050, 0.080, 0.120))
                 frac_fast_grid = np.array([_clip(x, lb[5], ub[5]) for x in (0.4, 0.55, 0.7, 0.85)])
                 frac_slow_grid = np.array([_clip(x, lb[6], ub[6]) for x in (0.10, 0.20, 0.30)])  # Intermediate fraction
                 
