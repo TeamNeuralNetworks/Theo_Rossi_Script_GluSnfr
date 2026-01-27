@@ -1967,7 +1967,7 @@ def extract_metrics(
                         ('tau_rise', 0.002),          # 2 ms
                         ('tau_decay_fast', 0.005),    # 5 ms
                         ('tau_decay_slow', 0.015),    # 15 ms
-                        ('tau_decay_superslow', 0.040),  # 40 ms (will be updated from post-train)
+                        ('tau_decay_superslow', 0.040),  # 40 ms (will be updated from last-event decay)
                         ('frac_fast', 0.5),           # Default fast fraction
                         ('frac_slow', 0.3),           # Default intermediate fraction
                     ]
@@ -2728,25 +2728,37 @@ def extract_metrics(
             # High-frequency trains: the recut window is CONTAMINATED by next pulse
             # Use 75% of ISI to avoid contamination, but this limits kinetics fitting
             # For bi-exponential models, we can't reliably fit tau_slow from recut
-            # Instead, rely on post-train decay estimate (see below)
+            # Instead, rely on the last-event decay estimate (see below)
             post_ms_for_fit = max(12.0, isi_ms * 0.75)
         else:
             post_ms_for_fit = min(50.0, isi_ms - 5.0)  # Standard: 50ms or ISI-5ms
         progress_print(f"[global] Using post_ms={post_ms_for_fit:.1f} ms for recut fitting (ISI={isi_ms:.1f}ms)")
 
-        # === Estimate tau_slow from post-train decay (bi-exp only) ===
+        # === Estimate tau_slow from last-event decay (bi-exp only) ===
         # For tri-exp, superslow is derived from the final event decay instead.
         tau_slow_from_decay = None
         if event_model != 'iglusnfr_tri':
             # Critical for high-frequency trains where recut window is too short to fit slow kinetics
-            tau_slow_from_decay = estimate_tau_from_post_train_decay(t, y_avg, stim_times, isi)
+            tau_fast_hint = None
+            try:
+                tau_fast_hint = float(cfg.get('event_model_settings', {}).get('tau_decay_fast', np.nan))
+                if not np.isfinite(tau_fast_hint):
+                    tau_fast_hint = None
+            except Exception:
+                tau_fast_hint = None
+            tau_slow_from_decay, _ = estimate_tau_superslow_from_last_event_decay(
+                t, y_avg, stim_times, isi, tau_fast_s=tau_fast_hint
+            )
             if tau_slow_from_decay is not None:
                 param_bounds = cfg.setdefault('parameter_bounds', {})
                 if 'tau_decay_slow' not in param_bounds:
                     lower_slow = max(0.010, tau_slow_from_decay * 0.5)
                     upper_slow = min(0.400, tau_slow_from_decay * 3.0)
                     param_bounds['tau_decay_slow'] = (lower_slow, upper_slow)
-                    progress_print(f"[global] tau_slow bounds: {lower_slow*1000:.1f}-{upper_slow*1000:.1f} ms (from post-train: {tau_slow_from_decay*1000:.1f}ms)")
+                    progress_print(
+                        f"[global] tau_slow bounds: {lower_slow*1000:.1f}-{upper_slow*1000:.1f} ms "
+                        f"(from last-event: {tau_slow_from_decay*1000:.1f}ms)"
+                    )
 
         need_snips = bool(
             cfg.get('plot', {}).get('enabled', False)
@@ -2756,7 +2768,7 @@ def extract_metrics(
         # Use early events only for fast kinetics estimation (default: first 3 events)
         early_events = int(cfg.get('early_events_only', 3))
         
-        # Pass tau_slow from post-train decay to fix it during curve_fit
+        # Pass tau_slow from last-event decay to fix it during curve_fit
         # This allows fitting tau_fast from early events while using the true slow kinetics
         fixed_tau_slow = tau_slow_from_decay if (early_events > 0 and tau_slow_from_decay is not None) else None
 
@@ -4427,45 +4439,35 @@ def extract_metrics(
             except Exception:
                 pass
                 
-        # Overlay post-train decay fit (green dashed line)
+        # Overlay last-event decay fit (orange dashed line)
         try:
-            global _POST_TRAIN_DECAY_FIT
-            if _POST_TRAIN_DECAY_FIT is not None:
-                pt_fit = _POST_TRAIN_DECAY_FIT
-                t_start = pt_fit['t_start']
-                t_end = pt_fit['t_end']
-                tau = pt_fit['tau']
-                amp = pt_fit['amp']
-                baseline = pt_fit['baseline']
-                # Generate fit curve
+            global _LAST_EVENT_DECAY_FIT
+            if _LAST_EVENT_DECAY_FIT is not None:
+                le_fit = _LAST_EVENT_DECAY_FIT
+                t_start = le_fit['t_start']
+                t_end = le_fit['t_end']
+                baseline = le_fit['baseline']
+                a_fast = le_fit.get('a_fast', 0.0)
+                tau_fast = le_fit.get('tau_fast', np.nan)
+                a_slow = le_fit.get('a_slow', 0.0)
+                tau_slow = le_fit.get('tau_slow', np.nan)
                 t_fit = np.linspace(t_start, t_end, 100)
-                y_fit = amp * np.exp(-(t_fit - t_start) / tau) + baseline
-                ax.plot(t_fit, y_fit, 'g--', lw=2.0, alpha=0.8, label=f'post-train fit (τ={tau*1000:.1f}ms)')
+                y_fit = np.full_like(t_fit, baseline, dtype=float)
+                if np.isfinite(tau_fast) and a_fast > 0:
+                    y_fit += a_fast * np.exp(-(t_fit - t_start) / max(tau_fast, 1e-6))
+                if np.isfinite(tau_slow) and a_slow > 0:
+                    y_fit += a_slow * np.exp(-(t_fit - t_start) / max(tau_slow, 1e-6))
+                ax.plot(
+                    t_fit,
+                    y_fit,
+                    color='tab:orange',
+                    ls='--',
+                    lw=2.0,
+                    alpha=0.85,
+                    label=f'last-event fit (τ={tau_slow*1000:.1f}ms)',
+                )
         except Exception:
             pass
-        # Overlay last-event superslow decay fit for tri-exp (orange dashed line)
-        if event_model == 'iglusnfr_tri':
-            try:
-                global _LAST_EVENT_DECAY_FIT
-                if _LAST_EVENT_DECAY_FIT is not None:
-                    le_fit = _LAST_EVENT_DECAY_FIT
-                    t_start = le_fit['t_start']
-                    t_end = le_fit['t_end']
-                    baseline = le_fit['baseline']
-                    a_fast = le_fit.get('a_fast', 0.0)
-                    tau_fast = le_fit.get('tau_fast', np.nan)
-                    a_slow = le_fit.get('a_slow', 0.0)
-                    tau_slow = le_fit.get('tau_slow', np.nan)
-                    t_fit = np.linspace(t_start, t_end, 100)
-                    y_fit = np.full_like(t_fit, baseline, dtype=float)
-                    if np.isfinite(tau_fast) and a_fast > 0:
-                        y_fit += a_fast * np.exp(-(t_fit - t_start) / max(tau_fast, 1e-6))
-                    if np.isfinite(tau_slow) and a_slow > 0:
-                        y_fit += a_slow * np.exp(-(t_fit - t_start) / max(tau_slow, 1e-6))
-                    ax.plot(t_fit, y_fit, color='tab:orange', ls='--', lw=2.0, alpha=0.85,
-                            label=f'last-event fit (τ={tau_slow*1000:.1f}ms)')
-            except Exception:
-                pass
             
         ax.set_xlim(z0, z1)
         ax.set_xlabel('Time (s)')
