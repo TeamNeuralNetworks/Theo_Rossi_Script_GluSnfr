@@ -21,7 +21,7 @@ OUT_DIR = os.path.join(DATA_ROOT, "Testout")
 
 # --- Select conditions and files ---
 # If CONDITIONS_TO_RUN is empty/None, the script will process all conditions
-CONDITIONS_TO_RUN = ["Theo_1_5_50Hz"]  # e.g., ["Theo_4_50Hz"]
+CONDITIONS_TO_RUN = []  # e.g., ["Theo_4_50Hz"]
 FILE_GLOB = "*.xlsx"
 
 # --- Select analysis preset ---
@@ -98,10 +98,10 @@ def _build_options_presets(peak_window_ms, pre_zoom_s, post_zoom_s):
             'fit_source': 'global',                                         # 'global', 'average', 'individual' ; this controls the source of data for kinetics fitting
             'decay_progression_mode': 'linear',                               # 'fixed', 'linear', 'free_monotonic', 'none' ; this controls how decay kinetics evolve over pulses
             'anchor_final_tau': False,                                      # Whether to anchor the final event tau to the last-event estimate
-            'anchor_first_tau': True,                                      # Whether to anchor the first event tau to a fixed value
+            'anchor_first_tau': False,                                      # Whether to anchor the first event tau to a fixed value
             
             # --- Event Model ---
-            'event_model': 'iglusnfr_tri',                                      # 'double_exp', 'iglusnfr', 'iglusnfr_tri', 'single_exp', 'cooperative'
+            'event_model': 'iglusnfr',                                      # 'double_exp', 'iglusnfr', 'iglusnfr_tri', 'single_exp', 'cooperative'
             'parameter_bounds': {
                 'tau_decay_fast': (0.002, 0.010),                           # fast decay bounds (s)
                 'tau_decay_slow': (0.010, 0.050),                           # slow decay bounds (s)
@@ -175,8 +175,8 @@ def _build_options_presets(peak_window_ms, pre_zoom_s, post_zoom_s):
             'template_variant_superslow_fracs': np.linspace(0.0, 1.0, 11),  # tri-exp only
             'superslow_min_ratio': 1.0,                                     # Minimum ratio between slow and superslow taus for tri-exp variants
 
-            'force_tau_slow_override': True,
-            'allow_tau_slow_override': False,                                # Only for tri-exp models
+            'force_tau_slow_override': False,
+            'allow_tau_slow_override': True,                                # Only for tri-exp models
             
             # --- Jitter Variants ---
             'jitter_variant_ms': np.linspace(-3.0, 3.0, 13),

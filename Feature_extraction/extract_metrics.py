@@ -534,6 +534,47 @@ def estimate_tau_superslow_from_last_event_decay(
         return None, None
 
 
+def _validate_kernel_monotonic_decay(kernel: np.ndarray, tolerance: float = 0.02) -> bool:
+    """Check that kernel has monotonic decay after its peak.
+    
+    Multi-exponential kernels with certain parameter combinations can exhibit
+    non-physical behavior (secondary bumps, curve rising after peak). This
+    function validates that the decay portion is monotonically decreasing.
+    
+    Args:
+        kernel: 1D kernel array (normalized or not)
+        tolerance: Fraction of peak below which we stop checking (to ignore noise at tail)
+        
+    Returns:
+        True if decay is monotonic (valid kernel), False if non-monotonic (reject)
+    """
+    if len(kernel) < 3:
+        return True
+    
+    peak_idx = int(np.argmax(kernel))
+    peak_val = kernel[peak_idx]
+    
+    if peak_val <= 0 or peak_idx >= len(kernel) - 2:
+        return True  # Edge cases: no valid peak or peak at end
+    
+    # Check decay portion: from peak to where signal drops below tolerance
+    threshold = peak_val * tolerance
+    decay_portion = kernel[peak_idx:]
+    
+    # Find where we drop below threshold (stop checking there)
+    below_thresh = np.where(decay_portion < threshold)[0]
+    end_check = below_thresh[0] if len(below_thresh) > 0 else len(decay_portion)
+    decay_to_check = decay_portion[:max(2, end_check)]
+    
+    # Check monotonicity: each sample should be <= previous
+    # Allow tiny numerical noise (1e-6 relative)
+    diffs = np.diff(decay_to_check)
+    max_rise = np.max(diffs) if len(diffs) > 0 else 0
+    
+    # Non-monotonic if any sample rises more than 1% of peak
+    return max_rise < peak_val * 0.01
+
+
 def _calculate_nnls_weights(
     t: np.ndarray,
     stim_times: np.ndarray,
@@ -2115,7 +2156,19 @@ def extract_metrics(
                         ]
                         y = model_func(dt_ms, *params)
                         peak_val = np.max(y) if np.any(y > 0) else 1.0
-                        return y / max(peak_val, 1e-12)
+                        y_norm = y / max(peak_val, 1e-12)
+                        
+                        # Validate monotonic decay - reject non-physical kernels
+                        if not _validate_kernel_monotonic_decay(y_norm):
+                            # Fallback: use pure bi-exponential (frac_superslow=0)
+                            params_fallback = [
+                                1.0, tau_r, tau_fast_s, tau_slow_s, tau_superslow_s,
+                                frac_fast + frac_superslow, frac_intermediate, 0.0,
+                            ]
+                            y_fallback = model_func(dt_ms, *params_fallback)
+                            peak_fb = np.max(y_fallback) if np.any(y_fallback > 0) else 1.0
+                            return y_fallback / max(peak_fb, 1e-12)
+                        return y_norm
                 else:
                     def _iglusnfr_variant_builder(
                         dt: np.ndarray,
@@ -2160,7 +2213,16 @@ def extract_metrics(
                         ]
                         y = model_func(dt_ms, *params)
                         peak_val = np.max(y) if np.any(y > 0) else 1.0
-                        return y / max(peak_val, 1e-12)
+                        y_norm = y / max(peak_val, 1e-12)
+                        
+                        # Validate monotonic decay - reject non-physical kernels
+                        if not _validate_kernel_monotonic_decay(y_norm):
+                            # Fallback: use single exponential (all fast)
+                            params_fallback = [1.0, tau_r, float(tau_d), tau_slow_use, 1.0, 0.0]
+                            y_fallback = model_func(dt_ms, *params_fallback)
+                            peak_fb = np.max(y_fallback) if np.any(y_fallback > 0) else 1.0
+                            return y_fallback / max(peak_fb, 1e-12)
+                        return y_norm
 
                 _VARIANT_KERNEL_BUILDER = _iglusnfr_variant_builder
                 model_type = "tri-exponential" if is_tri else "bi-exponential"
@@ -3111,7 +3173,19 @@ def extract_metrics(
                             ]
                             y = model_func(dt_ms, *params)
                             peak_val = np.max(y) if np.any(y > 0) else 1.0
-                            return y / max(peak_val, 1e-12)
+                            y_norm = y / max(peak_val, 1e-12)
+                            
+                            # Validate monotonic decay - reject non-physical kernels
+                            if not _validate_kernel_monotonic_decay(y_norm):
+                                # Fallback: use pure bi-exponential (frac_superslow=0)
+                                params_fb = [
+                                    1.0, tau_r, tau_fast_s, tau_slow_s, tau_superslow_s,
+                                    frac_fast + frac_superslow, frac_intermediate, 0.0,
+                                ]
+                                y_fb = model_func(dt_ms, *params_fb)
+                                peak_fb = np.max(y_fb) if np.any(y_fb > 0) else 1.0
+                                return y_fb / max(peak_fb, 1e-12)
+                            return y_norm
                     else:
                         # Bi-exponential variant builder
                         def _iglusnfr_variant_builder_fitted(
@@ -3147,17 +3221,27 @@ def extract_metrics(
                             tau_slow_use = fitted_params['tau_decay_slow']
                             if tau_slow_override is not None and np.isfinite(tau_slow_override) and tau_slow_override > 0:
                                 tau_slow_use = float(tau_slow_override)
+                            tau_fast_use = float(tau_d) if tau_d > 0 else fitted_params['tau_decay_fast']
                             params = [
                                 1.0,  # amp (will be normalized)
                                 tau_r,  # tau_rise from global fit
-                                float(tau_d) if tau_d > 0 else fitted_params['tau_decay_fast'],  # FITTED fast decay (seconds)
+                                tau_fast_use,  # FITTED fast decay (seconds)
                                 tau_slow_use,  # FITTED slow decay (seconds)
                                 frac_fast,  # frac_fast varies across templates
                                 0.0,  # t_onset
                             ]
                             y = model_func(dt_ms, *params)
                             peak_val = np.max(y) if np.any(y > 0) else 1.0
-                            return y / max(peak_val, 1e-12)
+                            y_norm = y / max(peak_val, 1e-12)
+                            
+                            # Validate monotonic decay - reject non-physical kernels
+                            if not _validate_kernel_monotonic_decay(y_norm):
+                                # Fallback: use single exponential (all fast)
+                                params_fb = [1.0, tau_r, tau_fast_use, tau_slow_use, 1.0, 0.0]
+                                y_fb = model_func(dt_ms, *params_fb)
+                                peak_fb = np.max(y_fb) if np.any(y_fb > 0) else 1.0
+                                return y_fb / max(peak_fb, 1e-12)
+                            return y_norm
 
                     _VARIANT_KERNEL_BUILDER = _iglusnfr_variant_builder_fitted
                     override_msg = " (OVERRIDDEN)" if override_used else ""
