@@ -2166,7 +2166,9 @@ def extract_metrics(
                 model_type = "tri-exponential" if is_tri else "bi-exponential"
                 if is_tri:
                     variant_preview = _build_triexp_variant_grid()
-                    progress_print(f"[model] Template variants enabled for {model_type} iGluSnFR with {len(variant_preview)} slow/superslow pairs")
+                    # Count bi-exp-equivalent variants (superslow_frac = 0)
+                    biexp_equiv = [v for v in variant_preview if len(v) >= 2 and v[1] == 0.0]
+                    progress_print(f"[model] Template variants enabled for {model_type} iGluSnFR with {len(variant_preview)} pairs ({len(biexp_equiv)} pure bi-exp)")
                 else:
                     progress_print(f"[model] Template variants enabled for {model_type} iGluSnFR with ratios: {cfg.get('template_variant_ratios')}")
             except Exception as e:
@@ -2916,27 +2918,32 @@ def extract_metrics(
                                     f"({tau_superslow_setting*1000:.1f}ms < {min_ratio:.2f}x {tau_slow_fit*1000:.1f}ms); "
                                     "disabling superslow variants."
                                 )
+                        # CHANGED: Always include 0.0 (bi-exp equivalent) in superslow grid
+                        # so NNLS can select bi-exp if it fits better than tri-exp
                         if (not superslow_disabled) and min_superslow_frac is not None and np.isfinite(min_superslow_frac):
                             min_superslow_frac = float(np.clip(min_superslow_frac, 0.0, 1.0))
                             ss_fracs = cfg.get('template_variant_superslow_fracs', [0.0])
                             if not isinstance(ss_fracs, (list, tuple, np.ndarray)):
                                 ss_fracs = [ss_fracs]
-                            ss_filtered = []
+                            # Keep all original superslow fractions plus the estimate
+                            ss_filtered = [0.0]  # Always include bi-exp equivalent
                             for val in ss_fracs:
                                 try:
                                     fval = float(val)
                                 except Exception:
                                     continue
-                                if np.isfinite(fval) and fval + 1e-9 >= min_superslow_frac:
+                                if np.isfinite(fval) and fval >= 0.0:
                                     ss_filtered.append(fval)
+                            # Also include the estimated fraction if not already present
+                            if min_superslow_frac not in ss_filtered:
+                                ss_filtered.append(min_superslow_frac)
                             ss_filtered = sorted(set(ss_filtered))
-                            if not ss_filtered:
-                                ss_filtered = [min_superslow_frac]
                             cfg['template_variant_superslow_fracs'] = ss_filtered
                             triexp_variant_grid = None
+                            n_biexp = sum(1 for v in ss_filtered if v == 0.0)
                             progress_print(
-                                "[tri-exp] Enforcing min superslow fraction at last event: "
-                                f"{min_superslow_frac:.2f} (kept {len(ss_filtered)} variants)"
+                                f"[tri-exp] Superslow grid includes bi-exp (0.0) + estimate ({min_superslow_frac:.2f}); "
+                                f"{len(ss_filtered)} fracs total"
                             )
                         cfg['event_model_settings']['tau_decay_superslow'] = float(tau_superslow_setting)
 
@@ -3973,7 +3980,23 @@ def extract_metrics(
             jitter_variant_ms=jitter_variant_ms,
             hard_select=hard_select,
         )
-        # Per-event variant selection logging disabled for cleaner output
+        # Log selected variant summary for tri-exp (shows if bi-exp or tri-exp was preferred)
+        if variant_info_avg and event_model == 'iglusnfr_tri':
+            dom_ratios = variant_info_avg.get('dominant_template_ratio', [])
+            if dom_ratios is not None and len(dom_ratios) > 0:
+                # For tri-exp, ratios are tuples (slow_frac, superslow_frac) or (slow_frac, superslow_frac, tau_slow)
+                is_tuple_format = all(isinstance(r, (tuple, list)) and len(r) >= 2 for r in dom_ratios)
+                if is_tuple_format:
+                    ss_fracs = [float(r[1]) for r in dom_ratios]
+                    n_biexp = sum(1 for f in ss_fracs if f < 0.01)  # superslow < 1% = effectively bi-exp
+                    n_triexp = len(ss_fracs) - n_biexp
+                    ss_str = ", ".join(f"{f:.2f}" for f in ss_fracs)
+                    progress_print(f"[tri-exp] Superslow fracs per event: [{ss_str}] ({n_biexp} bi-exp, {n_triexp} tri-exp)")
+                else:
+                    # Scalar format - just slow fraction, no superslow
+                    slow_fracs = [float(r) for r in dom_ratios]
+                    slow_str = ", ".join(f"{f:.2f}" for f in slow_fracs)
+                    progress_print(f"[tri-exp] Slow fracs per event: [{slow_str}] (scalar format, no superslow info)")
     else:
         # Standard forward fitting with single template per event
         a_avg, d_avg, X_avg, yhat_avg, comp_avg = fit_amplitudes_no_overlap_forward(
@@ -4030,10 +4053,14 @@ def extract_metrics(
                 raw_fracs = np.array([float(r[0]) for r in dominant_ratios_pass1])
                 raw_tau_slow = np.array([float(r[1]) for r in dominant_ratios_pass1])
             elif is_triexp_tuple:
-                # Tri-exp model: ratios are tuples like (frac_slow, frac_superslow, tau_superslow)
-                pass2_variant_ratios = variant_ratios
-                smoothed_ratios = None
-                raw_fracs = None
+                # Tri-exp model: ratios are tuples like (frac_slow, frac_superslow) or (frac_slow, frac_superslow, tau_slow)
+                # Extract both slow and superslow fractions for smoothing
+                raw_slow_fracs = np.array([float(r[0]) for r in dominant_ratios_pass1])
+                raw_superslow_fracs = np.array([float(r[1]) for r in dominant_ratios_pass1])
+                raw_tau_slow_tri = None
+                if len(dominant_ratios_pass1[0]) >= 3:
+                    raw_tau_slow_tri = np.array([float(r[2]) for r in dominant_ratios_pass1])
+                raw_fracs = raw_slow_fracs  # Will be smoothed below
             else:
                 raise ValueError(f"Unknown dominant_ratio format: {type(sample_ratio)}")
             
@@ -4053,6 +4080,40 @@ def extract_metrics(
                     # Pure bi-exp: just scalars
                     pass2_variant_ratios = list(smoothed_fracs)
                     smoothed_ratios = smoothed_fracs
+                elif is_triexp_tuple:
+                    # Tri-exp: smooth superslow fractions too
+                    _, smoothed_superslow = _apply_progression(
+                        tau_r, raw_superslow_fracs, float(np.nanmedian(raw_superslow_fracs)),
+                        'global', 'slow_fraction'  # Use same progression rule
+                    )
+                    smoothed_superslow = np.clip(smoothed_superslow, 0.0, 1.0)
+                    
+                    # Ensure slow + superslow <= 1.0
+                    for i in range(len(smoothed_fracs)):
+                        total = smoothed_fracs[i] + smoothed_superslow[i]
+                        if total > 1.0:
+                            # Scale down proportionally
+                            scale = 1.0 / total
+                            smoothed_fracs[i] *= scale
+                            smoothed_superslow[i] *= scale
+                    
+                    # Build tuples: (frac_slow, frac_superslow) or (frac_slow, frac_superslow, tau_slow)
+                    if raw_tau_slow_tri is not None:
+                        pass2_variant_ratios = [
+                            (float(smoothed_fracs[i]), float(smoothed_superslow[i]), float(raw_tau_slow_tri[i]))
+                            for i in range(len(smoothed_fracs))
+                        ]
+                    else:
+                        pass2_variant_ratios = [
+                            (float(smoothed_fracs[i]), float(smoothed_superslow[i]))
+                            for i in range(len(smoothed_fracs))
+                        ]
+                    smoothed_ratios = smoothed_fracs  # Just slow fraction for reporting
+                    
+                    # Log the smoothed superslow fractions
+                    ss_raw_str = ", ".join(f"{f:.2f}" for f in raw_superslow_fracs)
+                    ss_smooth_str = ", ".join(f"{f:.2f}" for f in smoothed_superslow)
+                    progress_print(f"[TWO-PASS tri-exp] Superslow: [{ss_raw_str}] -> [{ss_smooth_str}]")
                 else:
                     # Bi-exp with tau_slow: keep the tau_slow from pass 1, use smoothed fraction
                     pass2_variant_ratios = [(float(f), float(raw_tau_slow[i])) for i, f in enumerate(smoothed_fracs)]
@@ -4062,18 +4123,74 @@ def extract_metrics(
             # The smoothing is on RATIOS, not on tau_d_fast
             pass2_tau_d = tau_d_vec.copy()
             
-            # Run second NNLS pass with smoothed ratios
-            # Key difference: each event is constrained to ONE ratio (its smoothed value)
-            a_avg_p2, d_avg_p2, X_avg_p2, yhat_avg_p2, comp_avg_p2, variant_info_p2 = fit_amplitudes_with_template_variants(
-                y_avg, t, stim_times, tau_r, pass2_tau_d,
-                variant_ratios=pass2_variant_ratios,
-                weight_mode=weight_mode,
-                weight_tau_s=weight_tau_s,
-                isi=isi,
-                event_t0_s=event_t0_s,
-                jitter_variant_ms=jitter_variant_ms,
-                hard_select=True,  # Hard selection for cleaner result
-            )
+            # Run second pass with FIXED smoothed ratios per event
+            # Build design matrix directly with one ratio per event (no variant search)
+            n_events = len(stim_times)
+            jitter_variant_s = np.asarray(jitter_variant_ms, float) / 1000.0 if jitter_variant_ms is not None else np.array([0.0])
+            n_jitter = len(jitter_variant_s)
+            
+            # Build kernels: each event has only jitter variants, fixed ratio
+            kernel_columns = []
+            for i_event in range(n_events):
+                st = float(stim_times[i_event])
+                tau_d = float(pass2_tau_d[i_event])
+                frac_ratio = pass2_variant_ratios[i_event]  # THIS event's smoothed ratio
+                for jitter_s in jitter_variant_s:
+                    anchor = st + event_t0_s + jitter_s
+                    k = _build_variant_kernel(
+                        t - anchor, tau_r, tau_d, frac_ratio,
+                        event_idx=i_event, n_events=n_events,
+                    )
+                    kernel_columns.append(k)
+            
+            X_p2 = np.column_stack(kernel_columns) if kernel_columns else np.zeros((t.size, 0))
+            
+            # Compute weights
+            weights_p2 = _calculate_nnls_weights(t, stim_times, isi, weight_mode, weight_tau_s, y_ref=y_avg)
+            
+            # NNLS solve
+            a_p2 = _nnls_weighted(X_p2, y_avg, weights_p2)
+            yhat_avg_p2 = X_p2 @ a_p2
+            
+            # Reshape to [n_events, n_jitter]
+            a_p2_reshaped = a_p2.reshape(n_events, n_jitter)
+            
+            # Find dominant jitter per event
+            dom_jitter_idx = np.argmax(a_p2_reshaped, axis=1)
+            d_avg_p2 = np.array([jitter_variant_s[j] for j in dom_jitter_idx])
+            
+            # Sum amplitudes across jitter variants
+            a_avg_p2 = np.sum(a_p2_reshaped, axis=1)
+            
+            # Build components
+            comp_avg_p2 = []
+            X_avg_p2 = np.zeros((t.size, n_events))
+            for i_event in range(n_events):
+                st = float(stim_times[i_event])
+                tau_d = float(pass2_tau_d[i_event])
+                frac_ratio = pass2_variant_ratios[i_event]
+                comp_event = np.zeros_like(y_avg)
+                for i_jitter, jitter_s in enumerate(jitter_variant_s):
+                    idx = i_event * n_jitter + i_jitter
+                    amp_var = a_p2[idx]
+                    if amp_var > 0:
+                        anchor = st + event_t0_s + jitter_s
+                        k = _build_variant_kernel(
+                            t - anchor, tau_r, tau_d, frac_ratio,
+                            event_idx=i_event, n_events=n_events,
+                        )
+                        comp_event += amp_var * k
+                comp_avg_p2.append(comp_event)
+                X_avg_p2[:, i_event] = comp_event / max(a_avg_p2[i_event], 1e-12)
+            
+            # Build variant_info for pass 2
+            variant_info_p2 = {
+                'n_template_variants': 1,  # Fixed ratio per event
+                'n_jitter_variants': n_jitter,
+                'variant_ratios': pass2_variant_ratios,
+                'dominant_template_ratio': pass2_variant_ratios,  # These are the smoothed ratios
+                'dominant_jitter_ms': d_avg_p2 * 1000.0,
+            }
             
             # Compare RMS error between passes
             zmask_cmp = (t >= float(train_start) - cfg['pre_zoom_s']) & (t < float(train_start) + float(isi) * int(n_pulses) + cfg['post_zoom_s'])

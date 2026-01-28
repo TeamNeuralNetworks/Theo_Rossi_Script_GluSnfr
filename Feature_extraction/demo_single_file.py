@@ -196,8 +196,8 @@ def _build_options_presets(peak_window_ms, pre_zoom_s, post_zoom_s):
             'template_variant_ratios': np.linspace(0.0, 1.0, 10),           # bi-exp and tri-exp
             'template_variant_superslow_fracs': np.linspace(0.0, 1.0, 11),  # tri-exp only
             'superslow_min_ratio': 1.0,                                     # Minimum ratio between slow and superslow taus for tri-exp variants
-            'allow_tau_slow_override': True,                                # If True, allow tau_slow = tau_superslow in tri-exp models if it improves fit
-            'force_tau_slow_override': True,                                # If True, force tau_slow = tau_superslow in tri-exp models ; unlike allow_tau_slow_override, this enforces the equality rather than just allowing it
+            'allow_tau_slow_override': False,                                # If True, allow tau_slow = tau_superslow in tri-exp models if it improves fit
+            'force_tau_slow_override': False,                                # If True, force tau_slow = tau_superslow in tri-exp models ; unlike allow_tau_slow_override, this enforces the equality rather than just allowing it
             
             # --- Jitter Variants ---
             'jitter_variant_ms': np.linspace(0.0, 3.0, 13),                # Jitter variants to try (ms) ; set to None to disable jitter variants ; jitter means we shift event times by +/- jitter to test robustness
