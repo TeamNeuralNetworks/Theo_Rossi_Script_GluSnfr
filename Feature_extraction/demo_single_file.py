@@ -47,14 +47,15 @@ OUT_DIR = os.path.join(DATA_ROOT, "Testout")
 # If CONDITION is empty/None, the script will search all folders for TARGET_FILE
 CONDITION = ""  # Leave empty to auto-detect from file location
 TARGET_FILE = "20191017_linescan3_50Hz_10pulses_2.5mMCa_bouton2_traces_converted.xlsx"
+TARGET_FILE = "20210722_linescan3_50Hz_10pulses_1.5mMCa_bouton12_traces_converted.xlsx"
 
 # --- Select analysis preset ---
 PRESET_NAME = 'iglusnfr_optimized'  # Options: 'iglusnfr_optimized', 'double_exp', 'single_exp_fixed_8ms'
 
 # --- Manual overrides (set to None to use lookup tables) ---
-OVERRIDE_ISI = None       # e.g., 0.02 for 50Hz, 0.05 for 20Hz
-OVERRIDE_BASELINE = None  # e.g., 0.498 or 0.998
-OVERRIDE_N_PULSES = None  # e.g., 10
+OVERRIDE_ISI = None         # e.g., 0.02 for 50Hz, 0.05 for 20Hz
+OVERRIDE_BASELINE = None    # e.g., 0.498 or 0.998
+OVERRIDE_N_PULSES = None    # e.g., 10
 
 # =============================================================================
 #                         CONDITION LOOKUP TABLES
@@ -73,31 +74,32 @@ ALL_CONDITIONS = [
     "WT_Theo_1scd",          # baseline 0.998
     "WT_Anthime",            # baseline 0.998
     "SynII",                 # baseline 0.998
+    
     # --- 50Hz conditions (ISI=0.02s) ---
     "Theo_1_5_50Hz",         # baseline 0.498
     "Theo_2_5_50Hz",         # baseline 0.498
     "Theo_4_50Hz",           # baseline 0.498
 ]
 
-DEFAULT_ISI = 0.05       # 20Hz
-DEFAULT_BASELINE = 0.998
-DEFAULT_N_PULSES = 10
+DEFAULT_ISI =                   0.05        # 20Hz
+DEFAULT_BASELINE =              0.998
+DEFAULT_N_PULSES =              10
 
 ISI_BY_CONDITION = {
-    "Theo_1_5_50Hz": 0.02,
-    "Theo_2_5_50Hz": 0.02,
-    "Theo_4_50Hz": 0.02,
+    "Theo_1_5_50Hz":            0.02,
+    "Theo_2_5_50Hz":            0.02,
+    "Theo_4_50Hz":              0.02,
 }
 
 BASELINE_BY_CONDITION = {
-    "Stability_Before_05": 0.498,
-    "Stability_After_05": 0.498,
-    "Theo_4Ca": 0.498,
-    "Theo_1_5Ca": 0.498,
-    "WT_Theo": 0.498,
-    "Theo_1_5_50Hz": 0.498,
-    "Theo_2_5_50Hz": 0.498,
-    "Theo_4_50Hz": 0.498,
+    "Stability_Before_05":      0.498,
+    "Stability_After_05":       0.498,
+    "Theo_4Ca":                 0.498,
+    "Theo_1_5Ca":               0.498,
+    "WT_Theo":                  0.498,
+    "Theo_1_5_50Hz":            0.498,
+    "Theo_2_5_50Hz":            0.498,
+    "Theo_4_50Hz":              0.498,
 }
 
 # =============================================================================
@@ -109,93 +111,96 @@ def _build_options_presets(peak_window_ms, pre_zoom_s, post_zoom_s):
     return {
         'iglusnfr_optimized': {
             # --- Preprocessing ---
-            'normalize_dff': True, # Normalize to dF/F0
-            'bleach': True, # Apply bleach correction
-            'sg_window': 9, # Savitzky-Golay filter window (must be odd)
-            'sg_poly': 2, # Savitzky-Golay filter polynomial order
+            'normalize_dff': True,                                          # Normalize to dF/F0
+            'bleach': True,                                                 # Apply bleach correction
+            'sg_window': 9,                                                 # Savitzky-Golay filter window (must be odd)
+            'sg_poly': 2,                                                   # Savitzky-Golay filter polynomial order
+            
             # --- Kinetics ---
-            'fit_source': 'global', # 'global', 'average', 'individual' ; this controls the source of data for kinetics fitting
-            'decay_progression_mode': 'none', # 'fixed', 'linear', 'free_monotonic', 'none' ; this controls how decay kinetics evolve over pulses
-            'anchor_final_tau': False, # Whether to anchor the final event tau to the last-event estimate
-            'anchor_first_tau': False, # Whether to anchor the first event tau to a fixed value
+            'fit_source': 'global',                                         # 'global', 'average', 'individual' ; this controls the source of data for kinetics fitting
+            'decay_progression_mode': 'none',                               # 'fixed', 'linear', 'free_monotonic', 'none' ; this controls how decay kinetics evolve over pulses
+            'anchor_final_tau': False,                                      # Whether to anchor the final event tau to the last-event estimate
+            'anchor_first_tau': False,                                      # Whether to anchor the first event tau to a fixed value
+            
             # --- Event Model ---
-            'event_model': 'iglusnfr_tri', # 'double_exp', 'iglusnfr', 'iglusnfr_tri', 'single_exp', 'cooperative'
+            'event_model': 'iglusnfr',                                  # 'double_exp', 'iglusnfr', 'iglusnfr_tri', 'single_exp', 'cooperative'
             'parameter_bounds': {
-                'tau_decay_fast': (0.003, 0.008), # fast decay bounds (s)
-                'tau_decay_slow': (0.008, 0.035), # slow decay bounds (s)
-                'tau_superslow': (0.035, 0.150),  # superslow decay bounds (s) - only for tri-exponential
-                'amplitude_ratio': (0.0, 1.0),    # amplitude ratio bounds (0 to 1) ; 0 means all fast, 1 means all slow
+                'tau_decay_fast': (0.003, 0.008),                           # fast decay bounds (s)
+                'tau_decay_slow': (0.008, 0.035),                           # slow decay bounds (s)
+                'tau_superslow': (0.035, 0.150),                            # superslow decay bounds (s) - only for tri-exponential
+                'amplitude_ratio': (0.0, 1.0),                              # amplitude ratio bounds (0 to 1) ; 0 means all fast, 1 means all slow
             },
-            'early_events_only': 0, # Use only first N events for kinetics fitting (0 = all events)
+            'early_events_only': 0,                                         # Use only first N events for kinetics fitting (0 = all events)
+            
             # --- Recut/Averaging ---
-            'recut_projection': 'mean', # 'mean', 'median'
-            'recut_oversample': 20, # Oversampling factor for recut snippets ; data is projected onto a finer time grid
-            'recut_peak_recenter': 0, # Recenter recut snippets on peak (0 = no recentering)
-            'recut_snippets': True, # Whether to extract recut snippets for visualization
+            'recut_projection': 'mean',                                     # 'mean', 'median'
+            'recut_oversample': 20,                                         # Oversampling factor for recut snippets ; data is projected onto a finer time grid
+            'recut_peak_recenter': 0,                                       # Recenter recut snippets on peak (0 = no recentering)
+            'recut_snippets': True,                                         # Whether to extract recut snippets for visualization
+            
             # --- Onset Detection ---
-            'onset_method': 'baseline_threshold', # 'baseline_threshold', 'derivative' ; method for onset detection of recut snippets
-            'onset_baseline_threshold': 0.10, # Threshold (fraction of peak) for baseline_threshold onset detection
+            'onset_method': 'baseline_threshold',                           # 'baseline_threshold', 'derivative' ; method for onset detection of recut snippets
+            'onset_baseline_threshold': 0.10,                               # Threshold (fraction of peak) for baseline_threshold onset detection
+            
             # --- PPR Safety ---
-            'amplitude_floor_to_noise': True, # Floor amplitudes to noise level before computing PPR; defined as 1*std of baseline
+            'amplitude_floor_to_noise': True,                               # Floor amplitudes to noise level before computing PPR; defined as 1*std of baseline
+            
             # --- NNLS Fitting ---
-            'nnls_weight_mode': 'savgol', # 'uniform', 'linear', 'exponential', 'savgol' ; weighting scheme for NNLS fitting
-            'nnls_weight_tau_s': None, # Time constant for exponential weighting (s) ; only used if nnls_weight_mode is 'exponential'
-            'fit_diagnostic_plot': False, # Whether to generate fit diagnostic plots
-            'huber_delta': 2.5, # Huber loss delta for robust fitting (in std units); set to None to disable robust fitting 
-            'irls_iters': 20, # Number of IRLS iterations for robust fitting ; only used if huber_delta is set
+            'nnls_weight_mode': 'savgol',                                   # 'uniform', 'linear', 'exponential', 'savgol' ; weighting scheme for NNLS fitting
+            'nnls_weight_tau_s': None,                                      # Time constant for exponential weighting (s) ; only used if nnls_weight_mode is 'exponential'
+            'fit_diagnostic_plot': False,                                   # Whether to generate fit diagnostic plots
+            'huber_delta': 2.5,                                             # Huber loss delta for robust fitting (in std units); set to None to disable robust fitting
+            'irls_iters': 20,                                               # Number of IRLS iterations for robust fitting ; only used if huber_delta is set
+            
             # --- Time Windows (ISI-aware) ---
-            'pre_zoom_s': pre_zoom_s, # Pre-event snippet duration (s); controls how much data before each event is shown ; does not affect fitting
-            'post_zoom_s': post_zoom_s, # Post-event snippet duration (s); controls how much data after each event is shown ; does not affect fitting
-            'f0_window_s': 1.0, # F0 baseline window duration (s) ; controls how baseline F0 is computed for dF/F0 normalization
+            'pre_zoom_s': pre_zoom_s,                                       # Pre-event snippet duration (s); controls how much data before each event is shown ; does not affect fitting
+            'post_zoom_s': post_zoom_s,                                     # Post-event snippet duration (s); controls how much data after each event is shown ; does not affect fitting
+            'f0_window_s': 1.0,                                             # F0 baseline window duration (s) ; controls how baseline F0 is computed for dF/F0 normalization
+            
             # --- Peak Detection (ISI-aware) ---
-            'peak_window_ms': peak_window_ms, # Peak detection window duration (ms) ; controls how peaks are identified within each event
-            'peak_avg_points': 1, # Number of points to average around peak for amplitude measurement
-            'pre_peak_ms': 1.0, # Pre-peak baseline window (ms) ; controls how local baseline before each peak is computed ; 
+            'peak_window_ms': peak_window_ms,                               # Peak detection window duration (ms) ; controls how peaks are identified within each event
+            'peak_avg_points': 1,                                           # Number of points to average around peak for amplitude measurement
+            'pre_peak_ms': 1.0,                                             # Pre-peak baseline window (ms) ; controls how local baseline before each peak is computed ;
+            
             # --- Thresholding ---
-            'measurement': 'NNLS', # 'NNLS', 'AMP1' ; measurement used for thresholding the first event (to estimate failures)
-            'fail_method': 'SAVGOL', # 'SAVGOL', 'STD' ; method for estimating noise level for thresholding
-            'threshold_mode': 'auto', # 'auto', 'fixed' ; whether to use automatic or fixed thresholding; auto means threshold is computed from estimated noise; fixed means user provides threshold value
-            'null_N': 1.0, # Multiplier for null distribution to set threshold ; only used if threshold_mode is 'auto'
-            'null_sim_max_points': 1000, # Max points for null distribution simulation
-            'null_min_post_zoom_s': 0.05, # Minimum post-zoom duration (s) to use for null distribution simulation
+            'measurement': 'NNLS',                                          # 'NNLS', 'AMP1' ; measurement used for thresholding the first event (to estimate failures)
+            'fail_method': 'SAVGOL',                                        # 'SAVGOL', 'STD' ; method for estimating noise level for thresholding
+            'threshold_mode': 'auto',                                       # 'auto', 'fixed' ; whether to use automatic or fixed thresholding; auto means threshold is computed from estimated noise; fixed means user provides threshold value
+            'null_N': 1.0,                                                  # Multiplier for null distribution to set threshold ; only used if threshold_mode is 'auto'
+            'null_sim_max_points': 1000,                                    # Max points for null distribution simulation
+            'null_min_post_zoom_s': 0.05,                                   # Minimum post-zoom duration (s) to use for null distribution simulation
+            
             # --- Bleach Correction ---
-            'bleach_huber_delta': 3.0, # Huber loss delta for bleach fitting (in std units); set to None to disable robust fitting
-            'bleach_tau_range_factor': (0.25, 4.0), # Range factor for bleach tau fitting ; multiplied by initial estimate to get min and max bounds
-            'bleach_n_tau': 25, # Number of tau candidates for bleach fitting
+            'bleach_huber_delta': 3.0,                                      # Huber loss delta for bleach fitting (in std units); set to None to disable robust fitting
+            'bleach_tau_range_factor': (0.25, 4.0),                         # Range factor for bleach tau fitting ; multiplied by initial estimate to get min and max bounds
+            'bleach_n_tau': 25,                                             # Number of tau candidates for bleach fitting
+            
             # --- Plotting ---
             'plot': {
-                'enabled': True, # Master plot enable/disable
-                'traces': ['raw', 'nnls'], # 'raw', 'bleach_corrected', 'nnls', 'nnls_corr' ; which traces to plot
-                'figsize': (10, 6), # Figure size   
-                'show_decay': True, # Show decay fits on average plot
-                'show_onsets': True, # Show detected onsets on recut snippets   
-                'trials': False, # Whether to generate per-trial figures
-                'baseline': False, # Whether to show baseline F0 levels on traces
-                'residuals': True, # Whether to show residuals on average plot
-                'nnls_residual': False, # Whether to show NNLS residuals on average plot
-                'nnls_n_minus_1': False, # Whether to show NNLS n-1 fit on average plot
-                'plot_peaks_details': True, # Show peak detection details on traces
-                'param_evolution': True,  # Show parameter evolution across events
+                'enabled': True,                                            # Master plot enable/disable
+                'traces': ['raw', 'nnls'],                                  # 'raw', 'bleach_corrected', 'nnls', 'nnls_corr' ; which traces to plot
+                'figsize': (10, 6),                                         # Figure size
+                'show_decay': True,                                         # Show decay fits on average plot
+                'show_onsets': True,                                        # Show detected onsets on recut snippets
+                'trials': False,                                            # Whether to generate per-trial figures
+                'baseline': False,                                          # Whether to show baseline F0 levels on traces
+                'residuals': True,                                          # Whether to show residuals on average plot
+                'nnls_residual': False,                                     # Whether to show NNLS residuals on average plot
+                'nnls_n_minus_1': False,                                    # Whether to show NNLS n-1 fit on average plot
+                'plot_peaks_details': True,                                 # Show peak detection details on traces
+                'param_evolution': True,                                    # Show parameter evolution across events
             },
+            
             # --- Template Variants ---
-            'use_template_variants': True, # Enable variant testing, where we try multiple tau combinations
-            'template_variant_ratios': np.arange(0.0,1.1,0.1), # bi-exp and tri-exp
-            'template_variant_superslow_fracs': np.arange(0.0,1.1,0.1), # tri-exp only
-            'superslow_min_ratio': 1.0, # Minimum ratio between slow and superslow taus for tri-exp variants
-            # force_tau_slow_override: ALWAYS use last-event tau as tau_decay_slow.
-            # - Supersedes allow_tau_slow_override (which only triggers when superslow < slow).
-            # - When True: recut tau_slow is replaced by last-event estimate unconditionally.
-            # - Useful when you trust the final event decay more than the recut average.
-            'force_tau_slow_override': True,
-            # allow_tau_slow_override: Only relevant for tri-exponential (iglusnfr_tri).
-            # - For bi-exponential models (double_exp, iglusnfr): has NO effect.
-            # - For tri-exp: When last-event decay estimate (tau_superslow) is SLOWER than
-            #   the recut tau_slow, the override is NOT applied (superslow simply becomes
-            #   the new slowest component). Override only triggers when superslow < slow,
-            #   replacing tau_slow with the faster last-event estimate.
-            'allow_tau_slow_override': True, # Only for tri-exp models
+            'use_template_variants': True,                                  # Enable variant testing, where we try multiple tau combinations
+            'template_variant_ratios': np.linspace(0.0, 1.0, 10),           # bi-exp and tri-exp
+            'template_variant_superslow_fracs': np.linspace(0.0, 1.0, 11),  # tri-exp only
+            'superslow_min_ratio': 1.0,                                     # Minimum ratio between slow and superslow taus for tri-exp variants
+            'allow_tau_slow_override': True,                                # If True, allow tau_slow = tau_superslow in tri-exp models if it improves fit
+            'force_tau_slow_override': True,                                # If True, force tau_slow = tau_superslow in tri-exp models ; unlike allow_tau_slow_override, this enforces the equality rather than just allowing it
+            
             # --- Jitter Variants ---
-            'jitter_variant_ms': np.arange(-3.0, 3.1, 1.0),
+            'jitter_variant_ms': np.linspace(0.0, 3.0, 13),                # Jitter variants to try (ms) ; set to None to disable jitter variants ; jitter means we shift event times by +/- jitter to test robustness
         },
     }
 

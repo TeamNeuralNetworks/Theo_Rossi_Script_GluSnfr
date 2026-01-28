@@ -1,47 +1,194 @@
-import os, sys, glob, zipfile, copy, numpy as np, pandas as pd
-
 """
-Compact model & options reference (from `Model_Calibration/event_models.py`)
+demo_batch_process.py - Batch analysis for iGluSnFR pulse trains
 
-For a full list of canonical models, aliases, and parameter names see
-`Model_Calibration/event_models.py`. Common models include `double_exp`,
-`two_component`, `binding_kinetics`, `cooperative`, and `single_exp`.
-
-Notes:
- - Use `event_model` in the `options` dict.
- - Some models accept extra model-specific settings (e.g. `n_coop` for cooperative models).
-
-ISI-Aware Parameters (IMPORTANT for 50Hz and fast stimulation):
- - This script automatically adjusts critical parameters based on ISI to prevent
-   capturing overlapping events during single-event analysis (template fitting).
- - Set ISI in isi_by_folder or default_isi and the following are computed per-file:
-   * peak_window_ms: Limited to ~60% of ISI for fast stim (avoids next pulse)
-   * post_zoom_s: Plotting window scaled to show ~5 pulses
-   * Recut window for template fitting: Automatically limited by extract_metrics.py
- - These adjustments prevent template contamination at 50Hz while preserving
-   accuracy at 20Hz and slower stimulation frequencies.
-
-Decay progression modes (options['decay_progression_mode']):
- - 'fixed'         : a single tau_d applied to whole train (median)
- - 'free_monotonic': interpolate per-pulse tau_d non-decreasingly
- - 'linear'        : non-negative linear slope across pulses (default)
-
-Kinetics fit source (options['fit_source']):
- - 'global'     : fit one template from all trials (recut median) (default)
- - 'average'    : fit kinetics on the multi-trial average trace
- - 'individual' : fit kinetics per trial then aggregate (median)
-
-Examples (usage):
-        options={
-                'event_model': 'cooperative',
-                'decay_progression_mode': 'free_monotonic',
-                'fit_source': 'global',
-                'event_model_settings': {'n_coop': 2.0},
-        }
-
+Quick reference for options (see Model_Calibration/event_models.py for details):
+  - event_model: 'double_exp', 'iglusnfr', 'single_exp', 'cooperative', etc.
+  - decay_progression_mode: 'fixed', 'linear', 'free_monotonic', 'none'
+  - fit_source: 'global', 'average', 'individual'
+  - nnls_weight_mode: 'uniform', 'linear', 'exponential', 'savgol'
 """
 
-# Ensure repo root is on sys.path when running this script from the subfolder
+import os, sys, glob, numpy as np, pandas as pd
+import matplotlib.pyplot as plt
+
+# =============================================================================
+#                         USER CONFIGURATION - EDIT HERE
+# =============================================================================
+
+# --- Data paths ---
+DATA_ROOT = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL"
+OUT_DIR = os.path.join(DATA_ROOT, "Testout")
+
+# --- Select conditions and files ---
+# If CONDITIONS_TO_RUN is empty/None, the script will process all conditions
+CONDITIONS_TO_RUN = []  # e.g., ["Theo_4_50Hz"]
+FILE_GLOB = "*.xlsx"
+
+# --- Select analysis preset ---
+PRESET_NAME = 'iglusnfr_optimized'  # Options: 'iglusnfr_optimized', 'double_exp', 'single_exp_fixed_8ms'
+
+# --- Manual overrides (set to None to use lookup tables) ---
+OVERRIDE_ISI = None       # e.g., 0.02 for 50Hz, 0.05 for 20Hz
+OVERRIDE_BASELINE = None  # e.g., 0.498 or 0.998
+OVERRIDE_N_PULSES = None  # e.g., 10
+
+# --- Plot output ---
+SAVE_PLOTS = True
+SHOW_PLOTS = False
+
+# =============================================================================
+#                         CONDITION LOOKUP TABLES
+# =============================================================================
+# These define default ISI and baseline for each folder. Override above if needed.
+
+ALL_CONDITIONS = [
+    # --- 20Hz conditions (ISI=0.05s) ---
+    "Stability_Before",      # baseline 0.998
+    "Stability_After",       # baseline 0.998
+    "Stability_Before_05",   # baseline 0.498
+    "Stability_After_05",    # baseline 0.498
+    "Theo_4Ca",              # baseline 0.498
+    "Theo_1_5Ca",            # baseline 0.498
+    "WT_Theo",               # baseline 0.498
+    "WT_Theo_1scd",          # baseline 0.998
+    "WT_Anthime",            # baseline 0.998
+    "SynII",                 # baseline 0.998
+    # --- 50Hz conditions (ISI=0.02s) ---
+    "Theo_1_5_50Hz",         # baseline 0.498
+    "Theo_2_5_50Hz",         # baseline 0.498
+    "Theo_4_50Hz",           # baseline 0.498
+]
+
+DEFAULT_ISI = 0.05       # 20Hz
+DEFAULT_BASELINE = 0.998
+DEFAULT_N_PULSES = 10
+
+ISI_BY_CONDITION = {
+    "Theo_1_5_50Hz": 0.02,
+    "Theo_2_5_50Hz": 0.02,
+    "Theo_4_50Hz": 0.02,
+}
+
+BASELINE_BY_CONDITION = {
+    "Stability_Before_05": 0.498,
+    "Stability_After_05": 0.498,
+    "Theo_4Ca": 0.498,
+    "Theo_1_5Ca": 0.498,
+    "WT_Theo": 0.498,
+    "Theo_1_5_50Hz": 0.498,
+    "Theo_2_5_50Hz": 0.498,
+    "Theo_4_50Hz": 0.498,
+}
+
+# =============================================================================
+#                         ANALYSIS OPTIONS PRESETS
+# =============================================================================
+
+def _build_options_presets(peak_window_ms, pre_zoom_s, post_zoom_s):
+    """Build options presets with ISI-aware parameters."""
+    return {
+        'iglusnfr_optimized': {
+            # --- Preprocessing ---
+            'normalize_dff': True,                                          # Normalize to dF/F0
+            'bleach': True,                                                 # Apply bleach correction
+            'sg_window': 9,                                                 # Savitzky-Golay filter window (must be odd)
+            'sg_poly': 2,                                                   # Savitzky-Golay filter polynomial order
+            
+            # --- Kinetics ---
+            'fit_source': 'global',                                         # 'global', 'average', 'individual' ; this controls the source of data for kinetics fitting
+            'decay_progression_mode': 'none',                               # 'fixed', 'linear', 'free_monotonic', 'none' ; this controls how decay kinetics evolve over pulses
+            'anchor_final_tau': False,                                      # Whether to anchor the final event tau to the last-event estimate
+            'anchor_first_tau': False,                                      # Whether to anchor the first event tau to a fixed value
+            
+            # --- Event Model ---
+            'event_model': 'iglusnfr',                                      # 'double_exp', 'iglusnfr', 'iglusnfr_tri', 'single_exp', 'cooperative'
+            'parameter_bounds': {
+                'tau_decay_fast': (0.003, 0.008),                           # fast decay bounds (s)
+                'tau_decay_slow': (0.008, 0.035),                           # slow decay bounds (s)
+                'tau_superslow': (0.035, 0.150),                            # superslow decay bounds (s) - only for tri-exponential
+                'amplitude_ratio': (0.0, 1.0),                              # amplitude ratio bounds (0 to 1) ; 0 means all fast, 1 means all slow
+            },
+            'early_events_only': 0,                                         # Use only first N events for kinetics fitting (0 = all events)
+            
+            # --- Recut/Averaging ---
+            'recut_projection': 'mean',                                     # 'mean', 'median'
+            'recut_oversample': 20,                                         # Oversampling factor for recut snippets ; data is projected onto a finer time grid
+            'recut_peak_recenter': 0,                                       # Recenter recut snippets on peak (0 = no recentering)
+            'recut_snippets': True,                                         # Whether to extract recut snippets for visualization
+            
+            # --- Onset Detection ---
+            'onset_method': 'baseline_threshold',                           # 'baseline_threshold', 'derivative' ; method for onset detection of recut snippets
+            'onset_baseline_threshold': 0.10,                               # Threshold (fraction of peak) for baseline_threshold onset detection
+            
+            # --- PPR Safety ---
+            'amplitude_floor_to_noise': True,                               # Floor amplitudes to noise level before computing PPR; defined as 1*std of baseline
+            
+            # --- NNLS Fitting ---
+            'nnls_weight_mode': 'savgol',                                   # 'uniform', 'linear', 'exponential', 'savgol' ; weighting scheme for NNLS fitting
+            'nnls_weight_tau_s': None,                                      # Time constant for exponential weighting (s) ; only used if nnls_weight_mode is 'exponential'
+            'fit_diagnostic_plot': False,                                   # Whether to generate fit diagnostic plots
+            'huber_delta': 2.5,                                             # Huber loss delta for robust fitting (in std units); set to None to disable robust fitting
+            'irls_iters': 20,                                               # Number of IRLS iterations for robust fitting ; only used if huber_delta is set
+            
+            # --- Time Windows (ISI-aware) ---
+            'pre_zoom_s': pre_zoom_s,                                       # Pre-event snippet duration (s); controls how much data before each event is shown ; does not affect fitting
+            'post_zoom_s': post_zoom_s,                                     # Post-event snippet duration (s); controls how much data after each event is shown ; does not affect fitting
+            'f0_window_s': 1.0,                                             # F0 baseline window duration (s) ; controls how baseline F0 is computed for dF/F0 normalization
+            
+            # --- Peak Detection (ISI-aware) ---
+            'peak_window_ms': peak_window_ms,                               # Peak detection window duration (ms) ; controls how peaks are identified within each event
+            'peak_avg_points': 1,                                           # Number of points to average around peak for amplitude measurement
+            'pre_peak_ms': 1.0,                                             # Pre-peak baseline window (ms) ; controls how local baseline before each peak is computed ;
+            
+            # --- Thresholding ---
+            'measurement': 'NNLS',                                          # 'NNLS', 'AMP1' ; measurement used for thresholding the first event (to estimate failures)
+            'fail_method': 'SAVGOL',                                        # 'SAVGOL', 'STD' ; method for estimating noise level for thresholding
+            'threshold_mode': 'auto',                                       # 'auto', 'fixed' ; whether to use automatic or fixed thresholding; auto means threshold is computed from estimated noise; fixed means user provides threshold value
+            'null_N': 1.0,                                                  # Multiplier for null distribution to set threshold ; only used if threshold_mode is 'auto'
+            'null_sim_max_points': 1000,                                    # Max points for null distribution simulation
+            'null_min_post_zoom_s': 0.05,                                   # Minimum post-zoom duration (s) to use for null distribution simulation
+            
+            # --- Bleach Correction ---
+            'bleach_huber_delta': 3.0,                                      # Huber loss delta for bleach fitting (in std units); set to None to disable robust fitting
+            'bleach_tau_range_factor': (0.25, 4.0),                         # Range factor for bleach tau fitting ; multiplied by initial estimate to get min and max bounds
+            'bleach_n_tau': 25,                                             # Number of tau candidates for bleach fitting
+            
+            # --- Plotting ---
+            'plot': {
+                'enabled': True,                                            # Master plot enable/disable
+                'traces': ['raw', 'nnls'],                                  # 'raw', 'bleach_corrected', 'nnls', 'nnls_corr' ; which traces to plot
+                'figsize': (10, 6),                                         # Figure size
+                'show_decay': True,                                         # Show decay fits on average plot
+                'show_onsets': True,                                        # Show detected onsets on recut snippets
+                'trials': False,                                            # Whether to generate per-trial figures
+                'baseline': False,                                          # Whether to show baseline F0 levels on traces
+                'residuals': True,                                          # Whether to show residuals on average plot
+                'nnls_residual': False,                                     # Whether to show NNLS residuals on average plot
+                'nnls_n_minus_1': False,                                    # Whether to show NNLS n-1 fit on average plot
+                'plot_peaks_details': True,                                 # Show peak detection details on traces
+                'param_evolution': True,                                    # Show parameter evolution across events
+            },
+            
+            # --- Template Variants ---
+            'use_template_variants': True,                                  # Enable variant testing, where we try multiple tau combinations
+            'template_variant_ratios': np.linspace(0.0, 1.0, 11),           # bi-exp and tri-exp
+            'template_variant_superslow_fracs': np.linspace(0.0, 1.0, 11),  # tri-exp only
+            'superslow_min_ratio': 1.0,                                     # Minimum ratio between slow and superslow taus for tri-exp variants
+
+            'force_tau_slow_override': False,
+            'allow_tau_slow_override': False,                                # Only for tri-exp models
+            
+            # --- Jitter Variants ---
+            'jitter_variant_ms': np.linspace(-3.0, 3.0, 13),
+        },
+    }
+
+
+# =============================================================================
+#                              INTERNAL SETUP
+# =============================================================================
+# (No need to edit below unless debugging)
+
 try:
     _here = os.path.dirname(__file__)
 except NameError:
@@ -59,366 +206,105 @@ def _safe_sheet_name(name: str) -> str:
     return (cleaned or "Sheet")[:31]
 
 
-def _build_data_folders(base_dir: str, subfolders: list[str]) -> list[str]:
-    return [os.path.join(base_dir, name) for name in subfolders]
+def _iter_xlsx_files(folder: str, pattern: str) -> list[str]:
+    return sorted(glob.glob(os.path.join(folder, pattern)))
 
 
-# Input listed above
-VIEW_ONLY = False
-TARGET_BOUTON = ''#"20210721_linescan1_50Hz_10pulses_4mMCa_bouton4_traces_converted"
-DATA_ROOT = r"C:\\Users\\Antoine.Valera\\Desktop\\PPR_DATA_FINAL"
-SUBFOLDERS = [
-    "Stability_Before",
-    "Stability_After",
-    "Stability_Before_05",
-    "Stability_After_05",
-    "Theo_4Ca",
-    "Theo_1_5Ca",
-    "WT_Theo",
-    "WT_Theo_1scd",
-    "WT_Anthime",
-    "SynII",
-    "Theo_1_5_50Hz",
-    "Theo_2_5_50Hz",
-    "Theo_4_50Hz",
-]
+# =============================================================================
+#                              RUN ANALYSIS
+# =============================================================================
 
-#SUBFOLDERS = ["Theo_4_50Hz"]
-folders = _build_data_folders(DATA_ROOT, SUBFOLDERS)
-root_out = os.path.join(DATA_ROOT, "Testout_TriExp")  # TriExp results
-os.makedirs(root_out, exist_ok=True)
+conditions = CONDITIONS_TO_RUN or ALL_CONDITIONS
+os.makedirs(OUT_DIR, exist_ok=True)
 
-# Per-folder train_start (seconds). Default 0.998; override selected folders to 0.498
-default_start = 0.998
-train_start_by_name = {
-    "Stability_Before_05": 0.498,
-    "Stability_After_05": 0.498,
-    "Theo_4Ca": 0.498,
-    "Theo_1_5Ca": 0.498,
-    "WT_Theo": 0.498,
-    "Theo_1_5_50Hz": 0.498,
-    "Theo_2_5_50Hz": 0.498,
-    "Theo_4_50Hz": 0.498,
-}
-
-# ISI control: default_isi applies to all unless overridden in isi_by_folder.
-# The ISI automatically adjusts critical parameters (peak_window, post_zoom, recut_window)
-# to prevent capturing overlapping events at high frequencies (50Hz).
-# Example ISI values:
-#   0.05 = 20Hz (default for most datasets)
-#   0.02 = 50Hz (high frequency, uses shorter analysis windows)
-#   0.01 = 100Hz (ultra-high frequency)
-default_isi = 0.05
-isi_by_name = {
-    "Theo_1_5_50Hz": 0.02,
-    "Theo_2_5_50Hz": 0.02,
-    "Theo_4_50Hz": 0.02,
-}
-
-# add a debug skip that would select one condition and adjust isis_by_folder and train_start_by_folder accordingly, given the index to keep
-keep_expe_idx = None
-if keep_expe_idx is not None:
-    folders = [folders[keep_expe_idx]]
-    keep_name = os.path.basename(folders[0])
-    train_start_by_name = {keep_name: train_start_by_name.get(keep_name, default_start)}
-    isi_by_name = {keep_name: isi_by_name.get(keep_name, default_isi)}
-
-
-summaries = {}
+summary_rows = []
 per_trial_rows = []
-traces_by_folder = {}  # Store average traces for companion file
+max_pulses_seen = 0
 
-for in_dir in folders:
-    out_dir = os.path.join(root_out, os.path.basename(in_dir))
-    os.makedirs(out_dir, exist_ok=True)
+for condition in conditions:
+    in_dir = os.path.join(DATA_ROOT, condition)
+    if not os.path.isdir(in_dir):
+        print(f"[skip] Missing folder: {in_dir}")
+        continue
 
-    # Per-folder timing
-    in_name = os.path.basename(in_dir)
-    train_start = train_start_by_name.get(in_name, default_start)
-    isi = isi_by_name.get(in_name, default_isi)
-    n_pulses = 10
+    condition_out_dir = os.path.join(OUT_DIR, condition)
+    os.makedirs(condition_out_dir, exist_ok=True)
 
-    rows = []
-    def _is_valid_xlsx(path: str) -> bool:
-        # Basic OOXML sanity check to avoid openpyxl errors on misnamed/corrupt files
-        try:
-            with zipfile.ZipFile(path) as z:
-                return '[Content_Types].xml' in z.namelist()
-        except Exception:
-            return False
-
-    for xlsx_path in glob.glob(os.path.join(in_dir, "*.xlsx")):
-        if not _is_valid_xlsx(xlsx_path):
-            print(f"[skip] Not a valid .xlsx package: {xlsx_path}")
-            continue
+    for xlsx_path in _iter_xlsx_files(in_dir, FILE_GLOB):
         try:
             df = pd.read_excel(xlsx_path, sheet_name=0, engine="openpyxl")
         except Exception as e:
             print(f"[skip] Failed to read Excel: {xlsx_path} -> {e}")
             continue
-        t_raw = pd.to_numeric(df.iloc[:, -1], errors='coerce').to_numpy(float)
-        X = df.iloc[:, :-1].apply(pd.to_numeric, errors='coerce').to_numpy(float)
-        ok = np.isfinite(t_raw)
-        time = t_raw[ok]
-        trials = X[ok, :]
 
-        # === ISI-Dependent Parameter Calculation ===
-        # Automatically adjust critical parameters based on ISI to prevent
-        # capturing overlapping events during template fitting and peak detection
-        ISI_MS = isi * 1000.0  # Convert to milliseconds
+        _time = pd.to_numeric(df.iloc[:, -1], errors='coerce').to_numpy(float)
+        _trials = df.iloc[:, :-1].apply(pd.to_numeric, errors='coerce').to_numpy(float)
+        valid = np.isfinite(_time)
+        time = _time[valid]
+        trials = _trials[valid, :]
 
-        # Peak detection window: should be < ISI to avoid next pulse
-        # Use 50-70% of ISI for fast stim, capped at 25ms for slow stim
-        if ISI_MS < 30.0:
-            PEAK_WINDOW_MS = max(8.0, ISI_MS * 0.5)  # 50% of ISI, min 8ms
-        else:
-            PEAK_WINDOW_MS = min(25.0, ISI_MS * 0.3)  # Standard window for slow stim
+        # --- Resolve parameters (use overrides if set, otherwise lookup) ---
+        isi = OVERRIDE_ISI if OVERRIDE_ISI is not None else ISI_BY_CONDITION.get(condition, DEFAULT_ISI)
+        start = OVERRIDE_BASELINE if OVERRIDE_BASELINE is not None else BASELINE_BY_CONDITION.get(condition, DEFAULT_BASELINE)
+        n_pulses = OVERRIDE_N_PULSES if OVERRIDE_N_PULSES is not None else DEFAULT_N_PULSES
 
-        # Zoom windows for plotting and analysis
-        # For fast stim: limit to avoid excessive overlap visualization
-        # For slow stim: use standard windows
-        if ISI_MS < 30.0:
-            POST_ZOOM_S = max(0.10, isi * 5)  # Show ~5 pulses or 100ms minimum
-        else:
-            POST_ZOOM_S = 0.20  # Standard 200ms post-train window
+        # --- Compute ISI-dependent parameters ---
+        isi_ms = isi * 1000.0
+        margin_ms = 2.0  # Fixed margin before next event (ms)
+        peak_window_ms = max(5.0, isi_ms - margin_ms)  # Use all data minus 2ms margin
+        post_zoom_s = 0.3  # Show ~5 pulses
+        pre_zoom_s = 0.20
 
-        PRE_ZOOM_S = 0.20  # Pre-train window (constant)
+        # --- Print configuration ---
+        print("=" * 60)
+        print(f"  Condition:  {condition}")
+        print(f"  File:       {os.path.basename(xlsx_path)}")
+        print(f"  ISI:        {isi_ms:.0f}ms ({1/isi:.0f}Hz)")
+        print(f"  Baseline:   {start:.3f}s")
+        print(f"  N pulses:   {n_pulses}")
+        print(f"  Preset:     {PRESET_NAME}")
+        print(f"  Peak win:   {peak_window_ms:.1f}ms | Post zoom: {post_zoom_s:.3f}s")
+        print("=" * 60)
 
-        # Define option presets
-        options_presets = {
-            'iglusnfr_optimized': {
-                # === Preprocessing ===
-                'normalize_dff': True,
-                'bleach': True,
-                'sg_window': 9,
-                'sg_poly': 2,
-
-                # === Kinetics Estimation ===
-                'fit_source': 'global',
-                'decay_progression_mode': 'none',  # Allow non-linear but still monotonic progression
-                'anchor_final_tau': False,  # Don't over-constrain - let the model fit naturally
-                'anchor_first_tau': False,
-
-                # === Event Model ===
-                'event_model': 'iglusnfr',  # Recut fit is bi-exp; superslow reserved for train
-
-                # === Parameter Bounds (auto-configured based on model) ===
-                'parameter_bounds': {
-                    'tau_decay_fast': (0.001, 0.008),     # 1-8ms fast component
-                    'tau_decay_slow': (0.008, 0.035),     # 8-35ms intermediate
-                    # 't_onset': (0.0, 5.0),  # ms
-                    # tau_decay_superslow: auto from post-train decay (typically 30-50ms)
-                },
-
-                # Use all events for averaging (0 = all, N = first N only)
-                'early_events_only': 0,
-
-                # === Recut/Averaging ===
-                'recut_projection': 'mean',
-                'recut_oversample': 20,
-                'recut_peak_recenter': 0,
-                'recut_snippets': True,
-
-                # === Onset Detection for High-Frequency Trains ===
-                # Method for excluding contaminated pre-onset baseline:
-                # - 'inflection': Find inflection point (minimum derivative) - default
-                # - 'baseline_threshold': Exclude all points below baseline + threshold * peak
-                # - 'none': No onset masking
-                'onset_method': 'baseline_threshold',  # Use aggressive baseline masking for 50Hz
-                'onset_baseline_threshold': 0.15,  # 15% above baseline (adjustable 0.1-0.3)
-
-                # === PPR Safety ===
-                # Floor amplitudes to noise threshold before PPR calculation
-                # Prevents division by near-zero values and unrealistic PPR ratios
-                'amplitude_floor_to_noise': True,  # Set to True for iGluSnFR to prevent giant PPR values
-
-                # === NNLS Fitting ===
-                'nnls_weight_mode': 'savgol',
-                'nnls_weight_tau_s': None,
-                'fit_diagnostic_plot': False,
-                'huber_delta': 2.5,
-                'irls_iters': 20,
-                # === Time Windows (ISI-aware) ===
-                'pre_zoom_s': PRE_ZOOM_S,  # Computed above based on ISI
-                'post_zoom_s': POST_ZOOM_S,  # Automatically adjusted for fast/slow stim
-                'f0_window_s': 1.0,
-
-                # === Peak Detection (ISI-aware) ===
-                'peak_window_ms': PEAK_WINDOW_MS,  # Automatically scaled to avoid next pulse
-                'peak_avg_points': 1,  # Capture sharp peaks without averaging
-                'pre_peak_ms': 1.0,
-
-                # === Thresholding ===
-                'measurement': 'NNLS',
-                'fail_method': 'SAVGOL',
-                'threshold_mode': 'auto',
-                'null_N': 1.0,
-                'null_sim_max_points': 1000,
-                'null_min_post_zoom_s': 0.05,
-
-                # # === Kinetics Grids ===
-                # # Ultra-fast rise times for sharp iGluSnFR peaks
-                # 'kin_taur_grid_ms': [0.1, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.65, 0.8, 1.0, 1.5, 2.0, 3.0],
-                # # Bi-exponential decay: fast and slow components
-                # 'kin_taud0_grid_ms': [1.2, 1.5, 1.8, 2.0, 2.5, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0, 15.0, 20.0, 25.0, 35.0, 50.0, 80.0, 120.0],
-                # 'kin_slope_grid_ms': [0.0, 0.25, 0.5, 1.0, 2.0, 3.0, 5.0],
-
-                # === Bleach Correction ===
-                'bleach_huber_delta': 3.0,
-                'bleach_tau_range_factor': (0.25, 4.0),
-                'bleach_n_tau': 25,
-
-                # === Plotting ===
-                'plot': {
-                    'enabled': True,
-                    'traces': ['raw', 'nnls'],
-                    'show_decay': True,
-                    'trials': False,
-                    'baseline': False,
-                    'residuals': True,
-                    'nnls_residual': False,
-                    'nnls_n_minus_1': False,
-                    'plot_peaks_details': True,
-                },
-
-                # === Template Variants (Tri-exp fractions) ===
-                # NNLS selects best slow/superslow fraction pairs per event
-                'use_template_variants': True,  # Set to True to enable
-                # Slow fraction grid (fast = 1 - slow - superslow)
-                'template_variant_ratios': [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
-                # Superslow fraction at final event (ramps up monotonically across the train)
-                'template_variant_superslow_fracs': [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
-                # Disable superslow if it is too close to the slow tau
-                'superslow_min_ratio': 1.00,
-                # === Jitter Variants (NEW) ===
-                # Enable temporal jitter search in milliseconds
-                # Reduced range to prevent NNLS convergence issues
-                'jitter_variant_ms': np.arange(-3.0, 3.1, 0.5),  # ±3ms in 0.5ms steps (13 values)
-            },
-            'double_exp_default': {
-                # === Preprocessing ===
-                'normalize_dff': True,
-                'bleach': True,
-                'sg_window': 9,
-                'sg_poly': 2,
-
-                # === Kinetics Estimation ===
-                'fit_source': 'global',
-                'decay_progression_mode': 'linear',
-                'anchor_final_tau': True,
-                'anchor_first_tau': False,
-
-                # === Event Model ===
-                'event_model': 'double_exp',
-                'event_model_settings': {},
-
-                # === Recut/Averaging ===
-                'recut_projection': 'median',
-                'recut_oversample': 50,
-                'recut_peak_recenter': 0,
-                'recut_snippets': True,
-
-                # === Onset Detection for High-Frequency Trains ===
-                # Method for excluding contaminated pre-onset baseline:
-                # - 'inflection': Find inflection point (minimum derivative) - default
-                # - 'baseline_threshold': Exclude all points below baseline + threshold * peak
-                # - 'none': No onset masking
-                'onset_method': 'baseline_threshold',  # Use default inflection method for 20Hz
-                'onset_baseline_threshold': 0.15,  # 15% above baseline (adjustable 0.1-0.3)
-
-                # === PPR Safety ===
-                # Floor amplitudes to noise threshold before PPR calculation
-                # Prevents division by near-zero values and unrealistic PPR ratios
-                'amplitude_floor_to_noise': False,  # Optional safety feature (not needed for 20Hz)
-
-                # === NNLS Fitting ===
-                'nnls_weight_mode': 'savgol',
-                'nnls_weight_tau_s': None,
-                'fit_diagnostic_plot': False,
-                'huber_delta': 5.5,
-                'irls_iters': 20,
-
-                # === Time Windows (ISI-aware) ===
-                'pre_zoom_s': PRE_ZOOM_S,  # Computed above based on ISI
-                'post_zoom_s': POST_ZOOM_S,  # Automatically adjusted for fast/slow stim
-                'f0_window_s': 1.0,
-
-                # === Peak Detection (ISI-aware) ===
-                'peak_window_ms': PEAK_WINDOW_MS,  # Automatically scaled to avoid next pulse
-                'peak_avg_points': 1,  # Reduced from 5 to capture sharp peaks better
-                'pre_peak_ms': 1.0,  # Increased from 0.0 to ensure full peak capture
-
-                # === Thresholding ===
-                'measurement': 'NNLS',
-                'fail_method': 'SAVGOL',
-                'threshold_mode': 'auto',
-                'null_N': 1.0,
-                'null_sim_max_points': 1000,
-                'null_min_post_zoom_s': 0.05,
-
-                # === Kinetics Grids ===
-                'kin_taur_grid_ms': [0.3, 0.4, 0.5, 0.6, 0.8, 1.0, 1.2, 1.5, 2.0],  # Added faster rise times
-                'kin_taud0_grid_ms': [1.6, 2.0, 2.5, 3.0, 4.0, 6.0, 8.0, 10.0, 12.5, 15.0, 18.0, 22.0, 28.0, 35.0, 45.0, 60.0],
-                'kin_slope_grid_ms': [0.0, 0.25, 0.5, 1.0, 2.0, 3.0, 5.0],
-
-                # === Bleach Correction ===
-                'bleach_huber_delta': 3.0,
-                'bleach_tau_range_factor': (0.25, 4.0),
-                'bleach_n_tau': 25,
-
-                # === Plotting ===
-                'plot': {
-                    'enabled': True,
-                    'traces': ['raw', 'nnls'],
-                    'show_decay': True,
-                    'trials': False,
-                    'baseline': False,
-                    'residuals': True,
-                    'plot_peaks_details': True,
-                },
-
-                # === Jitter Variants (Optional) ===
-                # For non-variant models like double_exp, you can still use jitter search
-                # Set to None to use legacy allow_shift mode, or specify a range for grid search
-                'jitter_variant_ms': None,  # Example: np.arange(-1.0, 1.1, 0.2)
-            },
-        }
-
-        # Choose which preset to use
-        preset_name = 'iglusnfr_optimized'  # Use iGluSnFR-specific model for better peak capture
-        options = copy.deepcopy(options_presets[preset_name])
-        is_50hz = isi <= 0.025
-        options['event_model'] = 'iglusnfr_tri' if is_50hz else 'iglusnfr'
-        #options['allow_tau_slow_override'] = (in_name == "Theo_4_50Hz")
+        # --- Build presets and select ---
+        options_presets = _build_options_presets(peak_window_ms, pre_zoom_s, post_zoom_s)
+        options = options_presets[PRESET_NAME]
 
         base = os.path.splitext(os.path.basename(xlsx_path))[0]
-        if VIEW_ONLY and base != TARGET_BOUTON:
-            continue
         res = extract_metrics(
             time, trials,
-            train_start=train_start,  # seconds
-            isi=isi,                  # seconds (per-folder override supported)
+            train_start=start,
+            isi=isi,
             n_pulses=n_pulses,
             options=options,
-            filename=base  # Add filename for plot title
+            filename=base
         )
-        if res.get('figure') is not None:
-            if VIEW_ONLY:
-                res['figure'].show()
-            else:
-                res['figure'].savefig(os.path.join(out_dir, f"{base}.png"), dpi=150)
 
-        row = {'measurement': 'NNLS', 'ID': base}
-        amp = res['average'].get('amp_nnls_corr', res['average']['amp_nnls'])
-        ppr = res['average'].get('ppr_nnls_corr')
-        if ppr is None:
-            a1 = float(amp[0]) if len(amp) else np.nan
-            ppr = (amp / a1) if np.isfinite(a1) and abs(a1) > 1e-12 else amp * np.nan
-        for i, v in enumerate(amp, 1):
+        # =============================================================================
+        #                              RESULTS OUTPUT
+        # =============================================================================
+
+        # --- Extract amplitudes and PPR ---
+        amp_avg = res['average'].get('amp_nnls_corr', res['average']['amp_nnls'])
+        ppr_avg = res['average'].get('ppr_nnls_corr')
+        if ppr_avg is None:
+            a1 = float(amp_avg[0]) if len(amp_avg) else np.nan
+            ppr_avg = (amp_avg / a1) if np.isfinite(a1) and abs(a1) > 1e-12 else amp_avg * np.nan
+
+        print("\n--- Results ---")
+        print("Amplitudes (NNLS):", amp_avg)
+        print("PPR (NNLS):", ppr_avg)
+        print("A1 thresholds:", res['threshold_amp1'])
+        print("A1 p-values:", res['pval_amp1'])
+
+        # --- Build summary row ---
+        row = {'measurement': 'NNLS', 'ID': base, 'condition': condition}
+        for i, v in enumerate(amp_avg, 1):
             row[f'AMP{i}'] = float(v)
-        for i in range(2, len(ppr) + 1):
-            row[f'PPR{i}/1'] = float(ppr[i - 1])
+        for i in range(2, len(ppr_avg) + 1):
+            row[f'PPR{i}/1'] = float(ppr_avg[i - 1])
 
+        # --- Per-trial failure counts ---
         fail_counts = {i: [0, 0] for i in range(1, 4)}
         for idx_trial, rtrial in enumerate(res.get('per_trial', [])):
             amp_trial = np.asarray(rtrial.get('amp_nnls_corr', rtrial.get('amp_nnls')), float)
@@ -431,7 +317,7 @@ for in_dir in folders:
                     'AMP1': float(a1),
                     'status': status,
                     'file': base,
-                    'folder': os.path.basename(in_dir),
+                    'condition': condition,
                     'trial': idx_trial + 1,
                 })
             for p in range(1, min(3, amp_trial.size) + 1):
@@ -444,63 +330,101 @@ for in_dir in folders:
             n_fail, n_valid = fail_counts[p]
             if n_valid:
                 row[f'%Fail{p}'] = round((n_fail / n_valid) * 100.0, 2)
-        rows.append(row)
 
-        # Store average trace for companion traces file
-        y_avg = res['average'].get('y_avg')
-        time_s = res.get('time_s')
-        if y_avg is not None and time_s is not None:
-            folder_name = os.path.basename(in_dir)
-            if folder_name not in traces_by_folder:
-                traces_by_folder[folder_name] = {}
-            traces_by_folder[folder_name][base] = (np.asarray(time_s, float), np.asarray(y_avg, float))
+        summary_rows.append(row)
+        max_pulses_seen = max(max_pulses_seen, len(amp_avg))
 
-    # Save per-folder summary and collect for global workbook
-    df_rows = pd.DataFrame(rows)
-    ordered = [f'AMP{i}' for i in range(1, n_pulses + 1)] \
-        + [f'PPR{i}/1' for i in range(2, n_pulses + 1)] \
+        # =============================================================================
+        #                              PLOTTING
+        # =============================================================================
+
+        fig = res.get('figure')
+        if fig is not None:
+            if SAVE_PLOTS:
+                try:
+                    fig.savefig(os.path.join(condition_out_dir, f"{base}_plot.png"), dpi=150)
+                except Exception:
+                    pass
+
+            # Overlay recut snippets if available
+            snips = res.get('recut_snippets')
+            t_rel_rec = res.get('recut_t_rel')
+            avg_rec = res.get('recut_avg')
+            if snips is not None and t_rel_rec is not None and avg_rec is not None and SAVE_PLOTS:
+                try:
+                    from smoothing import build_median_recut_figure
+                    ax_target = fig.axes[0] if fig.axes else None
+                    fig2 = build_median_recut_figure(t_rel_rec, avg_rec, snippets=snips, ax=ax_target, plot_median_first=True)
+                    outpath = os.path.join(condition_out_dir, f"{base}_recuts_overlay.png")
+                    (fig if ax_target else fig2).savefig(outpath, dpi=150)
+                    print(f"[demo] saved overlay to {outpath}")
+                except Exception as e:
+                    print(f"[demo] error building overlay: {e}")
+
+            if SHOW_PLOTS:
+                try:
+                    plt.show()
+                except Exception:
+                    pass
+
+        # Per-trial figures
+        figs_trials = res.get('figures_trials') or []
+        for i, ftri in enumerate(figs_trials, 1):
+            if SAVE_PLOTS:
+                try:
+                    outp = os.path.join(condition_out_dir, f"{base}_trialfig_{i:02d}.png")
+                    ftri.tight_layout()
+                    ftri.savefig(outp, dpi=120)
+                except Exception:
+                    pass
+        if figs_trials and SHOW_PLOTS:
+            try:
+                plt.show()
+            except Exception:
+                pass
+
+        # Parameter evolution figure
+        fig_param = res.get('figure_param_evolution')
+        if fig_param is not None and SAVE_PLOTS:
+            try:
+                fig_param.savefig(os.path.join(condition_out_dir, f"{base}_param_evolution.png"), dpi=150)
+                print(f"[demo] Saved param evolution figure")
+                if SHOW_PLOTS:
+                    plt.show()
+            except Exception as e:
+                print(f"[demo] Error saving param evolution figure: {e}")
+
+
+# =============================================================================
+#                              SUMMARY OUTPUT
+# =============================================================================
+
+if summary_rows:
+    df_rows = pd.DataFrame(summary_rows)
+    ordered = [f'AMP{i}' for i in range(1, max_pulses_seen + 1)] \
+        + [f'PPR{i}/1' for i in range(2, max_pulses_seen + 1)] \
         + [f'%Fail{i}' for i in range(1, 4)]
-    for col in ['measurement', 'ID', *ordered]:
+    for col in ['condition', 'measurement', 'ID', *ordered]:
         if col not in df_rows.columns:
             df_rows[col] = np.nan
-    df_rows = df_rows[['ID', *ordered, 'measurement']]
-    df_rows.to_csv(os.path.join(out_dir, "summary.csv"), index=False)
-    summaries[os.path.basename(in_dir)] = df_rows
+    df_rows = df_rows[['condition', 'ID', *ordered, 'measurement']]
 
-if not VIEW_ONLY:
-    # Save a multi-sheet workbook with one sheet per input folder
-    main_out = os.path.join(root_out, "summary.xlsx")
-    with pd.ExcelWriter(main_out) as writer:
-        for folder_name, df in summaries.items():
-            df.to_excel(writer, sheet_name=_safe_sheet_name(folder_name), index=False)
+    csv_out = os.path.join(OUT_DIR, "summary.csv")
+    df_rows.to_csv(csv_out, index=False)
+    xl_out = os.path.splitext(csv_out)[0] + ".xlsx"
+    with pd.ExcelWriter(xl_out) as writer:
+        df_rows.to_excel(writer, sheet_name="All", index=False)
+        for condition in sorted(set(df_rows['condition'])):
+            df_rows[df_rows['condition'] == condition].to_excel(
+                writer, sheet_name=_safe_sheet_name(condition), index=False
+            )
+
     if per_trial_rows:
-        pd.DataFrame(per_trial_rows).to_excel(os.path.splitext(main_out)[0] + "_trials.xlsx", index=False)
+        pd.DataFrame(per_trial_rows).to_excel(os.path.splitext(xl_out)[0] + "_trials.xlsx", index=False)
 
-    # Save companion traces and times files (separate files, no interpolation)
-    # - summary_traces.xlsx: amplitude values only (one column per bouton ID)
-    # - summary_times.xlsx: time vectors (one column per bouton ID, same order)
-    traces_out = os.path.splitext(main_out)[0] + "_traces.xlsx"
-    times_out = os.path.splitext(main_out)[0] + "_times.xlsx"
-    with pd.ExcelWriter(traces_out) as trace_writer, pd.ExcelWriter(times_out) as time_writer:
-        wrote_traces = False
-        for folder_name, id_traces in traces_by_folder.items():
-            if not id_traces:
-                continue
-            # Build DataFrames: one column per bouton ID (no Time column in traces)
-            # Each trace keeps its original time vector (no interpolation)
-            # Use pd.Series to handle different lengths per column
-            trace_dict = {}
-            time_dict = {}
-            for bid, (t_vec, y_avg) in sorted(id_traces.items()):
-                trace_dict[bid] = pd.Series(y_avg)
-                time_dict[bid] = pd.Series(t_vec)
-            trace_df = pd.DataFrame(trace_dict)
-            time_df = pd.DataFrame(time_dict)
-            trace_df.to_excel(trace_writer, sheet_name=_safe_sheet_name(folder_name), index=False)
-            time_df.to_excel(time_writer, sheet_name=_safe_sheet_name(folder_name), index=False)
-            wrote_traces = True
-        if not wrote_traces:
-            pd.DataFrame({"info": ["No traces found"]}).to_excel(trace_writer, sheet_name="Summary", index=False)
-            pd.DataFrame({"info": ["No traces found"]}).to_excel(time_writer, sheet_name="Summary", index=False)
-    print(f"[export] Saved average traces to: {traces_out}")
-    print(f"[export] Saved time vectors to: {times_out}")
+    print(f"[export] Saved summary to: {csv_out}")
+    print(f"[export] Saved summary workbook to: {xl_out}")
+    if per_trial_rows:
+        print(f"[export] Saved per-trial file to: {os.path.splitext(xl_out)[0] + '_trials.xlsx'}")
+else:
+    print("[export] No files processed; no summary written.")

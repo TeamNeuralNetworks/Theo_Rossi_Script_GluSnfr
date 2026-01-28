@@ -1194,6 +1194,10 @@ def compute_localmax_corrected_amps(
                 tau_r_s,
                 float(tau_d_vec_s[p]),
             )
+            # Normalize kernel by its peak for proper subtraction
+            k_peak = np.max(k)
+            if k_peak > 1e-12:
+                k = k / k_peak
             y_resid = y_resid - amp_p * k
     return np.asarray(amps, float)
 
@@ -2893,17 +2897,30 @@ def extract_metrics(
                                 tau_superslow_setting = (lower + upper) / 2.0
                     if tau_superslow_setting is None:
                         tau_fast_fit = None
+                        # Use tau_fast from event_model_settings (user-specified) for superslow estimation
+                        # The global fit tau_fast can be too short due to early-events fitting,
+                        # which causes the superslow estimate to be wrong.
+                        # Priority: 1) event_model_settings, 2) parameter_bounds upper limit, 3) fitted value
+                        tau_fast_for_estimate = None
                         try:
-                            tau_fast_fit = float(fitted.get('tau_decay_fast', np.nan))
+                            tau_fast_for_estimate = float(em_settings.get('tau_decay_fast', np.nan))
                         except Exception:
-                            tau_fast_fit = None
-                        if tau_fast_fit is None or not np.isfinite(tau_fast_fit):
+                            tau_fast_for_estimate = None
+                        if tau_fast_for_estimate is None or not np.isfinite(tau_fast_for_estimate):
+                            # Try parameter_bounds upper limit (expected max tau_fast)
                             try:
-                                tau_fast_fit = float(em_settings.get('tau_decay_fast', np.nan))
+                                bounds = param_bounds.get('tau_decay_fast')
+                                if bounds and isinstance(bounds, (tuple, list)) and len(bounds) >= 2:
+                                    tau_fast_for_estimate = float(bounds[1])  # upper bound
                             except Exception:
-                                tau_fast_fit = None
+                                tau_fast_for_estimate = None
+                        if tau_fast_for_estimate is None or not np.isfinite(tau_fast_for_estimate):
+                            try:
+                                tau_fast_for_estimate = float(fitted.get('tau_decay_fast', np.nan))
+                            except Exception:
+                                tau_fast_for_estimate = None
                         tau_superslow_setting, min_superslow_frac = estimate_tau_superslow_from_last_event_decay(
-                            t, y_avg, stim_times, isi, event_t0_s=event_t0_s, tau_fast_s=tau_fast_fit
+                            t, y_avg, stim_times, isi, event_t0_s=event_t0_s, tau_fast_s=tau_fast_for_estimate
                         )
                     # Enforce superslow >= slow and optionally disable superslow if too close to slow
                     tau_slow_fit = None
@@ -3004,19 +3021,51 @@ def extract_metrics(
                     spec_iglu = get_event_model(event_model)
                     model_func = spec_iglu['func']
 
-                    # Use FITTED parameters from global fit; fall back to event_model_settings if fit missing
+                    # Use event_model_settings as ground truth for kernel building when available
+                    # The global fit values can be biased due to early-events fitting
                     em_settings = cfg.get('event_model_settings', {})
+                    param_bounds = cfg.get('parameter_bounds', {}) or {}
+                    force_slow_override = bool(cfg.get('force_tau_slow_override', False))
 
-                    # Get fitted values; only fall back to explicit overrides if fit missing
-                    tau_fast = float(fitted.get('tau_decay_fast', np.nan))
-                    tau_slow = float(fitted.get('tau_decay_slow', np.nan))
+                    # Helper to get tau_fast from various sources
+                    def _get_tau_fast_from_config():
+                        # When force_slow_override is active, prefer parameter_bounds upper
+                        # because em_settings gets populated from global fit which may be wrong
+                        if force_slow_override:
+                            bounds = param_bounds.get('tau_decay_fast')
+                            if bounds and isinstance(bounds, (tuple, list)) and len(bounds) >= 2:
+                                tau = float(bounds[1])  # upper bound = intended max tau_fast
+                                return tau
+                        # Normal priority: 1) em_settings, 2) parameter_bounds upper, 3) fitted
+                        tau = float(em_settings.get('tau_decay_fast', np.nan))
+                        if not np.isfinite(tau):
+                            bounds = param_bounds.get('tau_decay_fast')
+                            if bounds and isinstance(bounds, (tuple, list)) and len(bounds) >= 2:
+                                tau = float(bounds[1])  # upper bound
+                        if not np.isfinite(tau):
+                            tau = float(fitted.get('tau_decay_fast', 0.005))
+                        return tau
+
+                    # Get tau values - prefer em_settings when force_tau_slow_override is active
                     override_used = False
-                    if not np.isfinite(tau_fast):
-                        tau_fast = float(em_settings.get('tau_decay_fast', 0.005))
+                    if force_slow_override and is_tri:
+                        # When force override is active, use event_model_settings values
+                        # which have been set to the last-event decay estimate
+                        tau_fast = _get_tau_fast_from_config()
+                        tau_slow = float(em_settings.get('tau_decay_slow', np.nan))
+                        if not np.isfinite(tau_slow):
+                            tau_slow = float(fitted.get('tau_decay_slow', 0.015))
                         override_used = True
-                    if not np.isfinite(tau_slow):
-                        tau_slow = float(em_settings.get('tau_decay_slow', 0.015))
-                        override_used = True
+                    else:
+                        # Normal case: use fitted values, fall back to em_settings
+                        tau_fast = float(fitted.get('tau_decay_fast', np.nan))
+                        tau_slow = float(fitted.get('tau_decay_slow', np.nan))
+                        if not np.isfinite(tau_fast):
+                            tau_fast = float(em_settings.get('tau_decay_fast', 0.005))
+                            override_used = True
+                        if not np.isfinite(tau_slow):
+                            tau_slow = float(em_settings.get('tau_decay_slow', 0.015))
+                            override_used = True
                     tau_superslow = float(em_settings.get('tau_decay_superslow', fitted.get('tau_decay_superslow', 0.040))) if is_tri else None
 
                     # Apply cap to tau_decay_slow if specified
@@ -3030,6 +3079,9 @@ def extract_metrics(
                     }
                     if is_tri:
                         fitted_params['tau_decay_superslow'] = tau_superslow
+                    # Check if force override is active (tau_slow == tau_superslow)
+                    if is_tri and abs(tau_slow - tau_superslow) < 1e-6:
+                        progress_print(f"[model] Force override confirmed: tau_slow=tau_superslow={tau_slow*1000:.1f}ms")
 
                     if is_tri:
                         # Tri-exponential variant builder
@@ -3087,15 +3139,18 @@ def extract_metrics(
                             frac_intermediate = frac_slow_use
 
                             tau_superslow_s = float(fitted_params.get('tau_decay_superslow', 0.040))
-                            tau_fast_s = float(tau_d) if np.isfinite(tau_d) and tau_d > 0 else fitted_params.get('tau_decay_fast', 0.003)
                             tau_fast_base = float(fitted_params.get('tau_decay_fast', 0.003))
                             tau_slow_base = float(fitted_params.get('tau_decay_slow', 0.015))
                             # Check if force_tau_slow_override is active: tau_slow equals tau_superslow
                             force_slow_active = abs(tau_slow_base - tau_superslow_s) < 1e-6
-                            # When force override is active, use tau_slow_base directly
+                            # When force override is active, use tau_fast from fitted_params (param_bounds upper)
+                            # not from tau_d argument which comes from global fit (early events)
                             if force_slow_active:
+                                tau_fast_s = float(tau_fast_base)
                                 tau_slow_s = float(tau_slow_base)
                             else:
+                                # Normal case: use tau_d from argument (from global fit)
+                                tau_fast_s = float(tau_d) if np.isfinite(tau_d) and tau_d > 0 else tau_fast_base
                                 ratio_slow = tau_slow_base / max(tau_fast_base, 1e-6)
                                 if not np.isfinite(ratio_slow) or ratio_slow <= 1.0:
                                     ratio_slow = 1.5
@@ -3171,7 +3226,7 @@ def extract_metrics(
                     # Detect if force_tau_slow_override is active
                     force_slow_msg = ""
                     if is_tri and tau_superslow is not None and abs(tau_slow - tau_superslow) < 1e-6:
-                        force_slow_msg = " (τ_slow FORCED to superslow)"
+                        force_slow_msg = " (tau_slow FORCED to superslow)"
                     if is_tri:
                         progress_print(f"[model] Updated tri-exp variant kernel{override_msg}{force_slow_msg}: tau_fast={tau_fast*1000:.2f}ms, tau_slow={tau_slow*1000:.2f}ms, tau_superslow={tau_superslow*1000:.2f}ms")
                     else:
@@ -4436,6 +4491,9 @@ def extract_metrics(
             ax.plot(tz, y_sg_avg[zmask], label='savgol', color='tab:green')
         if 'nnls' in traces:
             ax.plot(tz, yhat_avg[zmask], label='nnls model', color='tab:blue')
+            # Debug: print blue NNLS values at last event
+            last_stim = float(stim_times[-1])
+            post_last_mask = (tz >= last_stim) & (tz <= last_stim + 0.3)
         if plot_residuals and resid_avg is not None:
             try:
                 resid_offset = -1
@@ -4523,7 +4581,7 @@ def extract_metrics(
                     resid_vals.append(float(base_prev))
                 except Exception:
                     resid_vals.append(np.nan)
-
+            
             # Red circles at peaks (on the chosen measurement trace)
             try:
                 ax.scatter(peak_ts, peak_vals, s=70, color='red', edgecolors='white', linewidths=0.9, zorder=6, label='peaks')
@@ -4616,6 +4674,10 @@ def extract_metrics(
                                 N = rv.size
                                 y = N * bin_w * pdf
                                 ax_in.plot(x, y, color='#26457a', linewidth=1.4, label='fit')
+                                # Zero-centered Gaussian for comparison (same sigma)
+                                pdf0 = (1.0 / (np.sqrt(2.0 * np.pi) * sigma)) * np.exp(-0.5 * (x / sigma) ** 2)
+                                y0 = N * bin_w * pdf0
+                                ax_in.plot(x, y0, color='tab:red', linewidth=1.2, alpha=0.9)
                         ax_in.set_title('residual', fontsize=8)
                         ax_in.tick_params(labelsize=7)
                     except Exception:
@@ -4658,6 +4720,10 @@ def extract_metrics(
                                 N = rv.size
                                 y = N * bin_w * pdf
                                 ax_in.plot(x, y, color='#26457a', linewidth=1.4)
+                                # Zero-centered Gaussian for comparison (same sigma)
+                                pdf0 = (1.0 / (np.sqrt(2.0 * np.pi) * sigma)) * np.exp(-0.5 * (x / sigma) ** 2)
+                                y0 = N * bin_w * pdf0
+                                ax_in.plot(x, y0, color='tab:red', linewidth=1.2, alpha=0.9)
                         ax_in.set_title('residuals', fontsize=7)
                         ax_in.tick_params(labelsize=6)
                         # Remove top and right spines
@@ -5173,6 +5239,10 @@ def extract_metrics(
                                 N = rdata.size
                                 y = N * bin_w * pdf
                                 ax_in_r.plot(x, y, color='#26457a', linewidth=1.4, label='fit')
+                                # Zero-centered Gaussian for comparison (same sigma)
+                                pdf0 = (1.0 / (np.sqrt(2.0 * np.pi) * sigma)) * np.exp(-0.5 * (x / sigma) ** 2)
+                                y0 = N * bin_w * pdf0
+                                ax_in_r.plot(x, y0, color='tab:red', linewidth=1.2, alpha=0.9)
                         ax_in_r.set_title('residual', fontsize=8)
                         ax_in_r.tick_params(labelsize=7)
                     except Exception:
