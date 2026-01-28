@@ -661,6 +661,7 @@ def get_event_model(name: str) -> Dict:
                 'tau_decay_fast': 'monotonic_increasing',   # glutamate accumulation → slower decay
                 'tau_decay_slow': 'monotonic_increasing',   # glutamate accumulation → slower decay
                 'frac_fast': 'free',                        # can vary either direction
+                'slow_fraction': 'monotonic_increasing',    # slow component fraction increases across train
                 'amp': 'free',                              # can increase or decrease
                 't_onset': 'free',                           # timing parameter
             },

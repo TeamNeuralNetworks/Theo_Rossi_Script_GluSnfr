@@ -118,12 +118,12 @@ def _build_options_presets(peak_window_ms, pre_zoom_s, post_zoom_s):
             
             # --- Kinetics ---
             'fit_source': 'global',                                         # 'global', 'average', 'individual' ; this controls the source of data for kinetics fitting
-            'decay_progression_mode': 'none',                               # 'fixed', 'linear', 'free_monotonic', 'none' ; this controls how decay kinetics evolve over pulses
+            'decay_progression_mode': 'linear',                               # 'fixed', 'linear', 'free_monotonic', 'none' ; this controls how decay kinetics evolve over pulses
             'anchor_final_tau': False,                                      # Whether to anchor the final event tau to the last-event estimate
-            'anchor_first_tau': False,                                      # Whether to anchor the first event tau to a fixed value
+            'anchor_first_tau': True,                                      # Whether to anchor the first event tau to a fixed value
             
             # --- Event Model ---
-            'event_model': 'iglusnfr',                                  # 'double_exp', 'iglusnfr', 'iglusnfr_tri', 'single_exp', 'cooperative'
+            'event_model': 'iglusnfr_tri',                                  # 'double_exp', 'iglusnfr', 'iglusnfr_tri', 'single_exp', 'cooperative'
             'parameter_bounds': {
                 'tau_decay_fast': (0.003, 0.008),                           # fast decay bounds (s)
                 'tau_decay_slow': (0.008, 0.035),                           # slow decay bounds (s)

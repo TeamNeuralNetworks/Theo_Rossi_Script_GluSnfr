@@ -488,11 +488,8 @@ def build_median_recut_waveform(
     t_rel = np.arange(-pre_s, post_s + 1e-12, dt_os)
     zero_idx = int(np.argmin(np.abs(t_rel)))
     n_rel = t_rel.size
-    try:
-        progress_print(f"[build_recut] Original dt={dt*1000:.4f} ms, oversampled dt={dt_os*1000:.5f} ms (factor={os_factor})")
-        progress_print(f"[build_recut] Created time grid with {n_rel} points (original would have ~{int((pre_s + post_s)/dt)} points)")
-    except Exception:
-        pass
+    # Verbose recut logging disabled for cleaner output
+    # progress_print(f"[build_recut] Original dt={dt*1000:.4f} ms, oversampled dt={dt_os*1000:.5f} ms (factor={os_factor})")
 
     Y_all = np.atleast_2d(Y_all)
     stim_arr = np.atleast_1d(stim_times)
@@ -509,13 +506,7 @@ def build_median_recut_waveform(
     peak_indices = []
     n_trials = Y_all.shape[1] if Y_all.ndim > 1 else 1
     n_stims = len(stim_arr)
-    try:
-        progress_print(f"[build_recut] Extracting snippets: {n_stims} stimuli × {n_trials} trials = {n_stims * n_trials} total")
-        progress_print(f"[build_recut] Stim times (s): {stim_arr.tolist()}")
-        progress_print(f"[build_recut] Data time range: {time[0]:.3f} to {time[-1]:.3f} s")
-        progress_print(f"[build_recut] Snippet window: {-pre_s:.4f} to +{post_s:.4f} s relative to each stim")
-    except Exception:
-        pass
+    # Verbose recut logging disabled for cleaner output
 
     for st in stim_arr:
         for j in range(Y_all.shape[1]):

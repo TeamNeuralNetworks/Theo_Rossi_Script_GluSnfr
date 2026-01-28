@@ -404,11 +404,10 @@ def fit_average_event(
                     
                     spec['bounds'] = (lb_list, ub_list)
                     
-                    try:
-                        from smoothing import progress_print
-                        progress_print(f"[fit_average_event] iGluSnFR grid search: tau_r={tr_b*1000:.1f}ms, tau_fast={tdf_b*1000:.1f}ms, tau_slow={tds_b*1000:.1f}ms, frac_fast={ff_b:.2f}")
-                    except Exception:
-                        pass
+                    # Per-event grid search logging disabled for cleaner output
+                    # from smoothing import progress_print
+                    # progress_print(f"[fit_average_event] iGluSnFR grid search: tau_r={tr_b*1000:.1f}ms, tau_fast={tdf_b*1000:.1f}ms, tau_slow={tds_b*1000:.1f}ms, frac_fast={ff_b:.2f}")
+                    pass
         except Exception:
             pass
         
@@ -492,11 +491,9 @@ def fit_average_event(
                         'params': p0.copy(),
                     }
                     
-                    try:
-                        from smoothing import progress_print
-                        progress_print(f"[fit_average_event] iGluSnFR TRI grid search: tau_r={tr_b*1000:.1f}ms, tau_fast={tdf_b*1000:.1f}ms, tau_slow={tds_b*1000:.1f}ms, tau_superslow={tdss_b*1000:.1f}ms, frac_fast={ff_b:.2f}, frac_slow={fs_b:.2f}")
-                    except Exception:
-                        pass
+                    # Per-event grid search logging disabled for cleaner output
+                    # from smoothing import progress_print
+                    # progress_print(f\"[fit_average_event] iGluSnFR TRI grid search: ...\")
         except Exception:
             pass
         
@@ -775,17 +772,19 @@ def fit_average_event(
         try:
             if return_snippets and 'snippets' in locals() and 't_rel_s' in locals() and 'avg' in locals():
                 params['_recut'] = (t_rel_s, avg, snippets)
-                try:
-                    from smoothing import progress_print
-                    progress_print(f"[fit_average_event] Attached {len(snippets)} snippets to params dict")
-                except Exception:
-                    pass
+                # Verbose snippet attach logging disabled for cleaner output
+                # try:
+                #     from smoothing import progress_print
+                #     progress_print(f"[fit_average_event] Attached {len(snippets)} snippets to params dict")
+                # except Exception:
+                #     pass
             elif return_snippets:
-                try:
-                    from smoothing import progress_print
-                    progress_print(f"[fit_average_event] return_snippets={return_snippets}, but snippets not in locals")
-                except Exception:
-                    pass
+                # try:
+                #     from smoothing import progress_print
+                #     progress_print(f"[fit_average_event] return_snippets={return_snippets}, but snippets not in locals")
+                # except Exception:
+                #     pass
+                pass
         except Exception as e:
             try:
                 from smoothing import progress_print

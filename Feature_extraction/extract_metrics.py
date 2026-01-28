@@ -954,7 +954,7 @@ def fit_amplitudes_with_template_variants(
         
         if abs(relative_to_signal) > 0.1:
             direction = "under" if mean_resid_post > 0 else "over"
-            progress_print(f"[NNLS] Post-train residual: {direction}prediction by {abs(mean_resid_post):.3f} ({abs(relative_to_signal)*100:.1f}% of signal)")
+            # progress_print(f"[NNLS] Post-train residual: {direction}prediction by {abs(mean_resid_post):.3f} ({abs(relative_to_signal)*100:.1f}% of signal)")
 
     # Find dominant template variant and jitter for each event
     # Flatten last two dimensions to find overall max
@@ -2293,6 +2293,12 @@ def extract_metrics(
             pass
         dec_mode = 'linear'
 
+    # Determine if two-pass smoothing will be used (smoothing deferred to after NNLS)
+    two_pass_will_run = (
+        dec_mode in ('linear', 'free_monotonic')
+        and cfg.get('use_template_variants', False)
+    )
+
     # Offset (seconds) between stimulus time and actual event onset
     event_t0_s = 0.0
 
@@ -2459,17 +2465,7 @@ def extract_metrics(
                 huber_delta / normalized_resid
             )
 
-            # Log outliers on first iteration
-            if iter_num == 0:
-                outlier_mask = weights < 0.95
-                if np.any(outlier_mask):
-                    outlier_indices = np.where(outlier_mask)[0]
-                    try:
-                        outlier_str = ", ".join(f"event {int(x[i])+1}(τ={y[i]*1000:.1f}ms,w={weights[i]:.2f})"
-                                               for i in outlier_indices)
-                        progress_print(f"[robust fit] Detected outliers: {outlier_str}")
-                    except Exception:
-                        pass
+            # Outlier detection (logging disabled for cleaner output)
 
             # Weighted least squares
             W = np.diag(weights)
@@ -2517,15 +2513,73 @@ def extract_metrics(
         except Exception:
             return y_mono
 
+    def _smooth_tau_arrays_together(tau_arrays, tau_fallbacks, param_names=None):
+        """Smooth multiple tau arrays together while preserving their ratios.
+        
+        When tau_fast, tau_slow, tau_superslow are smoothed, we want to maintain
+        consistent ratios across events. This function:
+        1. Computes a reference tau (e.g., tau_fast) smoothed version
+        2. Computes scale factor per event: smoothed_ref / raw_ref
+        3. Applies the SAME scale factor to all tau arrays
+        
+        Args:
+            tau_arrays: Dict of {name: array} for each tau parameter
+            tau_fallbacks: Dict of {name: fallback_value} for each tau parameter
+            param_names: Optional list of parameter names in order of importance
+        
+        Returns:
+            Dict of {name: smoothed_array} for each tau parameter
+        """
+        if not tau_arrays:
+            return {}
+        
+        # Choose reference tau (prefer tau_decay_fast, then first available)
+        ref_name = None
+        if param_names:
+            for pn in param_names:
+                if pn in tau_arrays:
+                    ref_name = pn
+                    break
+        if ref_name is None:
+            ref_name = list(tau_arrays.keys())[0]
+        
+        ref_raw = np.asarray(tau_arrays[ref_name], float)
+        ref_fallback = tau_fallbacks.get(ref_name, 0.01)
+        
+        # Smooth the reference tau using _apply_progression
+        _, ref_smoothed = _apply_progression(0.002, ref_raw, ref_fallback, 'global', ref_name)
+        
+        # Compute scale factor per event (avoid division by zero)
+        scale_factor = np.ones_like(ref_raw)
+        valid_mask = (np.abs(ref_raw) > 1e-9) & np.isfinite(ref_raw) & np.isfinite(ref_smoothed)
+        scale_factor[valid_mask] = ref_smoothed[valid_mask] / ref_raw[valid_mask]
+        
+        # Apply same scale factor to all tau arrays
+        result = {}
+        for name, arr in tau_arrays.items():
+            arr = np.asarray(arr, float)
+            smoothed = arr * scale_factor
+            # Ensure positive values
+            smoothed = np.maximum(smoothed, 1e-4)
+            result[name] = smoothed
+        
+        return result
+
     def _apply_progression(tau_r_in, tau_d_vec_in, tau_d0_in, source_method, param_name='tau_decay'):
-        """Apply decay progression rules based on mode and fit_source.
+        """Apply decay progression smoothing based on decay_progression_mode.
+
+        This simplified version focuses on smoothing a tau vector using the configured mode.
+        For two-pass NNLS, this is called AFTER the first pass to smooth per-event estimates.
 
         Args:
-            tau_r_in: Rise time constant
-            tau_d_vec_in: Per-event decay time constants (raw)
+            tau_r_in: Rise time constant (passed through unchanged)
+            tau_d_vec_in: Per-event decay time constants (to be smoothed)
             tau_d0_in: Fallback single decay constant
-            source_method: 'global', 'average', or 'individual'
-            param_name: Parameter name to look up progression rule (default: 'tau_decay')
+            source_method: 'global', 'average', or 'individual' (for logging only)
+            param_name: Parameter name for logging
+        
+        Returns:
+            (tau_r, smoothed_tau_vec): Rise time and smoothed decay vector
         """
         y = np.asarray(tau_d_vec_in, float)
 
@@ -2536,53 +2590,16 @@ def extract_metrics(
             if isinstance(progression_rules, dict):
                 progression_rule = progression_rules.get(param_name, 'free')
 
-        # Outlier detection: identify and replace extreme values
-        # Use MAD (median absolute deviation) for robust outlier detection
-        def _detect_and_replace_outliers(y, threshold=5.0):
-            """Replace outliers with median using MAD-based detection."""
-            y = np.asarray(y, float)
-            if y.size < 3:
-                return y
-            finite_mask = np.isfinite(y)
-            if not np.any(finite_mask):
-                return y
-            y_finite = y[finite_mask]
-            median = float(np.nanmedian(y_finite))
-            mad = float(np.nanmedian(np.abs(y_finite - median)))
-            if mad < 1e-10:
-                return y  # No variance, skip outlier detection
-            scale = 1.4826 * mad  # Scale factor for normal distribution
-            # Identify outliers (beyond threshold*MAD from median)
-            outlier_mask = np.abs(y - median) > threshold * scale
-            if np.any(outlier_mask):
-                y_clean = y.copy()
-                y_clean[outlier_mask] = median
-                outlier_indices = np.where(outlier_mask)[0]
-                try:
-                    outlier_str = ", ".join(f"event {int(i)+1}(val={y[i]:.4f}→{median:.4f})"
-                                           for i in outlier_indices)
-                    progress_print(f"[{param_name}] Detected {len(outlier_indices)} outliers: {outlier_str}")
-                except Exception:
-                    pass
-                return y_clean
-            return y
-
-        y = _detect_and_replace_outliers(y, threshold=5.0)
-
         # Validate inputs
         if y.size != n_pulses:
             try:
-                progress_print(f"[warning] tau_d_vec has wrong size {y.size}, expected {n_pulses}. Using fallback.")
+                progress_print(f"[smooth] {param_name} has wrong size {y.size}, expected {n_pulses}. Using fallback.")
             except Exception:
                 pass
             y = np.full(n_pulses, float(tau_d0_in) if np.isfinite(tau_d0_in) else 0.010)
 
-        # Replace any NaN/Inf with tau_d0
+        # Replace any NaN/Inf with fallback
         if not np.all(np.isfinite(y)):
-            try:
-                progress_print(f"[warning] tau_d_vec contains NaN/Inf. Replacing with tau_d0={tau_d0_in*1000:.1f}ms")
-            except Exception:
-                pass
             fallback_tau = float(tau_d0_in) if np.isfinite(tau_d0_in) else 0.010
             y[~np.isfinite(y)] = fallback_tau
 
@@ -2594,164 +2611,85 @@ def extract_metrics(
         anchor_final = bool(cfg.get('anchor_final_tau', True))
 
         if dec_mode == 'fixed':
-            # Use single tau for all events
+            # Use median tau for all events
             td_med = float(np.nanmedian(y)) if np.isfinite(y).any() else float(tau_d0_in)
             return tau_r_in, np.full(n_pulses, td_med)
 
-        elif dec_mode == 'linear':
-            # Linear regression with slope constraint based on progression rule
-            x = np.arange(n_pulses, dtype=float)
+        elif dec_mode == 'none':
+            # No smoothing - return raw values (just ensure positive)
+            return tau_r_in, np.maximum(y, 1e-4)
 
+        elif dec_mode == 'linear':
+            # Linear fit with optional anchors
+            x = np.arange(n_pulses, dtype=float)
+            
+            if n_pulses < 2:
+                return tau_r_in, np.maximum(y, 1e-4)
+            
+            # Robust linear fit
+            a, b = _robust_linear_fit(x, y)
+            
+            # Apply slope constraint based on progression rule
+            if progression_rule == 'monotonic_increasing':
+                b = max(0.0, b)
+            elif progression_rule == 'monotonic_decreasing':
+                b = min(0.0, b)
+            
+            # Handle anchors
             if anchor_first and anchor_final and n_pulses > 2:
-                # Both anchors: force line through first and last points
-                tau_first = float(y[0])
-                tau_final = float(y[-1])
-                # Constrained line: passes through (0, tau_first) and (n-1, tau_final)
+                tau_first, tau_final = float(y[0]), float(y[-1])
                 b = (tau_final - tau_first) / max(1, n_pulses - 1)
                 if progression_rule == 'monotonic_increasing':
-                    b = max(0.0, b)  # Ensure non-negative slope
+                    b = max(0.0, b)
                 elif progression_rule == 'monotonic_decreasing':
-                    b = min(0.0, b)  # Ensure non-positive slope
-                # 'free': no slope constraint
+                    b = min(0.0, b)
                 a = tau_first
                 yfit = a + b * x
-                yfit[0] = tau_first
-                yfit[-1] = tau_final
+                yfit[0], yfit[-1] = tau_first, tau_final
             elif anchor_final and n_pulses > 1:
-                # Anchor last tau only: force line to pass through last point
                 tau_final = float(y[-1])
-
-                # Do robust fit on ALL points, then adjust slope to pass through final point
-                # This gives a better estimate of the trend than excluding the final point
-                a_full, b_full = _robust_linear_fit(x, y)
-
-                # Apply slope constraints based on progression rule
-                if progression_rule == 'monotonic_increasing':
-                    b = max(0.0, b_full)  # Ensure non-negative slope
-                elif progression_rule == 'monotonic_decreasing':
-                    b = min(0.0, b_full)  # Ensure non-positive slope
-                else:
-                    b = b_full  # 'free': no slope constraint
-
-                # Adjust intercept to pass through final point
                 a = tau_final - b * (n_pulses - 1)
-
-                # Ensure intercept is positive (tau cannot be negative)
-                if a < 1e-4:  # 0.1 ms minimum
+                if a < 1e-4:
                     a = 1e-4
-                    # Recalculate slope to pass through final point
                     b = (tau_final - a) / max(1, n_pulses - 1)
-
                 yfit = a + b * x
-                yfit[-1] = tau_final  # Enforce anchor
-
-                # Ensure all values are positive
-                yfit = np.maximum(yfit, 1e-4)
+                yfit[-1] = tau_final
             elif anchor_first and n_pulses > 1:
-                # Anchor first tau only: force line to pass through first point
-                tau_first = float(y[0])
-                # Robust fit to points 2-N
-                a, b = _robust_linear_fit(x[1:], y[1:])
-                if progression_rule == 'monotonic_increasing':
-                    b = max(0.0, b)  # Ensure non-negative slope
-                elif progression_rule == 'monotonic_decreasing':
-                    b = min(0.0, b)  # Ensure non-positive slope
-                # 'free': no slope constraint
-                a = tau_first  # Force through first point: a + b*0 = tau_first
+                a = float(y[0])
                 yfit = a + b * x
-                yfit[0] = tau_first
+                yfit[0] = float(y[0])
             else:
-                # Standard robust linear regression without anchors
-                a, b = _robust_linear_fit(x, y)
-                if progression_rule == 'monotonic_increasing':
-                    b = max(0.0, b)  # Ensure non-negative slope
-                elif progression_rule == 'monotonic_decreasing':
-                    b = min(0.0, b)  # Ensure non-positive slope
-                # 'free': no slope constraint
                 yfit = a + b * x
 
-            # Apply monotonic constraint only if rule requires it
-            if progression_rule == 'monotonic_increasing':
-                yfit = np.maximum.accumulate(yfit)
-            elif progression_rule == 'monotonic_decreasing':
-                yfit = np.minimum.accumulate(yfit)
-            # 'free': no monotonic constraint
-
-            # Re-enforce anchor constraints after monotonic accumulation
-            if anchor_first and anchor_final and n_pulses > 2:
-                yfit[0] = float(y[0])
-                yfit[-1] = float(y[-1])
-            elif anchor_final and n_pulses > 1:
-                yfit[-1] = float(y[-1])
-            elif anchor_first and n_pulses > 1:
-                yfit[0] = float(y[0])
-
-            # CRITICAL: Ensure all tau values are positive (minimum 0.1 ms)
-            # This must be done BEFORE returning to prevent negative tau
+            # Ensure positive values
             yfit = np.maximum(yfit, 1e-4)
-
             return tau_r_in, yfit
 
         else:  # 'free_monotonic'
-            # Determine monotonic direction from progression rule
+            # Monotonic regression using PCHIP smoothing
             mono_direction = None
             if progression_rule == 'monotonic_increasing':
                 mono_direction = 'increasing'
             elif progression_rule == 'monotonic_decreasing':
                 mono_direction = 'decreasing'
-            # 'free': mono_direction stays None, no constraint
 
-            if anchor_first and anchor_final and n_pulses > 2:
-                # Both anchors: interpolate between first and last with monotonic constraint
-                tau_first = float(y[0])
-                tau_final = float(y[-1])
-                # Ensure all values between first and final
-                if mono_direction == 'increasing':
-                    y_clipped = np.clip(y, tau_first, tau_final)
-                elif mono_direction == 'decreasing':
-                    y_clipped = np.clip(y, tau_final, tau_first)
-                else:
-                    y_clipped = y.copy()
-                y_clipped[0] = tau_first
-                y_clipped[-1] = tau_final
-                # Apply monotonic regression
-                yfit = _monotonic_regression(y_clipped, mono_direction) if mono_direction else y_clipped
-                yfit[0] = tau_first
-                yfit[-1] = tau_final
-            elif anchor_final and n_pulses > 1:
-                # Anchor final tau only
-                tau_final = float(y[-1])
-                if mono_direction == 'increasing':
-                    y_clipped = np.minimum(y, tau_final)
-                elif mono_direction == 'decreasing':
-                    y_clipped = np.maximum(y, tau_final)
-                else:
-                    y_clipped = y.copy()
-                yfit = _monotonic_regression(y_clipped, mono_direction) if mono_direction else y_clipped
-                yfit[-1] = tau_final
-            elif anchor_first and n_pulses > 1:
-                # Anchor first tau only
-                tau_first = float(y[0])
-                if mono_direction == 'increasing':
-                    y_clipped = np.maximum(y, tau_first)
-                elif mono_direction == 'decreasing':
-                    y_clipped = np.minimum(y, tau_first)
-                else:
-                    y_clipped = y.copy()
-                yfit = _monotonic_regression(y_clipped, mono_direction) if mono_direction else y_clipped
-                yfit[0] = tau_first
+            # Apply monotonic regression
+            if mono_direction:
+                yfit = _monotonic_regression(y, mono_direction)
             else:
-                # Apply monotonic regression without anchors
-                yfit = _monotonic_regression(y, mono_direction) if mono_direction else y.copy()
+                yfit = y.copy()
 
-            # CRITICAL: Ensure all tau values are positive (minimum 0.1 ms)
-            # This must be done BEFORE returning to prevent negative tau
+            # Apply anchors
+            if anchor_first and anchor_final and n_pulses > 2:
+                yfit[0], yfit[-1] = float(y[0]), float(y[-1])
+            elif anchor_final and n_pulses > 1:
+                yfit[-1] = float(y[-1])
+            elif anchor_first and n_pulses > 1:
+                yfit[0] = float(y[0])
+
+            # Ensure positive values
             yfit = np.maximum(yfit, 1e-4)
-
             return tau_r_in, yfit
-
-        # NOTE: All decay progression modes return above.
-        # No code beyond this point will execute.
 
     # Variables for optional display overlays and logging
     tau_last_display = None
@@ -2762,13 +2700,7 @@ def extract_metrics(
 
     if fit_source == 'global':
         # Always use fit_average_event with consistent long window for proper kinetics fitting
-        # Debug: verify stimulus times are correct
-        try:
-            expected_stims = [train_start + i * isi for i in range(n_pulses)]
-            progress_print(f"[global] Expected stim times (s): {[f'{s:.3f}' for s in expected_stims]}")
-            progress_print(f"[global] Actual stim times (s): {[f'{s:.3f}' for s in stim_times]}")
-        except Exception:
-            pass
+        # Stim time verification disabled for cleaner output
 
         # Use ISI-aware window for fitting: avoid capturing next pulse at high frequencies
         # For fast stimulation (ISI<30ms), limit to 75% of ISI to prevent contamination
@@ -2782,7 +2714,7 @@ def extract_metrics(
             post_ms_for_fit = max(12.0, isi_ms * 0.75)
         else:
             post_ms_for_fit = min(50.0, isi_ms - 5.0)  # Standard: 50ms or ISI-5ms
-        progress_print(f"[global] Using post_ms={post_ms_for_fit:.1f} ms for recut fitting (ISI={isi_ms:.1f}ms)")
+        # Recut fitting window logging disabled for cleaner output
 
         # === Estimate tau_slow from last-event decay (bi-exp only) ===
         # For tri-exp, superslow is derived from the final event decay instead.
@@ -2845,7 +2777,6 @@ def extract_metrics(
                 try:
                     t_rel_s, avg_s, snippets_s = fitted.pop('_recut')
                     recut_t_rel, recut_avg, recut_snippets = t_rel_s, avg_s, snippets_s
-                    progress_print(f"[global] Extracted recut data: {len(snippets_s)} snippets")
                 except Exception:
                     pass
 
@@ -3298,23 +3229,22 @@ def extract_metrics(
             tau_d_vec_raw = np.asarray(tau_d_vec0, float)
             tau_d_vec_constrained = None
 
-        tau_r, tau_d_vec = _apply_progression(tau_r, tau_d_vec0, tau_d0, 'global')
+        # When two-pass is enabled, skip smoothing here - two-pass block handles it
+        if two_pass_will_run:
+            # Pass raw tau to first NNLS, smoothing happens in two-pass block
+            tau_d_vec = np.asarray(tau_d_vec0, float)
+        else:
+            tau_r, tau_d_vec = _apply_progression(tau_r, tau_d_vec0, tau_d0, 'global')
 
         # Validate and fix tau_d_vec: negative tau are forbidden
         MIN_TAU_D = 0.001  # Minimum 1ms decay time
 
-        # Check for negative or zero values
+        # Check for negative or zero values (silent fix)
         if np.any(tau_d_vec <= 0):
-            neg_idx = np.where(tau_d_vec <= 0)[0]
-            progress_print(f"[ERROR] tau_d_vec contains {len(neg_idx)} negative/zero values at indices {neg_idx.tolist()}: {(tau_d_vec[neg_idx]*1000).tolist()} ms")
-            progress_print(f"[ERROR] Clipping to minimum {MIN_TAU_D*1000:.1f} ms")
             tau_d_vec = np.maximum(tau_d_vec, MIN_TAU_D)
 
-        # Check for NaN/Inf
+        # Check for NaN/Inf (silent fix)
         if not np.all(np.isfinite(tau_d_vec)):
-            bad_idx = np.where(~np.isfinite(tau_d_vec))[0]
-            progress_print(f"[ERROR] tau_d_vec contains NaN/Inf at indices {bad_idx.tolist()}: {tau_d_vec[bad_idx].tolist()}")
-            progress_print(f"[ERROR] Replacing with tau_d0={tau_d0}")
             tau_d_vec = np.where(np.isfinite(tau_d_vec), tau_d_vec, tau_d0)
 
         if is_varying_model:
@@ -3344,7 +3274,11 @@ def extract_metrics(
         tau_d0 = float(tau_d_vec0[0])
         tau_d_vec_raw = np.asarray(tau_d_vec0, float)
         per_event_param_map = {}
-        tau_r, tau_d_vec = _apply_progression(tau_r, tau_d_vec0, tau_d0, 'individual')
+        # Skip smoothing when two-pass is enabled
+        if two_pass_will_run:
+            tau_d_vec = np.asarray(tau_d_vec0, float)
+        else:
+            tau_r, tau_d_vec = _apply_progression(tau_r, tau_d_vec0, tau_d0, 'individual')
         if is_varying_model:
             progress_print(f"[fit] source=individual | τd0={tau_d_vec[0]*1000:.2f}ms → τdN={tau_d_vec[-1]*1000:.2f}ms | mode={dec_mode}")
 
@@ -3386,7 +3320,11 @@ def extract_metrics(
             )
             tau_d_vec_raw = np.asarray(tau_d_vec0, float)
 
-        tau_r, tau_d_vec = _apply_progression(tau_r, tau_d_vec0, tau_d0, 'average')
+        # Skip smoothing when two-pass is enabled
+        if two_pass_will_run:
+            tau_d_vec = np.asarray(tau_d_vec0, float)
+        else:
+            tau_r, tau_d_vec = _apply_progression(tau_r, tau_d_vec0, tau_d0, 'average')
         if is_varying_model:
             progress_print(f"[fit] source=average | τd0={tau_d_vec[0]*1000:.2f}ms → τdN={tau_d_vec[-1]*1000:.2f}ms | mode={dec_mode}")
 
@@ -3851,11 +3789,7 @@ def extract_metrics(
     tau_d_vec = np.asarray(tau_d_vec, float)
     if not np.all(np.isfinite(tau_d_vec)):
         bad_indices = np.where(~np.isfinite(tau_d_vec))[0]
-        try:
-            progress_print(f"[warning] tau_d_vec contains NaN/Inf at indices {bad_indices.tolist()}. Applying fallback.")
-        except Exception:
-            pass
-        # Replace bad values with tau_d0 or nearest valid value
+        # Replace bad values with tau_d0 or nearest valid value (silent fix)
         if np.isfinite(tau_d0):
             tau_d_vec[~np.isfinite(tau_d_vec)] = tau_d0
         else:
@@ -3864,35 +3798,11 @@ def extract_metrics(
         # Ensure monotonic after fixing
         tau_d_vec = np.maximum.accumulate(tau_d_vec)
 
-    # Validate tau_r
+    # Validate tau_r (silent fix)
     if not np.isfinite(tau_r):
-        try:
-            progress_print(f"[warning] tau_r is NaN/Inf. Using fallback 0.002s.")
-        except Exception:
-            pass
         tau_r = 0.002
 
-    # Print the τd vector to be used for constrained refitting
-    try:
-        td_ms_list = ", ".join(f"{v*1000:.2f}" for v in tau_d_vec.tolist())
-        progress_print(f"[constrain] τd vector (ms) prior to NNLS refit: [{td_ms_list}]")
-        progress_print("[constrain] Refitting average and trials with τd fixed per pulse to this vector (amp+jitter only).")
-    except Exception:
-        pass
-
-    # Debug: Check which array has NaN/Inf
-    if not np.all(np.isfinite(y_avg)):
-        nan_count = np.sum(~np.isfinite(y_avg))
-        nan_indices = np.where(~np.isfinite(y_avg))[0]
-        progress_print(f"[debug] y_avg contains {nan_count} NaN/Inf values at indices: {nan_indices[:10].tolist()}{'...' if len(nan_indices) > 10 else ''}")
-    if not np.all(np.isfinite(t)):
-        nan_count = np.sum(~np.isfinite(t))
-        nan_indices = np.where(~np.isfinite(t))[0]
-        progress_print(f"[debug] t contains {nan_count} NaN/Inf values at indices: {nan_indices[:10].tolist()}{'...' if len(nan_indices) > 10 else ''}")
-    if not np.all(np.isfinite(stim_times)):
-        nan_count = np.sum(~np.isfinite(stim_times))
-        nan_indices = np.where(~np.isfinite(stim_times))[0]
-        progress_print(f"[debug] stim_times contains {nan_count} NaN/Inf values at indices: {nan_indices.tolist()}")
+    # Constraint vector and debug logging disabled for cleaner output
 
     # Fit average trace (forward, no overlap) and measure amplitudes
     # Use template variants if enabled, otherwise use standard forward fitting
@@ -4011,11 +3921,8 @@ def extract_metrics(
                     if expanded:
                         variant_ratios = expanded
                         expanded_variants = True
-                        try:
-                            fmt = ", ".join(f"{v*1000:.1f}" for v in tau_grid_s)
-                            progress_print(f"[NNLS] Added tau_slow variants (ms): [{fmt}]")
-                        except Exception:
-                            pass
+                        # tau_slow variants logging disabled for cleaner output
+                        pass
         else:
             # Jitter-only mode: determine optimal template ratio first if needed
             # For iGluSnFR, quickly test a few ratios to find the best one for this data
@@ -4042,20 +3949,12 @@ def extract_metrics(
                         best_error = error
                         best_ratio = ratio
                 variant_ratios = [best_ratio]
-                progress_print(f"[NNLS] Jitter-only mode: determined optimal template ratio = {best_ratio:.1f}")
+                # Jitter-only mode logging disabled for cleaner output
             else:
                 # Non-variant model: ratio doesn't matter
                 variant_ratios = [0.5]
 
-        # Report configuration
-        if cfg.get('use_template_variants', False) and jitter_variant_ms is not None:
-            jitter_arr = np.asarray(jitter_variant_ms, float)
-            progress_print(f"[NNLS] Using template variants ({len(variant_ratios)} ratios) + jitter variants ({len(jitter_arr)} shifts)")
-        elif cfg.get('use_template_variants', False):
-            progress_print(f"[NNLS] Using template variants with {len(variant_ratios)} ratios per event")
-        elif jitter_variant_ms is not None:
-            jitter_arr = np.asarray(jitter_variant_ms, float)
-            progress_print(f"[NNLS] Using jitter variants with {len(jitter_arr)} shifts per event")
+        # NNLS configuration logging disabled for cleaner output
 
         # Choose variant selection strategy (soft mix vs hard per-event selection)
         variant_select = str(cfg.get('template_variant_select', 'soft')).strip().lower()
@@ -4063,11 +3962,6 @@ def extract_metrics(
             hard_select = True
         else:
             hard_select = False
-        if hard_select:
-            try:
-                progress_print("[NNLS] Hard-selecting dominant template per event")
-            except Exception:
-                pass
 
         a_avg, d_avg, X_avg, yhat_avg, comp_avg, variant_info_avg = fit_amplitudes_with_template_variants(
             y_avg, t, stim_times, tau_r, tau_d_vec,
@@ -4079,65 +3973,7 @@ def extract_metrics(
             jitter_variant_ms=jitter_variant_ms,
             hard_select=hard_select,
         )
-        # Report which variants were selected
-        try:
-            if 'dominant_template_ratio' in variant_info_avg:
-                # New format with jitter support
-                dominant_ratios = variant_info_avg['dominant_template_ratio']
-                dominant_jitters = variant_info_avg['dominant_jitter_ms']
-                if cfg.get('use_template_variants', False):
-                    if event_model == 'iglusnfr_tri' and isinstance(dominant_ratios, list):
-                        fmt = []
-                        for r in dominant_ratios:
-                            if isinstance(r, (list, tuple)) and len(r) >= 3:
-                                fmt.append(f"({r[0]:.2f},{r[1]:.2f},{r[2]*1000:.1f}ms)")
-                            elif isinstance(r, (list, tuple)) and len(r) >= 2:
-                                fmt.append(f"({r[0]:.2f},{r[1]:.2f})")
-                            else:
-                                fmt.append(str(r))
-                        progress_print(f"[NNLS] Dominant tri fractions per event: {fmt}")
-                    else:
-                        if (isinstance(dominant_ratios, list)
-                                and dominant_ratios
-                                and isinstance(dominant_ratios[0], (list, tuple))
-                                and len(dominant_ratios[0]) >= 2):
-                            fmt = [f"{r[0]:.2f}@{r[1]*1000:.1f}ms" for r in dominant_ratios]
-                            progress_print(f"[NNLS] Dominant slow fraction/τslow per event: {fmt}")
-                        else:
-                            progress_print(f"[NNLS] Dominant slow fractions per event: {[f'{r:.1f}' for r in dominant_ratios]}")
-                if jitter_variant_ms is not None:
-                    progress_print(f"[NNLS] Dominant jitter (ms) per event: {[f'{j:.2f}' for j in dominant_jitters]}")
-                    try:
-                        t_onset_ms = [event_t0_s * 1000.0 + float(j) for j in dominant_jitters]
-                        progress_print(f"[NNLS] t_onset (ms) per event: {[f'{tp:.2f}' for tp in t_onset_ms]}")
-                    except Exception:
-                        pass
-            else:
-                # Old format (backward compatibility)
-                dominant_idx = variant_info_avg.get('dominant_variant_idx', [])
-                if len(dominant_idx):
-                    dominant_ratios = [variant_ratios[i] for i in dominant_idx]
-                    if event_model == 'iglusnfr_tri':
-                        fmt = []
-                        for r in dominant_ratios:
-                            if isinstance(r, (list, tuple)) and len(r) >= 3:
-                                fmt.append(f"({r[0]:.2f},{r[1]:.2f},{r[2]*1000:.1f}ms)")
-                            elif isinstance(r, (list, tuple)) and len(r) >= 2:
-                                fmt.append(f"({r[0]:.2f},{r[1]:.2f})")
-                            else:
-                                fmt.append(str(r))
-                        progress_print(f"[NNLS] Dominant tri fractions per event: {fmt}")
-                    else:
-                        if (isinstance(dominant_ratios, list)
-                                and dominant_ratios
-                                and isinstance(dominant_ratios[0], (list, tuple))
-                                and len(dominant_ratios[0]) >= 2):
-                            fmt = [f"{r[0]:.2f}@{r[1]*1000:.1f}ms" for r in dominant_ratios]
-                            progress_print(f"[NNLS] Dominant slow fraction/τslow per event: {fmt}")
-                        else:
-                            progress_print(f"[NNLS] Dominant slow fractions per event: {[f'{r:.1f}' for r in dominant_ratios]}")
-        except Exception:
-            pass
+        # Per-event variant selection logging disabled for cleaner output
     else:
         # Standard forward fitting with single template per event
         a_avg, d_avg, X_avg, yhat_avg, comp_avg = fit_amplitudes_no_overlap_forward(
@@ -4148,45 +3984,120 @@ def extract_metrics(
             shift_min_s=cfg['shift_min_s'], event_t0_s=event_t0_s,
         )
 
-    # Diagnostic: assess NNLS fit quality
-    try:
-        # Compute RMS error in the fitting window
-        zmask = (t >= float(train_start) - cfg['pre_zoom_s']) & (t < float(train_start) + float(isi) * int(n_pulses) + cfg['post_zoom_s'])
-        if np.any(zmask):
-            residual = y_avg[zmask] - yhat_avg[zmask]
-            rms_error = np.sqrt(np.nanmean(residual**2))
-            signal_rms = np.sqrt(np.nanmean(y_avg[zmask]**2))
-            relative_error = (rms_error / signal_rms * 100) if signal_rms > 0 else np.nan
-            progress_print(f"[NNLS fit] RMS error: {rms_error:.4f}, Signal RMS: {signal_rms:.4f}, Relative error: {relative_error:.2f}%")
-            progress_print(f"[NNLS fit] Amplitudes: {[f'{a:.3f}' for a in a_avg[:min(5, len(a_avg))]]}")
-            progress_print(f"[NNLS fit] Jitter (ms): {[f'{d*1000:.2f}' for d in d_avg[:min(5, len(d_avg))]]}")
+    # ============================================================================
+    # TWO-PASS NNLS: Smooth tau evolution and refit with fixed kinetics
+    # ============================================================================
+    # If decay_progression_mode is not 'none' and template variants were used,
+    # do a second pass with smoothed RATIO values (only amplitude + jitter vary)
+    # The goal: smooth the slow/fast RATIO evolution across the train, not tau_d itself
+    two_pass_enabled = (
+        dec_mode not in ('none', 'fixed')
+        and cfg.get('use_template_variants', False)
+        and variant_info_avg is not None
+    )
+    
+    if two_pass_enabled:
+        try:
+            progress_print(f"[TWO-PASS] Starting second pass with smoothed slow-fraction (mode={dec_mode})")
             
-            # Per-event RMS breakdown (train events + post-train decay)
-            per_event_rms = []
-            for i, st in enumerate(stim_times):
-                # Event window: from stim to stim+ISI (or next stim)
-                ev_start = float(st)
-                ev_end = float(st) + float(isi) if i < len(stim_times) - 1 else float(st) + float(isi)
-                ev_mask = (t >= ev_start) & (t < ev_end)
-                if np.any(ev_mask):
-                    ev_resid = y_avg[ev_mask] - yhat_avg[ev_mask]
-                    ev_rms = np.sqrt(np.nanmean(ev_resid**2))
-                    per_event_rms.append(ev_rms)
-                else:
-                    per_event_rms.append(np.nan)
-            # Post-train decay RMS (from last stim + ISI to end of zoom)
-            post_start = float(stim_times[-1]) + float(isi)
-            post_end = float(train_start) + float(isi) * int(n_pulses) + cfg['post_zoom_s']
-            post_mask = (t >= post_start) & (t < post_end)
-            if np.any(post_mask):
-                post_resid = y_avg[post_mask] - yhat_avg[post_mask]
-                post_rms = np.sqrt(np.nanmean(post_resid**2))
+            # Extract dominant ratios from pass 1 - these are the slow fractions per event
+            dominant_ratios_pass1 = variant_info_avg.get('dominant_template_ratio', None)
+            dominant_jitters_pass1 = variant_info_avg.get('dominant_jitter_ms', d_avg * 1000.0)
+            
+            if dominant_ratios_pass1 is None:
+                raise ValueError("No dominant_template_ratio from pass 1")
+            
+            # Determine format of dominant_ratios_pass1:
+            # - Scalar array: pure bi-exp [0.2, 0.4, 0.6, ...]
+            # - Tuples (frac, tau_slow): bi-exp with tau_slow grid [(0.2, 0.012), (0.4, 0.012), ...]
+            # - Tuples (frac_slow, frac_superslow, tau_superslow): tri-exp
+            sample_ratio = dominant_ratios_pass1[0] if len(dominant_ratios_pass1) > 0 else None
+            is_scalar_ratios = np.isscalar(sample_ratio)
+            is_biexp_tuple = (
+                isinstance(sample_ratio, (tuple, list)) and 
+                len(sample_ratio) == 2
+            )
+            is_triexp_tuple = (
+                isinstance(sample_ratio, (tuple, list)) and 
+                len(sample_ratio) >= 3
+            )
+            
+            if is_scalar_ratios:
+                # Pure bi-exp model: smooth the slow fraction directly
+                raw_fracs = np.asarray(dominant_ratios_pass1, float)
+            elif is_biexp_tuple:
+                # Bi-exp with tau_slow grid: extract slow fraction (first element of tuple)
+                raw_fracs = np.array([float(r[0]) for r in dominant_ratios_pass1])
+                raw_tau_slow = np.array([float(r[1]) for r in dominant_ratios_pass1])
+            elif is_triexp_tuple:
+                # Tri-exp model: ratios are tuples like (frac_slow, frac_superslow, tau_superslow)
+                pass2_variant_ratios = variant_ratios
+                smoothed_ratios = None
+                raw_fracs = None
             else:
-                post_rms = np.nan
-            progress_print(f"[NNLS fit] Per-event RMS: {[f'{r:.3f}' for r in per_event_rms]}")
-            progress_print(f"[NNLS fit] Post-train decay RMS: {post_rms:.3f}")
-    except Exception as e:
-        progress_print(f"[NNLS fit] Diagnostic failed: {e}")
+                raise ValueError(f"Unknown dominant_ratio format: {type(sample_ratio)}")
+            
+            if raw_fracs is not None:
+                # Smooth ratios using _apply_progression
+                # Use progression rule 'monotonic_increasing' for slow fraction
+                _, smoothed_fracs = _apply_progression(
+                    tau_r, raw_fracs, float(np.nanmedian(raw_fracs)), 
+                    'global', 'slow_fraction'
+                )
+                
+                # Clip to valid range [0, 1]
+                smoothed_fracs = np.clip(smoothed_fracs, 0.0, 1.0)
+                
+                # Build pass2_variant_ratios in the same format as input
+                if is_scalar_ratios:
+                    # Pure bi-exp: just scalars
+                    pass2_variant_ratios = list(smoothed_fracs)
+                    smoothed_ratios = smoothed_fracs
+                else:
+                    # Bi-exp with tau_slow: keep the tau_slow from pass 1, use smoothed fraction
+                    pass2_variant_ratios = [(float(f), float(raw_tau_slow[i])) for i, f in enumerate(smoothed_fracs)]
+                    smoothed_ratios = smoothed_fracs
+            
+            # Keep tau_d_vec from pass 1 (already estimated, use as-is for pass 2)
+            # The smoothing is on RATIOS, not on tau_d_fast
+            pass2_tau_d = tau_d_vec.copy()
+            
+            # Run second NNLS pass with smoothed ratios
+            # Key difference: each event is constrained to ONE ratio (its smoothed value)
+            a_avg_p2, d_avg_p2, X_avg_p2, yhat_avg_p2, comp_avg_p2, variant_info_p2 = fit_amplitudes_with_template_variants(
+                y_avg, t, stim_times, tau_r, pass2_tau_d,
+                variant_ratios=pass2_variant_ratios,
+                weight_mode=weight_mode,
+                weight_tau_s=weight_tau_s,
+                isi=isi,
+                event_t0_s=event_t0_s,
+                jitter_variant_ms=jitter_variant_ms,
+                hard_select=True,  # Hard selection for cleaner result
+            )
+            
+            # Compare RMS error between passes
+            zmask_cmp = (t >= float(train_start) - cfg['pre_zoom_s']) & (t < float(train_start) + float(isi) * int(n_pulses) + cfg['post_zoom_s'])
+            if np.any(zmask_cmp):
+                rms_pass1 = np.sqrt(np.nanmean((y_avg[zmask_cmp] - yhat_avg[zmask_cmp])**2))
+                rms_pass2 = np.sqrt(np.nanmean((y_avg[zmask_cmp] - yhat_avg_p2[zmask_cmp])**2))
+                improvement = (rms_pass1 - rms_pass2) / rms_pass1 * 100 if rms_pass1 > 0 else 0
+                # Log two-pass summary
+                progress_print(f"[TWO-PASS] Slow-fraction smoothed ({dec_mode}): RMS change={improvement:+.1f}%")
+            
+            # Use pass 2 results (overwrite pass 1)
+            a_avg, d_avg, X_avg, yhat_avg, comp_avg = a_avg_p2, d_avg_p2, X_avg_p2, yhat_avg_p2, comp_avg_p2
+            
+            # Update variant_info
+            variant_info_avg = variant_info_p2
+            variant_info_avg['two_pass'] = True
+            variant_info_avg['raw_slow_fraction'] = np.asarray(dominant_ratios_pass1, float) if is_scalar_ratios else dominant_ratios_pass1
+            variant_info_avg['smoothed_slow_fraction'] = smoothed_ratios
+            
+        except Exception as e:
+            progress_print(f"[TWO-PASS] Failed: {e}")
+
+    # NNLS fit diagnostic logging disabled for cleaner output
+    # (per-event RMS, amplitudes, jitter details removed)
 
     need_avg_sg = (
         ('savgol' in traces)
@@ -4897,6 +4808,8 @@ def extract_metrics(
                     ax.set_xlabel('Pulse #')
                     ylabel = label if not unit else f"{label} ({unit})"
                     ax.set_ylabel(ylabel)
+                    if 'tau' in str(info.get('name', '')).lower() or 'tau' in label.lower():
+                        ax.set_ylim(bottom=0.0)
                     # Simplify titles: show only the parameter label
                     ax.set_title(label)
                     ax.grid(True, alpha=0.3)
@@ -5612,6 +5525,7 @@ def extract_metrics(
                 ax3.set_xlabel('Event #')
                 ax3.set_ylabel('Amplitude (ΔF/F₀)')
                 ax3.set_title('NNLS Amplitudes')
+                ax3.set_ylim(bottom=0.0)
                 ax3.set_xticks(event_indices)
                 ax3.legend(loc='best', fontsize=8)
                 ax3.grid(True, alpha=0.3)
@@ -5624,6 +5538,7 @@ def extract_metrics(
                 ax4.set_xlabel('Event #')
                 ax4.set_ylabel('PPR (normalized to A₁)')
                 ax4.set_title('Paired-Pulse Ratio')
+                ax4.set_ylim(bottom=0.0)
                 ax4.set_xticks(event_indices)
                 ax4.legend(loc='best', fontsize=8)
                 ax4.grid(True, alpha=0.3)
