@@ -136,7 +136,7 @@ DEFAULTS = {
     'use_template_variants': False,  # Enable multi-template NNLS (single pass, data-driven slow component)
     # Bi-exp: slow component fractions per event.
     # Tri-exp: slow fraction grid paired with template_variant_superslow_fracs.
-    'template_variant_ratios': [0.2, 0.4, 0.6, 0.8],
+    'template_variant_ratios': np.linspace(0.0, 1.0, 10),
 }
 
 # Recut options: oversample factor and projection ('mean'|'median'|'std')
@@ -159,9 +159,10 @@ DEFAULTS.update({
 
 # Tri-exp NNLS variants: sweep slow + superslow fractions (superslow ramps across the train)
 DEFAULTS.update({
-    'template_variant_superslow_fracs': [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],  # Superslow fraction at final event
+    'template_variant_superslow_fracs': np.linspace(0.0, 1.0, 11),  # Superslow fraction at final event
     'superslow_min_ratio': 1.0,  # Disable superslow variants if tau_superslow < tau_slow * ratio
     'allow_tau_slow_override': True,  # Allow last-event tau to replace recut tau_decay_slow when shorter
+    'force_tau_slow_override': False,  # Force last-event tau as tau_decay_slow (supersedes allow_tau_slow_override)
     'template_variant_tau_slow_ms': None,  # Optional slow-tau grid (ms) for bi-exp template variants
     'template_variant_select': 'soft',  # 'soft'|'hard' selection across template variants
 })
@@ -1572,6 +1573,8 @@ def extract_metrics(
         tau_superslow < tau_slow * ratio
       - allow_tau_slow_override: bool (default True) — when superslow < slow, allow
         last‑event tau to replace recut tau_decay_slow (else clamp superslow only)
+      - force_tau_slow_override: bool (default False) — always use last‑event tau
+        as tau_decay_slow, regardless of recut fit (supersedes allow_tau_slow_override)
       - plot: dict with keys
           - enabled: bool (default False)
           - traces: list of {'raw','savgol','nnls'} (default ['nnls'])
@@ -1596,6 +1599,7 @@ def extract_metrics(
     plot_peaks_details = bool(plot_opts.get('plot_peaks_details', False))
     plot_residual_buildup = bool(plot_opts.get('residual_buildup', False))
     plot_nnls_residual = bool(plot_opts.get('nnls_residual', False))
+    plot_param_evolution = bool(plot_opts.get('param_evolution', False))
     if baseline_figs:
         plot_trials = True  # baseline panel requires per-trial figures
     cfg = {**DEFAULTS, **{k: v for k, v in opts.items() if k != 'plot'}}
@@ -2924,9 +2928,23 @@ def extract_metrics(
                         progress_print("[tri-exp] No superslow tau estimate; disabling superslow variants.")
                     else:
                         tau_superslow_setting = float(tau_superslow_setting)
+                        force_slow_override = bool(cfg.get('force_tau_slow_override', False))
                         allow_slow_override = bool(cfg.get('allow_tau_slow_override', True))
                         if tau_slow_fit is not None and np.isfinite(tau_slow_fit):
-                            if tau_superslow_setting < tau_slow_fit:
+                            # force_tau_slow_override: always use last-event tau as slow (supersedes allow)
+                            if force_slow_override:
+                                tau_slow_fit = float(tau_superslow_setting)
+                                recut_slow_replaced = True
+                                if isinstance(fitted, dict):
+                                    fitted['tau_decay_slow'] = float(tau_slow_fit)
+                                if isinstance(cfg.get('event_model_settings', None), dict):
+                                    cfg['event_model_settings']['tau_decay_slow'] = float(tau_slow_fit)
+                                global_fit_params['tau_decay_slow'] = float(tau_slow_fit)
+                                progress_print(
+                                    "[tri-exp] FORCED recut tau_decay_slow to last-event decay: "
+                                    f"{tau_slow_fit*1000:.1f} ms"
+                                )
+                            elif tau_superslow_setting < tau_slow_fit:
                                 if allow_slow_override:
                                     tau_slow_fit = float(tau_superslow_setting)
                                     recut_slow_replaced = True
@@ -3072,16 +3090,22 @@ def extract_metrics(
                             tau_fast_s = float(tau_d) if np.isfinite(tau_d) and tau_d > 0 else fitted_params.get('tau_decay_fast', 0.003)
                             tau_fast_base = float(fitted_params.get('tau_decay_fast', 0.003))
                             tau_slow_base = float(fitted_params.get('tau_decay_slow', 0.015))
-                            ratio_slow = tau_slow_base / max(tau_fast_base, 1e-6)
-                            if not np.isfinite(ratio_slow) or ratio_slow <= 1.0:
-                                ratio_slow = 1.5
-                            tau_slow_s = tau_fast_s * ratio_slow
-                            if tau_slow_override is not None and np.isfinite(tau_slow_override) and tau_slow_override > 0:
-                                tau_slow_s = float(tau_slow_override)
-                            if tau_slow_s <= tau_fast_s:
-                                tau_slow_s = tau_fast_s * 1.1
-                            if tau_slow_s > tau_superslow_s:
-                                tau_slow_s = tau_superslow_s * 0.6
+                            # Check if force_tau_slow_override is active: tau_slow equals tau_superslow
+                            force_slow_active = abs(tau_slow_base - tau_superslow_s) < 1e-6
+                            # When force override is active, use tau_slow_base directly
+                            if force_slow_active:
+                                tau_slow_s = float(tau_slow_base)
+                            else:
+                                ratio_slow = tau_slow_base / max(tau_fast_base, 1e-6)
+                                if not np.isfinite(ratio_slow) or ratio_slow <= 1.0:
+                                    ratio_slow = 1.5
+                                tau_slow_s = tau_fast_s * ratio_slow
+                                if tau_slow_override is not None and np.isfinite(tau_slow_override) and tau_slow_override > 0:
+                                    tau_slow_s = float(tau_slow_override)
+                                if tau_slow_s <= tau_fast_s:
+                                    tau_slow_s = tau_fast_s * 1.1
+                                if tau_slow_s > tau_superslow_s:
+                                    tau_slow_s = tau_superslow_s * 0.6
                             params = [
                                 1.0,  # amp (will be normalized)
                                 tau_r,  # tau_rise from global fit
@@ -3144,8 +3168,12 @@ def extract_metrics(
 
                     _VARIANT_KERNEL_BUILDER = _iglusnfr_variant_builder_fitted
                     override_msg = " (OVERRIDDEN)" if override_used else ""
+                    # Detect if force_tau_slow_override is active
+                    force_slow_msg = ""
+                    if is_tri and tau_superslow is not None and abs(tau_slow - tau_superslow) < 1e-6:
+                        force_slow_msg = " (τ_slow FORCED to superslow)"
                     if is_tri:
-                        progress_print(f"[model] Updated tri-exp variant kernel{override_msg}: tau_fast={tau_fast*1000:.2f}ms, tau_slow={tau_slow*1000:.2f}ms, tau_superslow={tau_superslow*1000:.2f}ms")
+                        progress_print(f"[model] Updated tri-exp variant kernel{override_msg}{force_slow_msg}: tau_fast={tau_fast*1000:.2f}ms, tau_slow={tau_slow*1000:.2f}ms, tau_superslow={tau_superslow*1000:.2f}ms")
                     else:
                         progress_print(f"[model] Updated variant kernel{override_msg}: tau_fast={tau_fast*1000:.2f}ms, tau_slow={tau_slow*1000:.2f}ms")
                 except Exception as e:
@@ -4333,14 +4361,17 @@ def extract_metrics(
                     popt = params
                     yhat_ev = spec['func'](tf, *popt)
                 fit_color = 'crimson'
+                fit_suffix = ''
                 if event_model == 'iglusnfr_tri' and recut_slow_replaced:
-                    fit_color = 'darkorange'
+                    fit_color = 'limegreen'
+                    fit_suffix = '\n(τ_slow override)'
+                    progress_print(f"[plot] Using overridden tau_decay_slow: {fitted.get('tau_decay_slow', 0)*1000:.1f}ms")
                 axL.plot(tf, yhat_ev, color=fit_color, ls='--', lw=1.8, label=_name)
                 try:
                     # Omit 't_onset' and stack vertically; include amp at top for context
                     pairs = [(n, v) for n, v in zip(spec['params'], popt)]
                     pairs = [(n, v) for n, v in pairs if n != 't_onset']
-                    txt = "\n".join(f"{n}={v:.3g}" for n, v in pairs)
+                    txt = "\n".join(f"{n}={v:.3g}" for n, v in pairs) + fit_suffix
                     axL.text(0.98, 0.98, txt, transform=axL.transAxes, fontsize=8,
                              va='top', ha='right', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
                 except Exception:
@@ -5397,6 +5428,146 @@ def extract_metrics(
         except Exception:
             figure_nnls_residual = None
 
+    # Parameter evolution figure: show how amplitude fractions evolve across events
+    # For tri-exp: frac_fast, frac_slow, frac_superslow (sum to 1)
+    # For bi-exp: frac_fast, frac_slow (sum to 1)
+    # Also show amplitudes (raw + corrected) and PPR
+    figure_param_evolution = None
+    if plot_param_evolution and variant_info_avg is not None:
+        try:
+            is_tri = (event_model == 'iglusnfr_tri')
+            dominant_ratios = variant_info_avg.get('dominant_template_ratio', [])
+            
+            if dominant_ratios is not None and len(dominant_ratios) == n_pulses:
+                event_indices = np.arange(1, n_pulses + 1)
+                
+                # Create 2x2 figure
+                fig_pe, axes = plt.subplots(2, 2, figsize=(12, 8))
+                ax1, ax2, ax3, ax4 = axes.flatten()
+                
+                if is_tri:
+                    # Tri-exponential: extract (frac_slow, frac_superslow_max) per event
+                    frac_slow_arr = np.zeros(n_pulses)
+                    frac_superslow_arr = np.zeros(n_pulses)
+                    frac_fast_arr = np.zeros(n_pulses)
+                    
+                    for i, r in enumerate(dominant_ratios):
+                        if isinstance(r, (list, tuple)) and len(r) >= 2:
+                            frac_slow_base = float(r[0])
+                            frac_superslow_max = float(r[1])
+                            ramp = float(i) / float(n_pulses - 1) if n_pulses > 1 else 0.0
+                            frac_superslow = frac_superslow_max * ramp
+                            frac_slow = frac_slow_base
+                            if frac_slow + frac_superslow > 1.0:
+                                frac_slow = max(0.0, 1.0 - frac_superslow)
+                            frac_fast = max(0.0, 1.0 - frac_slow - frac_superslow)
+                        else:
+                            frac_slow = float(r) if np.isscalar(r) else 0.5
+                            frac_superslow = 0.0
+                            frac_fast = 1.0 - frac_slow
+                        
+                        frac_fast_arr[i] = frac_fast
+                        frac_slow_arr[i] = frac_slow
+                        frac_superslow_arr[i] = frac_superslow
+                    
+                    # Panel 1: stacked fractions
+                    ax1.stackplot(event_indices, frac_fast_arr, frac_slow_arr, frac_superslow_arr,
+                                  labels=['frac_fast', 'frac_slow', 'frac_superslow'],
+                                  colors=['tab:blue', 'tab:orange', 'tab:green'], alpha=0.7)
+                    ax1.plot(event_indices, frac_fast_arr, 'o-', color='tab:blue', markersize=5, lw=1.5)
+                    ax1.plot(event_indices, frac_fast_arr + frac_slow_arr, 's-', color='tab:orange', markersize=5, lw=1.5)
+                    ax1.set_xlabel('Event #')
+                    ax1.set_ylabel('Cumulative fraction')
+                    ax1.set_title('Component fractions (stacked)')
+                    ax1.set_ylim(0, 1.05)
+                    ax1.set_xticks(event_indices)
+                    ax1.legend(loc='upper left', fontsize=8)
+                    ax1.grid(True, alpha=0.3)
+                    _trim_spines(ax1)
+                    
+                    # Panel 2: individual fraction lines
+                    ax2.plot(event_indices, frac_fast_arr, 'o-', color='tab:blue', label='frac_fast', markersize=6, lw=1.5)
+                    ax2.plot(event_indices, frac_slow_arr, 's-', color='tab:orange', label='frac_slow', markersize=6, lw=1.5)
+                    ax2.plot(event_indices, frac_superslow_arr, '^-', color='tab:green', label='frac_superslow', markersize=6, lw=1.5)
+                    ax2.set_xlabel('Event #')
+                    ax2.set_ylabel('Fraction')
+                    ax2.set_title('Individual component fractions')
+                    ax2.set_ylim(0, 1.05)
+                    ax2.set_xticks(event_indices)
+                    ax2.legend(loc='best', fontsize=8)
+                    ax2.grid(True, alpha=0.3)
+                    _trim_spines(ax2)
+                    
+                else:
+                    # Bi-exponential: frac_slow per event
+                    frac_slow_arr = np.zeros(n_pulses)
+                    for i, r in enumerate(dominant_ratios):
+                        if isinstance(r, (list, tuple)):
+                            frac_slow_arr[i] = float(r[0]) if len(r) > 0 else 0.5
+                        else:
+                            frac_slow_arr[i] = float(r)
+                    frac_fast_arr = 1.0 - frac_slow_arr
+                    
+                    # Panel 1: stacked fractions
+                    ax1.stackplot(event_indices, frac_fast_arr, frac_slow_arr,
+                                  labels=['frac_fast', 'frac_slow'],
+                                  colors=['tab:blue', 'tab:orange'], alpha=0.7)
+                    ax1.plot(event_indices, frac_fast_arr, 'o-', color='tab:blue', markersize=5, lw=1.5)
+                    ax1.set_xlabel('Event #')
+                    ax1.set_ylabel('Cumulative fraction')
+                    ax1.set_title('Component fractions (stacked)')
+                    ax1.set_ylim(0, 1.05)
+                    ax1.set_xticks(event_indices)
+                    ax1.legend(loc='upper left', fontsize=8)
+                    ax1.grid(True, alpha=0.3)
+                    _trim_spines(ax1)
+                    
+                    # Panel 2: individual fraction lines
+                    ax2.plot(event_indices, frac_fast_arr, 'o-', color='tab:blue', label='frac_fast', markersize=6, lw=1.5)
+                    ax2.plot(event_indices, frac_slow_arr, 's-', color='tab:orange', label='frac_slow', markersize=6, lw=1.5)
+                    ax2.set_xlabel('Event #')
+                    ax2.set_ylabel('Fraction')
+                    ax2.set_title('Individual component fractions')
+                    ax2.set_ylim(0, 1.05)
+                    ax2.set_xticks(event_indices)
+                    ax2.legend(loc='best', fontsize=8)
+                    ax2.grid(True, alpha=0.3)
+                    _trim_spines(ax2)
+                
+                # Panel 3: Amplitudes (raw and corrected overlayed)
+                ax3.plot(event_indices, amp_nnls_avg[:n_pulses], 'o-', color='tab:gray', 
+                         label='NNLS raw', markersize=6, lw=1.5, alpha=0.7)
+                ax3.plot(event_indices, amp_nnls_corr_avg[:n_pulses], 's-', color='tab:red', 
+                         label='NNLS corrected', markersize=6, lw=2)
+                ax3.set_xlabel('Event #')
+                ax3.set_ylabel('Amplitude (ΔF/F₀)')
+                ax3.set_title('NNLS Amplitudes')
+                ax3.set_xticks(event_indices)
+                ax3.legend(loc='best', fontsize=8)
+                ax3.grid(True, alpha=0.3)
+                _trim_spines(ax3)
+                
+                # Panel 4: PPR (corrected)
+                ax4.plot(event_indices, ppr_nnls_corr_avg[:n_pulses], 'o-', color='tab:purple', 
+                         markersize=6, lw=2, label='PPR (corrected)')
+                ax4.axhline(1.0, color='gray', linestyle='--', lw=1, alpha=0.7)
+                ax4.set_xlabel('Event #')
+                ax4.set_ylabel('PPR (normalized to A₁)')
+                ax4.set_title('Paired-Pulse Ratio')
+                ax4.set_xticks(event_indices)
+                ax4.legend(loc='best', fontsize=8)
+                ax4.grid(True, alpha=0.3)
+                _trim_spines(ax4)
+                
+                model_label = 'tri-exponential' if is_tri else 'bi-exponential'
+                fig_pe.suptitle(f'Parameter evolution ({model_label})', fontsize=12, fontweight='bold')
+                plt.tight_layout()
+                figure_param_evolution = fig_pe
+                
+        except Exception as e:
+            progress_print(f"[warning] Failed to create param evolution figure: {e}")
+            figure_param_evolution = None
+
     return {
         'tau_r_s': float(tau_r),
         'tau_d_s': np.asarray(tau_d_vec, float),
@@ -5421,6 +5592,8 @@ def extract_metrics(
         'recut_snippets': recut_snippets,
         'recut_t_rel': np.asarray(recut_t_rel, float) if recut_t_rel is not None else None,
         'recut_avg': np.asarray(recut_avg, float) if recut_avg is not None else None,
+        'per_event_param_map': per_event_param_map,
+        'variant_info': variant_info_avg,  # NNLS variant info with dominant fractions per event
         'per_trial': per_trial,
         'time_s': np.asarray(t, float),
         'threshold_amp1': np.asarray(thr_list, float),
@@ -5429,6 +5602,7 @@ def extract_metrics(
         'figure_fit_diagnostic': fit_diag_figure,
         'figure_residual_buildup': figure_residual_buildup,
         'figure_nnls_residual': figure_nnls_residual,
+        'figure_param_evolution': figure_param_evolution,
         'figure_event_model': None,
         'figures_trials': figures_trials,
     }
