@@ -120,14 +120,14 @@ def _build_options_presets(peak_window_ms, pre_zoom_s, post_zoom_s):
             'fit_source': 'global',                                         # 'global', 'average', 'individual' ; this controls the source of data for kinetics fitting
             'decay_progression_mode': 'linear',                               # 'fixed', 'linear', 'free_monotonic', 'none' ; this controls how decay kinetics evolve over pulses
             'anchor_final_tau': False,                                      # Whether to anchor the final event tau to the last-event estimate
-            'anchor_first_tau': True,                                      # Whether to anchor the first event tau to a fixed value
+            'anchor_first_tau': False,                                      # Whether to anchor the first event tau to a fixed value
             
             # --- Event Model ---
             'event_model': 'iglusnfr_tri',                                  # 'double_exp', 'iglusnfr', 'iglusnfr_tri', 'single_exp', 'cooperative'
             'parameter_bounds': {
                 'tau_decay_fast': (0.003, 0.008),                           # fast decay bounds (s)
                 'tau_decay_slow': (0.008, 0.035),                           # slow decay bounds (s)
-                'tau_superslow': (0.035, 0.150),                            # superslow decay bounds (s) - only for tri-exponential
+                'tau_superslow': (0.035, 0.090),                            # superslow decay bounds (s) - only for tri-exponential
                 'amplitude_ratio': (0.0, 1.0),                              # amplitude ratio bounds (0 to 1) ; 0 means all fast, 1 means all slow
             },
             'early_events_only': 0,                                         # Use only first N events for kinetics fitting (0 = all events)
@@ -173,7 +173,8 @@ def _build_options_presets(peak_window_ms, pre_zoom_s, post_zoom_s):
             # --- Bleach Correction ---
             'bleach_huber_delta': 3.0,                                      # Huber loss delta for bleach fitting (in std units); set to None to disable robust fitting
             'bleach_tau_range_factor': (0.25, 4.0),                         # Range factor for bleach tau fitting ; multiplied by initial estimate to get min and max bounds
-            'bleach_n_tau': 25,                                             # Number of tau candidates for bleach fitting
+            'bleach_n_tau': 25,     
+            'template_variant_select': 'soft',                                        # Number of tau candidates for bleach fitting
             
             # --- Plotting ---
             'plot': {
@@ -188,15 +189,15 @@ def _build_options_presets(peak_window_ms, pre_zoom_s, post_zoom_s):
                 'nnls_residual': False,                                     # Whether to show NNLS residuals on average plot
                 'nnls_n_minus_1': False,                                    # Whether to show NNLS n-1 fit on average plot
                 'plot_peaks_details': True,                                 # Show peak detection details on traces
-                'param_evolution': False,                                   # Show parameter evolution across events
+                'param_evolution': True,                                    # Show parameter evolution across events
             },
             
             # --- Template Variants ---
             'use_template_variants': True,                                  # Enable variant testing, where we try multiple tau combinations
-            'template_variant_ratios': np.linspace(0.0, 1.0, 10),           # bi-exp and tri-exp
-            'template_variant_superslow_fracs': np.linspace(0.0, 1.0, 11),  # tri-exp only
+            'template_variant_ratios': np.linspace(0.1, 0.9, 10),           # bi-exp and tri-exp
+            'template_variant_superslow_fracs': np.linspace(0.1, 0.9, 11),  # tri-exp only
             'superslow_min_ratio': 1.0,                                     # Minimum ratio between slow and superslow taus for tri-exp variants
-            'allow_tau_slow_override': False,                                # If True, allow tau_slow = tau_superslow in tri-exp models if it improves fit
+            'allow_tau_slow_override': True,                                # If True, allow tau_slow = tau_superslow in tri-exp models if it improves fit
             'force_tau_slow_override': False,                                # If True, force tau_slow = tau_superslow in tri-exp models ; unlike allow_tau_slow_override, this enforces the equality rather than just allowing it
             
             # --- Jitter Variants ---

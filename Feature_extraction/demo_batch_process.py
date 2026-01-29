@@ -397,6 +397,8 @@ def _process_one_file(task: tuple[str, str], *, show_plots: bool) -> dict:
         'row': row,
         'per_trial_rows': per_trial_rows,
         'max_pulses': len(amp_avg),
+        'trace_time_s': res.get('time_s'),
+        'trace_avg': res.get('average', {}).get('y_avg'),
     }
 
 
@@ -420,6 +422,7 @@ def run_batch():
     summary_rows = []
     per_trial_rows = []
     max_pulses_seen = 0
+    traces_by_condition = {}
 
     use_parallel = bool(PARALLEL_FILES) and len(tasks) > 1
     if use_parallel and SHOW_PLOTS:
@@ -443,6 +446,10 @@ def run_batch():
                 summary_rows.append(result['row'])
                 per_trial_rows.extend(result['per_trial_rows'])
                 max_pulses_seen = max(max_pulses_seen, result['max_pulses'])
+                t_vec = result.get('trace_time_s')
+                y_avg = result.get('trace_avg')
+                if t_vec is not None and y_avg is not None:
+                    traces_by_condition.setdefault(result['row']['condition'], {})[result['row']['ID']] = (t_vec, y_avg)
     else:
         for task in tasks:
             result = _process_one_file(task, show_plots=SHOW_PLOTS)
@@ -452,6 +459,10 @@ def run_batch():
             summary_rows.append(result['row'])
             per_trial_rows.extend(result['per_trial_rows'])
             max_pulses_seen = max(max_pulses_seen, result['max_pulses'])
+            t_vec = result.get('trace_time_s')
+            y_avg = result.get('trace_avg')
+            if t_vec is not None and y_avg is not None:
+                traces_by_condition.setdefault(result['row']['condition'], {})[result['row']['ID']] = (t_vec, y_avg)
 
     # =============================================================================
     #                              SUMMARY OUTPUT
@@ -484,6 +495,26 @@ def run_batch():
         print(f"[export] Saved summary workbook to: {xl_out}")
         if per_trial_rows:
             print(f"[export] Saved per-trial file to: {os.path.splitext(xl_out)[0] + '_trials.xlsx'}")
+        if traces_by_condition:
+            out_stem = os.path.join(OUT_DIR, "summary")
+            traces_file = f"{out_stem}_traces.xlsx"
+            times_file = f"{out_stem}_times.xlsx"
+            with pd.ExcelWriter(traces_file) as trace_writer, pd.ExcelWriter(times_file) as time_writer:
+                wrote_any = False
+                for condition, id_traces in sorted(traces_by_condition.items()):
+                    if not id_traces:
+                        continue
+                    trace_dict = {}
+                    time_dict = {}
+                    for bid, (t_vec, y_avg) in sorted(id_traces.items()):
+                        trace_dict[bid] = pd.Series(np.asarray(y_avg, float))
+                        time_dict[bid] = pd.Series(np.asarray(t_vec, float))
+                    pd.DataFrame(trace_dict).to_excel(trace_writer, sheet_name=_safe_sheet_name(condition), index=False)
+                    pd.DataFrame(time_dict).to_excel(time_writer, sheet_name=_safe_sheet_name(condition), index=False)
+                    wrote_any = True
+                if wrote_any:
+                    print(f"[export] Saved summary traces to: {traces_file}")
+                    print(f"[export] Saved summary times to: {times_file}")
     else:
         print("[export] No files processed; no summary written.")
 
