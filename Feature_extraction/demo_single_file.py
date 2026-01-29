@@ -5,7 +5,7 @@ Quick reference for options (see Model_Calibration/event_models.py for details):
   - event_model: 'double_exp', 'iglusnfr', 'single_exp', 'cooperative', etc.
   - decay_progression_mode: 'fixed', 'linear', 'free_monotonic', 'none'
   - fit_source: 'global', 'average', 'individual'
-  - nnls_weight_mode: 'uniform', 'linear', 'exponential', 'savgol'
+  - nnls_weight_mode: 'uniform', 'linear', 'exponential', 'savgol', 'peak'
 """
 
 import os, sys, numpy as np, pandas as pd
@@ -47,8 +47,8 @@ OUT_DIR = os.path.join(DATA_ROOT, "Testout")
 # If CONDITION is empty/None, the script will search all folders for TARGET_FILE
 CONDITION = ""  # Leave empty to auto-detect from file location
 TARGET_FILE = "20191017_linescan3_50Hz_10pulses_2.5mMCa_bouton2_traces_converted.xlsx"
-TARGET_FILE = "20210722_linescan3_50Hz_10pulses_1.5mMCa_bouton12_traces_converted.xlsx"
-
+#TARGET_FILE = "20210722_linescan3_50Hz_10pulses_1.5mMCa_bouton12_traces_converted.xlsx"
+TARGET_FILE = "20210721_linescan1_50Hz_10pulses_4mMCa_bouton1_traces_converted.xlsx"
 # --- Select analysis preset ---
 PRESET_NAME = 'iglusnfr_optimized'  # Options: 'iglusnfr_optimized', 'double_exp', 'single_exp_fixed_8ms'
 
@@ -146,12 +146,15 @@ def _build_options_presets(peak_window_ms, pre_zoom_s, post_zoom_s):
             'amplitude_floor_to_noise': True,                               # Floor amplitudes to noise level before computing PPR; defined as 1*std of baseline
             
             # --- NNLS Fitting ---
-            'nnls_weight_mode': 'savgol',                                   # 'uniform', 'linear', 'exponential', 'savgol' ; weighting scheme for NNLS fitting
+            'nnls_weight_mode': 'peak',                                   # 'uniform', 'linear', 'exponential', 'savgol', 'peak' ; weighting scheme for NNLS fitting
             'nnls_weight_tau_s': None,                                      # Time constant for exponential weighting (s) ; only used if nnls_weight_mode is 'exponential'
+            'nnls_peak_window_s': 0.010,                                    # Peak-emphasis window after each stimulus (s)
+            'nnls_peak_weight': 3.0,                                        # Weight multiplier inside the peak window
             'fit_diagnostic_plot': False,                                   # Whether to generate fit diagnostic plots
             'huber_delta': 2.5,                                             # Huber loss delta for robust fitting (in std units); set to None to disable robust fitting
             'irls_iters': 20,                                               # Number of IRLS iterations for robust fitting ; only used if huber_delta is set
-            
+            'nnls_last_event_tail_tau_s': 'auto',                           # Last event tail downweight tau (s); None=off, 'auto'=ISI, or float; reduces overshoot
+
             # --- Time Windows (ISI-aware) ---
             'pre_zoom_s': pre_zoom_s,                                       # Pre-event snippet duration (s); controls how much data before each event is shown ; does not affect fitting
             'post_zoom_s': post_zoom_s,                                     # Post-event snippet duration (s); controls how much data after each event is shown ; does not affect fitting

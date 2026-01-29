@@ -131,8 +131,12 @@ DEFAULTS = {
     'anchor_first_tau': False,  # If True, anchor first event's tau as minimum (fastest decay)
     'anchor_final_tau': True,  # If True, anchor last event's tau as maximum (most reliable, no following events)
     # NNLS weight control
-    'nnls_weight_mode': 'uniform',  # 'uniform', 'linear', 'exponential', 'savgol'
+    'nnls_weight_mode': 'uniform',  # 'uniform', 'linear', 'exponential', 'savgol', 'peak'
     'nnls_weight_tau_s': None,  # Time constant for exponential or slope for linear (auto if None)
+    'nnls_peak_window_s': 0.010,  # Peak-emphasis window length after each stimulus (seconds)
+    'nnls_peak_weight': 3.0,  # Weight multiplier inside the peak window
+    # Last-event tail downweighting to prevent overshoot (asymmetric noise handling)
+    'nnls_last_event_tail_tau_s': None,  # Exponential downweight tau for last event tail (None=disabled, 'auto'=isi, or float)
     'fit_diagnostic_plot': False,  # Display weight and decay progression diagnostics
     # Template variants for residual-guided fitting (experimental)
     'use_template_variants': False,  # Enable multi-template NNLS (single pass, data-driven slow component)
@@ -587,6 +591,8 @@ def _calculate_nnls_weights(
     weight_mode: str = 'uniform',
     weight_tau_s: Optional[float] = None,
     y_ref: Optional[np.ndarray] = None,
+    peak_window_s: Optional[float] = None,
+    peak_weight: Optional[float] = None,
 ) -> np.ndarray:
     """
     Calculate weights for NNLS fitting based on weight_mode.
@@ -595,10 +601,12 @@ def _calculate_nnls_weights(
         t: Time array
         stim_times: Stimulus times array  
         isi: Inter-stimulus interval in seconds
-        weight_mode: 'uniform', 'linear', 'exponential', or 'savgol'
+        weight_mode: 'uniform', 'linear', 'exponential', 'savgol', or 'peak'
         weight_tau_s: Time constant for exponential decay or linear slope (in seconds)
         y_ref: Optional reference trace used for Savitzky-Golay weights (must
             match ``t`` in shape when ``weight_mode`` is ``'savgol'``)
+        peak_window_s: Post-stimulus window length for peak emphasis (seconds)
+        peak_weight: Weight multiplier inside the peak window
         
     Returns:
         weights: Array same length as t with weights for each timepoint
@@ -664,9 +672,94 @@ def _calculate_nnls_weights(
         norm = ref / max_ref
         weights = 0.1 + 0.9 * norm
         return weights
+    
+    elif weight_mode == 'peak':
+        window_s = 0.010 if peak_window_s is None else float(peak_window_s)
+        if not np.isfinite(window_s) or window_s <= 0:
+            window_s = 0.010
+        mult = 3.0 if peak_weight is None else float(peak_weight)
+        if not np.isfinite(mult) or mult <= 1.0:
+            mult = 1.0
+        for stim_t in stim_times:
+            mask = (t >= stim_t) & (t < (stim_t + window_s))
+            if np.any(mask):
+                weights[mask] = np.maximum(weights[mask], mult)
+        return weights
 
     else:
         raise ValueError(f"Unknown weight_mode: {weight_mode}")
+
+    return weights
+
+
+def _apply_last_event_tail_weights(
+    weights: np.ndarray,
+    t: np.ndarray,
+    stim_times: np.ndarray,
+    isi: float,
+    tail_tau_s: Optional[float],
+    peak_window_s: float = 0.010,
+) -> np.ndarray:
+    """Apply exponential downweighting to the last event's decay tail.
+
+    This prevents NNLS from overshooting the last event amplitude by reducing
+    the influence of the long post-event tail, where noise can bias the fit.
+
+    Args:
+        weights: Existing weight array (will be modified)
+        t: Time array
+        stim_times: Stimulus times
+        isi: Inter-stimulus interval
+        tail_tau_s: Exponential time constant for tail decay (None=disabled,
+            'auto' or float). If float, weights decay as exp(-t_rel/tau).
+        peak_window_s: Keep full weight for this duration after last stim
+
+    Returns:
+        Modified weights array
+    """
+    if tail_tau_s is None or len(stim_times) == 0:
+        return weights
+
+    # Handle 'auto' mode - use ISI as base, but make it aggressive enough to matter
+    if isinstance(tail_tau_s, str):
+        if tail_tau_s.lower() == 'auto':
+            # Use ISI as tau, but ensure it's short enough to have an effect
+            # For 50Hz (ISI=0.02s), this gives tau=0.02s which decays quickly
+            tail_tau_s = isi
+        else:
+            try:
+                tail_tau_s = float(tail_tau_s)
+            except ValueError:
+                return weights
+
+    tail_tau_s = float(tail_tau_s)
+    if not np.isfinite(tail_tau_s) or tail_tau_s <= 0:
+        return weights
+
+    last_stim = float(stim_times[-1])
+    # Start downweighting after peak window
+    tail_start = last_stim + peak_window_s
+
+    # Apply exponential decay to tail region
+    tail_mask = t >= tail_start
+    n_affected = np.sum(tail_mask)
+    if n_affected > 0:
+        t_rel = t[tail_mask] - tail_start
+        decay_factor = np.exp(-t_rel / tail_tau_s)
+        # Beyond 3*tau, set weight to near-zero (effectively exclude from fit)
+        # This prevents the long tail from biasing the amplitude
+        decay_factor = np.where(t_rel > 3 * tail_tau_s, 0.001, decay_factor)
+        decay_factor = np.maximum(decay_factor, 0.001)
+        weights[tail_mask] *= decay_factor
+        
+        # Log effect
+        try:
+            from smoothing import progress_print
+            n_excluded = np.sum(t_rel > 3 * tail_tau_s)
+            min_w = float(np.min(weights[tail_mask]))
+            progress_print(f"[tail-weight] τ={tail_tau_s*1000:.1f}ms | {n_affected} tail pts | {n_excluded} excluded (w<0.01)")
+        except Exception:
+            pass
 
     return weights
 
@@ -792,6 +885,9 @@ def fit_amplitudes_with_template_variants(
     isi: float,
     event_t0_s: float = 0.0,
     jitter_variant_ms: Optional[np.ndarray] = None,
+    peak_window_s: Optional[float] = None,
+    peak_weight: Optional[float] = None,
+    last_event_tail_tau_s: Optional[float] = None,
     residual_reweight_iters: int = 5,
     residual_reweight_tau: float = 2.0,
     hard_select: bool = False,
@@ -846,8 +942,21 @@ def fit_amplitudes_with_template_variants(
     kinetics_adjusted = False
     # Compute base weights once
     base_weights = _calculate_nnls_weights(
-        t, stim_times, isi, weight_mode, weight_tau_s, y_ref=y
+        t,
+        stim_times,
+        isi,
+        weight_mode,
+        weight_tau_s,
+        y_ref=y,
+        peak_window_s=peak_window_s,
+        peak_weight=peak_weight,
     )
+    # Compute tail-weighted version for final amplitude refinement (not for variant selection)
+    pw_s = peak_window_s if peak_window_s is not None else 0.010
+    tail_weighted = _apply_last_event_tail_weights(
+        base_weights.copy(), t, stim_times, isi, last_event_tail_tau_s, pw_s
+    )
+    use_tail_weighting = last_event_tail_tau_s is not None
 
     # === Main iterative loop with residual-driven refinement ===
     for iteration in range(max(1, residual_reweight_iters)):
@@ -868,9 +977,13 @@ def fit_amplitudes_with_template_variants(
 
         X = np.column_stack(kernel_columns) if kernel_columns else np.zeros((t.size, 0))
 
-        # Initialize weights
+        # Use base weights for variant selection (all iterations except last)
+        # Use tail-weighted for final amplitude (last iteration only)
+        is_last_iter = (iteration == residual_reweight_iters - 1)
         if iteration == 0:
             weights = base_weights.copy()
+        elif is_last_iter and use_tail_weighting:
+            weights = tail_weighted.copy()
         
         # NNLS solve
         a_variants = _nnls_weighted(X, y, weights)
@@ -974,6 +1087,13 @@ def fit_amplitudes_with_template_variants(
                     residual_weight = 1.0 / (1.0 + (combined_penalty / residual_reweight_tau) ** 2)
                     weights = base_weights * residual_weight
                     weights = np.maximum(weights, 0.01 * np.max(base_weights))
+
+    # === Final pass with tail weighting for amplitude refinement ===
+    # Now that we have selected the best variants, re-fit with tail-weighted
+    # This prevents last-event overshoot without affecting variant selection
+    if use_tail_weighting:
+        a_variants = _nnls_weighted(X, y, tail_weighted)
+        yhat_iter = X @ a_variants
 
     weights_final = weights
 
@@ -1522,6 +1642,9 @@ def estimate_kinetics_from_average(
     weight_tau_s: Optional[float] = None,
     sg_window: int = DEFAULTS['sg_window'],
     sg_poly: int = DEFAULTS['sg_poly'],
+    peak_window_s: Optional[float] = None,
+    peak_weight: Optional[float] = None,
+    last_event_tail_tau_s: Optional[float] = None,
     event_t0_s: float = 0.0,
 ) -> Tuple[float, float, float, np.ndarray]:
     """Grid search τr, τd0, slope on the average trace (zoomed window)."""
@@ -1544,6 +1667,13 @@ def estimate_kinetics_from_average(
         weight_mode,
         weight_tau_s,
         y_ref=y_weight_ref,
+        peak_window_s=peak_window_s,
+        peak_weight=peak_weight,
+    )
+    # Apply last-event tail downweighting
+    pw_s = peak_window_s if peak_window_s is not None else 0.010
+    weights = _apply_last_event_tail_weights(
+        weights, t, stim_times, isi_guess, last_event_tail_tau_s, pw_s
     )
 
     def obj_for(tau_r, tau_d_vec):
@@ -2303,6 +2433,13 @@ def extract_metrics(
             weight_tau_s = 0.010  # Default 10ms for other modes
     elif weight_mode == 'savgol':
         weight_tau_s = None
+
+    peak_window_s = cfg.get('nnls_peak_window_s', 0.010)
+    if peak_window_s is not None:
+        peak_window_s = float(peak_window_s)
+    peak_weight = cfg.get('nnls_peak_weight', 3.0)
+    if peak_weight is not None:
+        peak_weight = float(peak_weight)
 
     # Average trace and kinetics
     y_avg = np.nanmean(Yd, axis=1)
@@ -3381,7 +3518,10 @@ def extract_metrics(
                     taur_grid_ms=cfg['kin_taur_grid_ms'], taud0_grid_ms=cfg['kin_taud0_grid_ms'],
                     slope_grid_ms=cfg['kin_slope_grid_ms'], pre_zoom_s=cfg['pre_zoom_s'], post_zoom_s=cfg['post_zoom_s'],
                     isi=isi, weight_mode=weight_mode, weight_tau_s=weight_tau_s,
-                    sg_window=cfg['sg_window'], sg_poly=cfg['sg_poly'], event_t0_s=event_t0_s,
+                    sg_window=cfg['sg_window'], sg_poly=cfg['sg_poly'],
+                    peak_window_s=peak_window_s, peak_weight=peak_weight,
+                    last_event_tail_tau_s=cfg.get('nnls_last_event_tail_tau_s'),
+                    event_t0_s=event_t0_s,
                 )
                 tau_rs.append(trj)
                 tau_d_mat.append(tdvecj)
@@ -3412,7 +3552,10 @@ def extract_metrics(
                 taur_grid_ms=cfg['kin_taur_grid_ms'], taud0_grid_ms=cfg['kin_taud0_grid_ms'],
                 slope_grid_ms=cfg['kin_slope_grid_ms'], pre_zoom_s=cfg['pre_zoom_s'], post_zoom_s=cfg['post_zoom_s'],
                 isi=isi, weight_mode=weight_mode, weight_tau_s=weight_tau_s,
-                sg_window=cfg['sg_window'], sg_poly=cfg['sg_poly'], event_t0_s=event_t0_s,
+                sg_window=cfg['sg_window'], sg_poly=cfg['sg_poly'],
+                peak_window_s=peak_window_s, peak_weight=peak_weight,
+                last_event_tail_tau_s=cfg.get('nnls_last_event_tail_tau_s'),
+                event_t0_s=event_t0_s,
             )
             tau_d_vec_raw = np.asarray(tau_d_vec0, float)
         elif dec_mode in ('linear', 'free_monotonic'):
@@ -3422,7 +3565,10 @@ def extract_metrics(
                 taur_grid_ms=cfg['kin_taur_grid_ms'], taud0_grid_ms=cfg['kin_taud0_grid_ms'],
                 slope_grid_ms=cfg['kin_slope_grid_ms'], pre_zoom_s=cfg['pre_zoom_s'], post_zoom_s=cfg['post_zoom_s'],
                 isi=isi, weight_mode=weight_mode, weight_tau_s=weight_tau_s,
-                sg_window=cfg['sg_window'], sg_poly=cfg['sg_poly'], event_t0_s=event_t0_s,
+                sg_window=cfg['sg_window'], sg_poly=cfg['sg_poly'],
+                peak_window_s=peak_window_s, peak_weight=peak_weight,
+                last_event_tail_tau_s=cfg.get('nnls_last_event_tail_tau_s'),
+                event_t0_s=event_t0_s,
             )
             # Now fit each individual event on the average trace
             tau_per_evt, amp_per_evt, param_map = _fit_all_events_on_average(tau_r, tau_d0)
@@ -3437,7 +3583,10 @@ def extract_metrics(
                 taur_grid_ms=cfg['kin_taur_grid_ms'], taud0_grid_ms=cfg['kin_taud0_grid_ms'],
                 slope_grid_ms=cfg['kin_slope_grid_ms'], pre_zoom_s=cfg['pre_zoom_s'], post_zoom_s=cfg['post_zoom_s'],
                 isi=isi, weight_mode=weight_mode, weight_tau_s=weight_tau_s,
-                sg_window=cfg['sg_window'], sg_poly=cfg['sg_poly'], event_t0_s=event_t0_s,
+                sg_window=cfg['sg_window'], sg_poly=cfg['sg_poly'],
+                peak_window_s=peak_window_s, peak_weight=peak_weight,
+                last_event_tail_tau_s=cfg.get('nnls_last_event_tail_tau_s'),
+                event_t0_s=event_t0_s,
             )
             tau_d_vec_raw = np.asarray(tau_d_vec0, float)
 
@@ -4052,7 +4201,22 @@ def extract_metrics(
                 test_ratios = [0.0, 0.3, 0.5, 0.7, 1.0]
                 best_ratio = 0.5
                 best_error = float('inf')
-                weights_test = _calculate_nnls_weights(t, stim_times, isi, weight_mode, weight_tau_s, y_ref=y_avg)
+                weights_test = _calculate_nnls_weights(
+                    t,
+                    stim_times,
+                    isi,
+                    weight_mode,
+                    weight_tau_s,
+                    y_ref=y_avg,
+                    peak_window_s=peak_window_s,
+                    peak_weight=peak_weight,
+                )
+                # Apply last-event tail downweighting
+                last_event_tail_tau_s = cfg.get('nnls_last_event_tail_tau_s')
+                pw_s = peak_window_s if peak_window_s is not None else 0.010
+                weights_test = _apply_last_event_tail_weights(
+                    weights_test, t, stim_times, isi, last_event_tail_tau_s, pw_s
+                )
                 for ratio in test_ratios:
                     kernel_cols = []
                     for i_event, st in enumerate(stim_times):
@@ -4092,6 +4256,9 @@ def extract_metrics(
             isi=isi,
             event_t0_s=event_t0_s,
             jitter_variant_ms=jitter_variant_ms,
+            peak_window_s=peak_window_s,
+            peak_weight=peak_weight,
+            last_event_tail_tau_s=cfg.get('nnls_last_event_tail_tau_s'),
             hard_select=hard_select,
         )
         # Log selected variant summary for tri-exp (shows if bi-exp or tri-exp was preferred)
@@ -4260,7 +4427,22 @@ def extract_metrics(
             X_p2 = np.column_stack(kernel_columns) if kernel_columns else np.zeros((t.size, 0))
             
             # Compute weights
-            weights_p2 = _calculate_nnls_weights(t, stim_times, isi, weight_mode, weight_tau_s, y_ref=y_avg)
+            weights_p2 = _calculate_nnls_weights(
+                t,
+                stim_times,
+                isi,
+                weight_mode,
+                weight_tau_s,
+                y_ref=y_avg,
+                peak_window_s=peak_window_s,
+                peak_weight=peak_weight,
+            )
+            # Apply last-event tail downweighting
+            last_event_tail_tau_s = cfg.get('nnls_last_event_tail_tau_s')
+            pw_s = peak_window_s if peak_window_s is not None else 0.010
+            weights_p2 = _apply_last_event_tail_weights(
+                weights_p2, t, stim_times, isi, last_event_tail_tau_s, pw_s
+            )
             
             # NNLS solve
             a_p2 = _nnls_weighted(X_p2, y_avg, weights_p2)
@@ -4741,47 +4923,34 @@ def extract_metrics(
             global _LAST_EVENT_DECAY_FIT
             if _LAST_EVENT_DECAY_FIT is not None:
                 le_fit = _LAST_EVENT_DECAY_FIT
-                t_start = le_fit['t_start']
-                t_end = le_fit['t_end']
-                baseline = le_fit['baseline']
-                a_fast = le_fit.get('a_fast', 0.0)
-                tau_fast = le_fit.get('tau_fast', np.nan)
-                a_slow = le_fit.get('a_slow', 0.0)
                 tau_slow = le_fit.get('tau_slow', np.nan)
-                t_fit = np.linspace(t_start, t_end, 100)
-                # Anchor the decay to the actual trace at the fit start
-                y_fit = np.full_like(t_fit, 0.0, dtype=float)
-                t_anchor = t_start
-                try:
+                
+                if np.isfinite(tau_slow) and tau_slow > 0:
+                    # Anchor at the last stimulus time
                     last_st = float(stim_times[-1])
-                    if t_anchor < last_st - 0.25 * float(isi):
-                        t_anchor = last_st
-                        t_fit = t_anchor + (t_fit - t_start)
-                except Exception:
-                    t_anchor = t_start
-                try:
-                    y_at_start = float(np.interp(t_anchor, t, y_avg))
-                except Exception:
-                    y_at_start = baseline
-                if np.isfinite(tau_fast) and a_fast > 0:
-                    y_fit += a_fast * np.exp(-(t_fit - t_start) / max(tau_fast, 1e-6))
-                if np.isfinite(tau_slow) and a_slow > 0:
-                    y_fit += a_slow * np.exp(-(t_fit - t_start) / max(tau_slow, 1e-6))
-                # Shift so the fit starts on the trace
-                try:
-                    y0_fit = float(y_fit[0])
-                    y_fit = y_fit + (y_at_start - y0_fit)
-                except Exception:
-                    pass
-                ax.plot(
-                    t_fit,
-                    y_fit,
-                    color='tab:orange',
-                    ls='--',
-                    lw=2.0,
-                    alpha=0.85,
-                    label=f'last-event fit (τ={tau_slow*1000:.1f}ms)',
-                )
+                    # Find the peak value near the last stimulus
+                    peak_mask = (t >= last_st) & (t <= last_st + 0.015)
+                    if np.any(peak_mask):
+                        y_at_peak = float(np.max(y_avg[peak_mask]))
+                        t_at_peak = float(t[peak_mask][np.argmax(y_avg[peak_mask])])
+                    else:
+                        y_at_peak = float(np.interp(last_st, t, y_avg))
+                        t_at_peak = last_st
+                    
+                    # Draw decay from peak to end of plot
+                    t_end = min(z1, t_at_peak + 0.300)  # Show 300ms of decay
+                    t_fit = np.linspace(t_at_peak, t_end, 100)
+                    y_fit = y_at_peak * np.exp(-(t_fit - t_at_peak) / tau_slow)
+                    
+                    ax.plot(
+                        t_fit,
+                        y_fit,
+                        color='tab:orange',
+                        ls='--',
+                        lw=2.0,
+                        alpha=0.85,
+                        label=f'last-event fit (τ={tau_slow*1000:.1f}ms)',
+                    )
         except Exception:
             pass
             
@@ -4810,35 +4979,56 @@ def extract_metrics(
                     # Inset histogram of residuals in the zoom window with fixed bins and Gaussian fit
                     try:
                         ax_in = axR.inset_axes([0.70, 0.55, 0.28, 0.4])
-                        rv = np.asarray(resid_avg[zmask], float)
-                        rv = rv[np.isfinite(rv)]
-                        if rv.size:
+                        rv_train = np.asarray(resid_avg[zmask], float)
+                        rv_train = rv_train[np.isfinite(rv_train)]
+                        rv_base = None
+                        try:
+                            rv_base = np.asarray(resid_avg[baseline_mask], float)
+                            rv_base = rv_base[np.isfinite(rv_base)]
+                        except Exception:
+                            rv_base = None
+                        if rv_train.size:
                             bin_w = (0.01 if use_dff else 10.0)
-                            lo = float(np.nanmin(rv))
-                            hi = float(np.nanmax(rv))
+                            lo = float(np.nanmin(rv_train))
+                            hi = float(np.nanmax(rv_train))
                             if not np.isfinite(lo):
                                 lo = 0.0
                             if not np.isfinite(hi) or hi <= lo:
                                 hi = lo + bin_w
                             edges = np.arange(lo, hi + bin_w, bin_w)
-                            ax_in.hist(rv, bins=edges, color='#d8c7e8', edgecolor='#6b4fa3')
-                            # Gaussian fit overlay across full inset range
-                            try:
-                                mu = float(np.nanmean(rv))
-                                sigma = float(np.nanstd(rv))
-                            except Exception:
-                                mu, sigma = float('nan'), float('nan')
-                            if np.isfinite(sigma) and sigma > 0:
-                                x0, x1 = ax_in.get_xlim()
-                                x = np.linspace(x0, x1, 400)
-                                pdf = (1.0 / (np.sqrt(2.0 * np.pi) * sigma)) * np.exp(-0.5 * ((x - mu) / sigma) ** 2)
-                                N = rv.size
-                                y = N * bin_w * pdf
-                                ax_in.plot(x, y, color='#26457a', linewidth=1.4, label='fit')
-                                # Zero-centered Gaussian for comparison (same sigma)
-                                pdf0 = (1.0 / (np.sqrt(2.0 * np.pi) * sigma)) * np.exp(-0.5 * (x / sigma) ** 2)
-                                y0 = N * bin_w * pdf0
-                                ax_in.plot(x, y0, color='tab:red', linewidth=1.2, alpha=0.9)
+                            counts, edges = np.histogram(rv_train, bins=edges)
+                            widths = np.diff(edges)
+                            ax_in.bar(edges[:-1], counts, width=widths, align='edge',
+                                      color='#6b4fa3', alpha=0.9, edgecolor='none')
+                            # Baseline-only Gaussian fit, scaled to train residual count
+                            if rv_base is not None and rv_base.size:
+                                try:
+                                    mu = float(np.nanmean(rv_base))
+                                    sigma = float(np.nanstd(rv_base))
+                                except Exception:
+                                    mu, sigma = float('nan'), float('nan')
+                                if np.isfinite(sigma) and sigma > 0:
+                                    centers = edges[:-1] + 0.5 * widths
+                                    pdf_centers = (1.0 / (np.sqrt(2.0 * np.pi) * sigma)) * np.exp(
+                                        -0.5 * ((centers - mu) / sigma) ** 2
+                                    )
+                                    N = rv_train.size
+                                    expected = N * bin_w * pdf_centers
+                                    peak_expected = float(np.nanmax(expected)) if expected.size else 0.0
+                                    cutoff = max(0.5, 0.01 * peak_expected)
+                                    base = np.where(expected >= cutoff,
+                                                    np.minimum(counts.astype(float), expected),
+                                                    0.0)
+                                    excess = counts.astype(float) - base
+                                    if np.any(excess > 0):
+                                        ax_in.bar(edges[:-1], excess, width=widths, align='edge',
+                                                  bottom=base, color='tab:red', alpha=0.85, edgecolor='none')
+                                    x = np.linspace(edges[0], edges[-1], 400)
+                                    pdf = (1.0 / (np.sqrt(2.0 * np.pi) * sigma)) * np.exp(
+                                        -0.5 * ((x - mu) / sigma) ** 2
+                                    )
+                                    y = N * bin_w * pdf
+                                    ax_in.plot(x, y, color='#26457a', linewidth=1.4, label='baseline fit')
                         ax_in.set_title('residual', fontsize=8)
                         ax_in.tick_params(labelsize=7)
                     except Exception:
@@ -4856,35 +5046,56 @@ def extract_metrics(
                     try:
                         # Smaller inset at bottom-left [left, bottom, width, height]
                         ax_in = ax.inset_axes([0.02, 0.02, 0.18, 0.22])
-                        rv = np.asarray(resid_avg[zmask], float)
-                        rv = rv[np.isfinite(rv)]
-                        if rv.size:
+                        rv_train = np.asarray(resid_avg[zmask], float)
+                        rv_train = rv_train[np.isfinite(rv_train)]
+                        rv_base = None
+                        try:
+                            rv_base = np.asarray(resid_avg[baseline_mask], float)
+                            rv_base = rv_base[np.isfinite(rv_base)]
+                        except Exception:
+                            rv_base = None
+                        if rv_train.size:
                             bin_w = (0.01 if use_dff else 10.0)
-                            lo = float(np.nanmin(rv))
-                            hi = float(np.nanmax(rv))
+                            lo = float(np.nanmin(rv_train))
+                            hi = float(np.nanmax(rv_train))
                             if not np.isfinite(lo):
                                 lo = 0.0
                             if not np.isfinite(hi) or hi <= lo:
                                 hi = lo + bin_w
                             edges = np.arange(lo, hi + bin_w, bin_w)
-                            ax_in.hist(rv, bins=edges, color='#d8c7e8', edgecolor='#6b4fa3')
-                            # Gaussian fit overlay
-                            try:
-                                mu = float(np.nanmean(rv))
-                                sigma = float(np.nanstd(rv))
-                            except Exception:
-                                mu, sigma = float('nan'), float('nan')
-                            if np.isfinite(sigma) and sigma > 0:
-                                x0, x1 = ax_in.get_xlim()
-                                x = np.linspace(x0, x1, 400)
-                                pdf = (1.0 / (np.sqrt(2.0 * np.pi) * sigma)) * np.exp(-0.5 * ((x - mu) / sigma) ** 2)
-                                N = rv.size
-                                y = N * bin_w * pdf
-                                ax_in.plot(x, y, color='#26457a', linewidth=1.4)
-                                # Zero-centered Gaussian for comparison (same sigma)
-                                pdf0 = (1.0 / (np.sqrt(2.0 * np.pi) * sigma)) * np.exp(-0.5 * (x / sigma) ** 2)
-                                y0 = N * bin_w * pdf0
-                                ax_in.plot(x, y0, color='tab:red', linewidth=1.2, alpha=0.9)
+                            counts, edges = np.histogram(rv_train, bins=edges)
+                            widths = np.diff(edges)
+                            ax_in.bar(edges[:-1], counts, width=widths, align='edge',
+                                      color='#6b4fa3', alpha=0.9, edgecolor='none')
+                            # Baseline-only Gaussian fit, scaled to train residual count
+                            if rv_base is not None and rv_base.size:
+                                try:
+                                    mu = float(np.nanmean(rv_base))
+                                    sigma = float(np.nanstd(rv_base))
+                                except Exception:
+                                    mu, sigma = float('nan'), float('nan')
+                                if np.isfinite(sigma) and sigma > 0:
+                                    centers = edges[:-1] + 0.5 * widths
+                                    pdf_centers = (1.0 / (np.sqrt(2.0 * np.pi) * sigma)) * np.exp(
+                                        -0.5 * ((centers - mu) / sigma) ** 2
+                                    )
+                                    N = rv_train.size
+                                    expected = N * bin_w * pdf_centers
+                                    peak_expected = float(np.nanmax(expected)) if expected.size else 0.0
+                                    cutoff = max(0.5, 0.01 * peak_expected)
+                                    base = np.where(expected >= cutoff,
+                                                    np.minimum(counts.astype(float), expected),
+                                                    0.0)
+                                    excess = counts.astype(float) - base
+                                    if np.any(excess > 0):
+                                        ax_in.bar(edges[:-1], excess, width=widths, align='edge',
+                                                  bottom=base, color='tab:red', alpha=0.85, edgecolor='none')
+                                    x = np.linspace(edges[0], edges[-1], 400)
+                                    pdf = (1.0 / (np.sqrt(2.0 * np.pi) * sigma)) * np.exp(
+                                        -0.5 * ((x - mu) / sigma) ** 2
+                                    )
+                                    y = N * bin_w * pdf
+                                    ax_in.plot(x, y, color='#26457a', linewidth=1.4)
                         ax_in.set_title('residuals', fontsize=7)
                         ax_in.tick_params(labelsize=6)
                         # Remove top and right spines
@@ -4945,6 +5156,14 @@ def extract_metrics(
                     weight_mode,
                     weight_tau_s,
                     y_ref=y_vis,
+                    peak_window_s=peak_window_s,
+                    peak_weight=peak_weight,
+                )
+                # Apply last-event tail downweighting for visualization
+                last_event_tail_tau_s = cfg.get('nnls_last_event_tail_tau_s')
+                pw_s = peak_window_s if peak_window_s is not None else 0.010
+                weights = _apply_last_event_tail_weights(
+                    weights, t, stim_times, isi, last_event_tail_tau_s, pw_s
                 )
                 ax_w.plot(t, weights, color='#1f77b4', linewidth=2.0, label=f'{weight_mode} weight')
                 for i, st in enumerate(stim_times):
@@ -5253,6 +5472,7 @@ def extract_metrics(
                 t, float(train_start), float(isi), int(n_pulses), cfg['pre_zoom_s'], cfg['post_zoom_s']
             )
             tz = t[zmask_t]
+            base_mask = (t < float(train_start))
 
             # Layout: main train panel on top; optional residuals directly
             # underneath; optional baseline at the bottom. Residuals share the
@@ -5379,6 +5599,12 @@ def extract_metrics(
                         ax_in_r = ax_resid.inset_axes([0.65, 0.55, 0.33, 0.4])
                         rdata = np.asarray(resid_t[zmask_t], float)
                         rdata = rdata[np.isfinite(rdata)]
+                        rbase = None
+                        try:
+                            rbase = np.asarray(resid_t[base_mask], float)
+                            rbase = rbase[np.isfinite(rbase)]
+                        except Exception:
+                            rbase = None
                         if rdata.size:
                             bin_w = (0.01 if use_dff else 10.0)
                             lo = float(np.nanmin(rdata))
@@ -5388,24 +5614,39 @@ def extract_metrics(
                             if not np.isfinite(hi) or hi <= lo:
                                 hi = lo + bin_w
                             edges = np.arange(lo, hi + bin_w, bin_w)
-                            ax_in_r.hist(rdata, bins=edges, color='#d8c7e8', edgecolor='#6b4fa3')
-                            # Fit Gaussian to residuals and overlay across full inset range
-                            try:
-                                mu = float(np.nanmean(rdata))
-                                sigma = float(np.nanstd(rdata))
-                            except Exception:
-                                mu, sigma = float('nan'), float('nan')
-                            if np.isfinite(sigma) and sigma > 0:
-                                x0, x1 = ax_in_r.get_xlim()
-                                x = np.linspace(x0, x1, 400)
-                                pdf = (1.0 / (np.sqrt(2.0 * np.pi) * sigma)) * np.exp(-0.5 * ((x - mu) / sigma) ** 2)
-                                N = rdata.size
-                                y = N * bin_w * pdf
-                                ax_in_r.plot(x, y, color='#26457a', linewidth=1.4, label='fit')
-                                # Zero-centered Gaussian for comparison (same sigma)
-                                pdf0 = (1.0 / (np.sqrt(2.0 * np.pi) * sigma)) * np.exp(-0.5 * (x / sigma) ** 2)
-                                y0 = N * bin_w * pdf0
-                                ax_in_r.plot(x, y0, color='tab:red', linewidth=1.2, alpha=0.9)
+                            counts, edges = np.histogram(rdata, bins=edges)
+                            widths = np.diff(edges)
+                            ax_in_r.bar(edges[:-1], counts, width=widths, align='edge',
+                                        color='#6b4fa3', alpha=0.9, edgecolor='none')
+                            # Baseline-only Gaussian fit, scaled to train residual count
+                            if rbase is not None and rbase.size:
+                                try:
+                                    mu = float(np.nanmean(rbase))
+                                    sigma = float(np.nanstd(rbase))
+                                except Exception:
+                                    mu, sigma = float('nan'), float('nan')
+                                if np.isfinite(sigma) and sigma > 0:
+                                    centers = edges[:-1] + 0.5 * widths
+                                    pdf_centers = (1.0 / (np.sqrt(2.0 * np.pi) * sigma)) * np.exp(
+                                        -0.5 * ((centers - mu) / sigma) ** 2
+                                    )
+                                    N = rdata.size
+                                    expected = N * bin_w * pdf_centers
+                                    peak_expected = float(np.nanmax(expected)) if expected.size else 0.0
+                                    cutoff = max(0.5, 0.01 * peak_expected)
+                                    base = np.where(expected >= cutoff,
+                                                    np.minimum(counts.astype(float), expected),
+                                                    0.0)
+                                    excess = counts.astype(float) - base
+                                    if np.any(excess > 0):
+                                        ax_in_r.bar(edges[:-1], excess, width=widths, align='edge',
+                                                    bottom=base, color='tab:red', alpha=0.85, edgecolor='none')
+                                    x = np.linspace(edges[0], edges[-1], 400)
+                                    pdf = (1.0 / (np.sqrt(2.0 * np.pi) * sigma)) * np.exp(
+                                        -0.5 * ((x - mu) / sigma) ** 2
+                                    )
+                                    y = N * bin_w * pdf
+                                    ax_in_r.plot(x, y, color='#26457a', linewidth=1.4, label='baseline fit')
                         ax_in_r.set_title('residual', fontsize=8)
                         ax_in_r.tick_params(labelsize=7)
                     except Exception:
@@ -5854,8 +6095,10 @@ def extract_metrics(
                 ax3.grid(True, alpha=0.3)
                 _trim_spines(ax3)
                 
-                # Panel 4: PPR (corrected)
-                ax4.plot(event_indices, ppr_nnls_corr_avg[:n_pulses], 'o-', color='tab:purple', 
+                # Panel 4: PPR (raw + corrected)
+                ax4.plot(event_indices, ppr_nnls_avg[:n_pulses], 'o-', color='tab:gray',
+                         markersize=5, lw=1.4, alpha=0.7, label='PPR (raw)')
+                ax4.plot(event_indices, ppr_nnls_corr_avg[:n_pulses], 'o-', color='tab:purple',
                          markersize=6, lw=2, label='PPR (corrected)')
                 ax4.axhline(1.0, color='gray', linestyle='--', lw=1, alpha=0.7)
                 ax4.set_xlabel('Event #')

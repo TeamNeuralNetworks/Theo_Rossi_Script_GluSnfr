@@ -5,7 +5,7 @@ Quick reference for options (see Model_Calibration/event_models.py for details):
   - event_model: 'double_exp', 'iglusnfr', 'single_exp', 'cooperative', etc.
   - decay_progression_mode: 'fixed', 'linear', 'free_monotonic', 'none'
   - fit_source: 'global', 'average', 'individual'
-  - nnls_weight_mode: 'uniform', 'linear', 'exponential', 'savgol'
+  - nnls_weight_mode: 'uniform', 'linear', 'exponential', 'savgol', 'peak'
 """
 
 import os, sys, glob, numpy as np, pandas as pd
@@ -128,8 +128,11 @@ def _build_options_presets(peak_window_ms, pre_zoom_s, post_zoom_s):
             'amplitude_floor_to_noise': True,                               # Floor amplitudes to noise level before computing PPR; defined as 1*std of baseline
             
             # --- NNLS Fitting ---
-            'nnls_weight_mode': 'savgol',                                   # 'uniform', 'linear', 'exponential', 'savgol' ; weighting scheme for NNLS fitting
+            'nnls_weight_mode': 'savgol',                                     # 'uniform', 'linear', 'exponential', 'savgol', 'peak' ; weighting scheme for NNLS fitting
             'nnls_weight_tau_s': None,                                      # Time constant for exponential weighting (s) ; only used if nnls_weight_mode is 'exponential'
+            'nnls_peak_window_s': 0.010,                                    # Peak-emphasis window after each stimulus (s)
+            'nnls_peak_weight': 3.0,                                        # Weight multiplier inside the peak window
+            'nnls_last_event_tail_tau_s': 'auto',                           # Last event tail downweight tau (s); None=off, 'auto'=ISI, or float; reduces overshoot
             'fit_diagnostic_plot': False,                                   # Whether to generate fit diagnostic plots
             'huber_delta': 2.5,                                             # Huber loss delta for robust fitting (in std units); set to None to disable robust fitting
             'irls_iters': 20,                                               # Number of IRLS iterations for robust fitting ; only used if huber_delta is set
