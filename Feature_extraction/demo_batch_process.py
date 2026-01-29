@@ -355,22 +355,6 @@ def _process_one_file(task: tuple[str, str], *, show_plots: bool) -> dict:
         if SAVE_PLOTS:
             _save_figure(fig, os.path.join(condition_out_dir, f"{base}_plot.png"), dpi=150, label="plot")
 
-        # Overlay recut snippets if available
-        snips = res.get('recut_snippets')
-        t_rel_rec = res.get('recut_t_rel')
-        avg_rec = res.get('recut_avg')
-        if snips is not None and t_rel_rec is not None and avg_rec is not None and SAVE_PLOTS:
-            try:
-                from smoothing import build_median_recut_figure
-                ax_target = fig.axes[0] if (fig is not None and fig.axes) else None
-                fig2 = build_median_recut_figure(t_rel_rec, avg_rec, snippets=snips, ax=ax_target, plot_median_first=True)
-                outpath = os.path.join(condition_out_dir, f"{base}_recuts_overlay.png")
-                target_fig = fig if ax_target is not None else fig2
-                if target_fig is not None:
-                    _save_figure(target_fig, outpath, dpi=150, label="recut overlay")
-            except Exception as e:
-                print(f"[demo] error building overlay: {e}")
-
         if show_plots:
             try:
                 plt.show()
