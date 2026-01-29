@@ -138,7 +138,7 @@ DEFAULTS = {
     'use_template_variants': False,  # Enable multi-template NNLS (single pass, data-driven slow component)
     # Bi-exp: slow component fractions per event.
     # Tri-exp: slow fraction grid paired with template_variant_superslow_fracs.
-    'template_variant_ratios': np.linspace(0.0, 1.0, 10),
+    'template_variant_ratios': [0.2, 0.4, 0.6, 0.8],  # Reduced from linspace(0,1,10) for ~2.5× faster NNLS
 }
 
 # Recut options: oversample factor and projection ('mean'|'median'|'std')

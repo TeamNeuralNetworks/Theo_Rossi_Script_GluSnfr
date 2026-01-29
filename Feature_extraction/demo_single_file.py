@@ -200,7 +200,7 @@ def _build_options_presets(peak_window_ms, pre_zoom_s, post_zoom_s):
             'force_tau_slow_override': False,                                # If True, force tau_slow = tau_superslow in tri-exp models ; unlike allow_tau_slow_override, this enforces the equality rather than just allowing it
             
             # --- Jitter Variants ---
-            'jitter_variant_ms': np.linspace(0.0, 3.0, 13),                # Jitter variants to try (ms) ; set to None to disable jitter variants ; jitter means we shift event times by +/- jitter to test robustness
+            'jitter_variant_ms': np.linspace(-1.0, 1.0, 5),                # Jitter variants to try (ms) ; set to None to disable jitter variants ; jitter means we shift event times by +/- jitter to test robustness
         },
     }
 
