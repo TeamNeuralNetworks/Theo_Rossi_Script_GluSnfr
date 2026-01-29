@@ -21,7 +21,7 @@ OUT_DIR = os.path.join(DATA_ROOT, "Testout")
 
 # --- Select conditions and files ---
 # If CONDITIONS_TO_RUN is empty/None, the script will process all conditions
-CONDITIONS_TO_RUN = ["Theo_1_5_50Hz"]  # e.g., ["Theo_4_50Hz"]
+CONDITIONS_TO_RUN = []  # e.g., ["Theo_4_50Hz"]
 FILE_GLOB = "*.xlsx"
 
 # --- Select analysis preset ---
@@ -260,7 +260,7 @@ def _process_one_file(task: tuple[str, str], *, show_plots: bool) -> dict:
     # --- Compute ISI-dependent parameters ---
     isi_ms = isi * 1000.0
     margin_ms = 2.0  # Fixed margin before next event (ms)
-    peak_window_ms = max(5.0, isi_ms - margin_ms)  # Use all data minus 2ms margin
+    peak_window_ms = min(isi_ms, 10) # max(5.0, isi_ms - margin_ms)  # Use all data minus 2ms margin
     post_zoom_s = 0.3  # Show ~5 pulses
     pre_zoom_s = 0.20
 

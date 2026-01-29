@@ -596,6 +596,10 @@ def fit_average_event(
 
         curve_fit_failed = False
         try:
+            try:
+                p0 = _clip_p0(p0)
+            except Exception:
+                pass
             popt, _ = curve_fit(
                 spec['func'], tf, yf, p0=p0, bounds=spec['bounds'], maxfev=maxfev_eff,
                 sigma=sigma, absolute_sigma=False

@@ -180,6 +180,14 @@ DEFAULTS.update({
     'parameter_bounds': {},  # Dict of {param_name: (lower, upper)} constraints
 })
 
+# Default bounds used to auto-build grids when parameter_bounds are not provided.
+DEFAULT_PARAM_BOUNDS = {
+    'tau_rise': (0.0005, 0.003),            # 0.5–3 ms
+    'tau_decay_fast': (0.003, 0.010),       # 3–10 ms
+    'tau_decay_slow': (0.010, 0.040),       # 10–40 ms
+    'tau_decay_superslow': (0.035, 0.120),  # 35–120 ms
+}
+
 # Selected kernel (set inside extract_metrics based on options; default is iglusnfr_kernel)
 _KERNEL_FUN = iglusnfr_kernel
 # Variant kernel builder for template variants feature (set if model supports it)
@@ -356,16 +364,14 @@ def estimate_tau_superslow_from_last_event_decay(
     tau_fast_s: Optional[float] = None,
     min_decay_points: int = 12,
 ) -> Tuple[Optional[float], Optional[float]]:
-    """Estimate tau_superslow from a bi-exponential fit of the last event decay.
+    """Estimate tau_superslow from a robust single-exponential fit of last-event decay.
 
-    Fits only the decay after the last event peak using a bi-exponential model.
-    Returns (tau_superslow, frac_superslow_min), where the fraction is the
-    slow-component amplitude fraction at the decay start.
+    Fits only the decay after the last event peak using a single exponential.
+    Weights use amplitude (savgol-smoothed if available, raw otherwise).
+    Returns (tau_superslow, None).
     """
     global _LAST_EVENT_DECAY_FIT
     try:
-        from scipy.optimize import curve_fit
-
         if stim_times is None or len(stim_times) == 0:
             return None, None
 
@@ -399,6 +405,7 @@ def estimate_tau_superslow_from_last_event_decay(
         decay_end = float(t[-1])
         if baseline is None:
             baseline = float(np.nanmedian(y[max(0, peak_idx - 10):peak_idx + 1]))
+        decay_end = min(decay_end, decay_start + 0.050)
         try:
             if np.isfinite(baseline):
                 amp = peak_y - baseline
@@ -443,95 +450,91 @@ def estimate_tau_superslow_from_last_event_decay(
         if not np.isfinite(peak_decay) or peak_decay <= 0:
             return None, None
 
-        def biexp_fixed_fast(t, a_fast, a_slow, tau_slow):
-            return a_fast * np.exp(-t / max(tau_fast_s, 1e-6)) + a_slow * np.exp(-t / max(tau_slow, 1e-6))
+        # Choose weights from savgol-smoothed trace if available, raw otherwise
+        y_weight_src = None
+        try:
+            sg_window = int(DEFAULTS.get('sg_window', 9))
+            sg_poly = int(DEFAULTS.get('sg_poly', 2))
+            if sg_window % 2 == 0:
+                sg_window += 1
+            if sg_window >= 3 and sg_window <= y.size:
+                y_weight_src = sg_smooth(fill_nans_timewise(y, t), sg_window, sg_poly)
+        except Exception:
+            y_weight_src = None
+        if y_weight_src is None:
+            y_weight_src = y
 
-        # Initial guesses
-        a0_fast = peak_decay * 0.6
-        a0_slow = peak_decay * 0.4
-        tau_slow0 = 0.050
+        y_weight = y_weight_src[decay_mask]
+        y_weight_zeroed = y_weight - baseline
+
+        # Robust single-exp fit in log space with amplitude weights
+        pos_mask = (y_decay_zeroed > 0) & np.isfinite(y_decay_zeroed) & np.isfinite(t_decay)
+        if np.sum(pos_mask) < min_decay_points:
+            return None, None
+
+        t_fit = t_decay[pos_mask]
+        y_fit = y_decay_zeroed[pos_mask]
+        w_amp = np.maximum(y_weight_zeroed[pos_mask], 0.0)
+        if not np.isfinite(w_amp).any() or np.nanmax(w_amp) <= 0:
+            w_amp = np.ones_like(y_fit)
+        else:
+            w_amp = w_amp / (np.nanmax(w_amp) + 1e-12)
+
+        logy = np.log(y_fit)
+        # Iteratively reweighted least squares with Huber weights
+        weights = w_amp.copy()
+        tau_slow = None
+        a_slow = None
+        for _ in range(5):
+            wsum = float(np.sum(weights))
+            if wsum <= 0:
+                break
+            t_bar = float(np.sum(weights * t_fit) / wsum)
+            y_bar = float(np.sum(weights * logy) / wsum)
+            t_demean = t_fit - t_bar
+            denom = float(np.sum(weights * t_demean * t_demean))
+            if denom <= 1e-12:
+                break
+            m = float(np.sum(weights * t_demean * (logy - y_bar)) / denom)
+            b = float(y_bar - m * t_bar)
+            if not np.isfinite(m) or m >= -1e-9:
+                break
+            tau_slow = float(-1.0 / m)
+            a_slow = float(np.exp(b))
+            # Huber reweight on log residuals
+            resid = logy - (b + m * t_fit)
+            delta = 1.5
+            abs_r = np.abs(resid)
+            w_huber = np.ones_like(resid)
+            mask = abs_r > delta
+            w_huber[mask] = delta / (abs_r[mask] + 1e-12)
+            weights = w_amp * w_huber
+
+        if tau_slow is None or not np.isfinite(tau_slow):
+            return None, None
+
+        tau_slow = float(np.clip(tau_slow, 0.010, 0.400))
+        if a_slow is None or not np.isfinite(a_slow):
+            a_slow = float(peak_decay)
 
         try:
-            tau_fast_s = float(tau_fast_s) if tau_fast_s is not None else np.nan
-            if np.isfinite(tau_fast_s) and tau_fast_s > 0:
-                tau_slow_min = max(0.010, tau_fast_s * 1.05)
-                popt, _ = curve_fit(
-                    biexp_fixed_fast,
-                    t_decay,
-                    y_decay_zeroed,
-                    p0=[a0_fast, a0_slow, tau_slow0],
-                    bounds=(
-                        [0.0, 0.0, tau_slow_min],
-                        [np.inf, np.inf, 0.400],
-                    ),
-                    maxfev=2000,
-                )
-                a_fast = float(popt[0])
-                a_slow = float(popt[1])
-                tau_slow = float(popt[2])
-                tau_superslow = tau_slow
-                denom = max(a_fast + a_slow, 1e-12)
-                frac_superslow = max(0.0, min(1.0, a_slow / denom))
-
-                try:
-                    from smoothing import progress_print
-                    progress_print(
-                        "[last-event] Estimated tau_superslow from fixed-fast decay: "
-                        f"tau_fast={tau_fast_s*1000:.1f}ms, tau_superslow={tau_superslow*1000:.1f}ms, "
-                        f"frac_superslow={frac_superslow:.2f}"
-                    )
-                except Exception:
-                    pass
-                try:
-                    _LAST_EVENT_DECAY_FIT = {
-                        't_start': float(decay_start),
-                        't_end': float(decay_end),
-                        'baseline': float(baseline),
-                        'a_fast': float(a_fast),
-                        'tau_fast': float(tau_fast_s),
-                        'a_slow': float(a_slow),
-                        'tau_slow': float(tau_slow),
-                    }
-                except Exception:
-                    pass
-                return tau_superslow, frac_superslow
+            from smoothing import progress_print
+            progress_print(f"[last-event] Estimated tau_superslow from robust single-exp decay: {tau_slow*1000:.1f} ms")
         except Exception:
             pass
-
-        # Fallback to single exponential on last-event decay
-        def exp_decay(t, a, tau):
-            return a * np.exp(-t / max(tau, 1e-6))
         try:
-            popt, _ = curve_fit(
-                exp_decay,
-                t_decay,
-                y_decay_zeroed,
-                p0=[peak_decay, 0.050],
-                bounds=([0.0, 0.010], [np.inf, 0.400]),
-                maxfev=1000,
-            )
-            tau_slow = float(popt[1])
-            a_slow = float(popt[0])
-            try:
-                from smoothing import progress_print
-                progress_print(f"[last-event] Estimated tau_superslow from single-exp decay: {tau_slow*1000:.1f} ms")
-            except Exception:
-                pass
-            try:
-                _LAST_EVENT_DECAY_FIT = {
-                    't_start': float(decay_start),
-                    't_end': float(decay_end),
-                    'baseline': float(baseline),
-                    'a_fast': 0.0,
-                    'tau_fast': np.nan,
-                    'a_slow': float(a_slow),
-                    'tau_slow': float(tau_slow),
-                }
-            except Exception:
-                pass
-            return tau_slow, None
+            _LAST_EVENT_DECAY_FIT = {
+                't_start': float(decay_start),
+                't_end': float(decay_end),
+                'baseline': float(baseline),
+                'a_fast': 0.0,
+                'tau_fast': np.nan,
+                'a_slow': float(a_slow),
+                'tau_slow': float(tau_slow),
+            }
         except Exception:
-            return None, None
+            pass
+        return tau_slow, None
     except Exception:
         return None, None
 
@@ -1733,9 +1736,51 @@ def extract_metrics(
     isi = float(isi)
     isi_ms = isi * 1000.0
 
+    # Auto-build grids from parameter bounds when not explicitly provided
+    param_bounds = cfg.get('parameter_bounds', {}) or {}
+    def _get_bounds(name, fallback):
+        bound = param_bounds.get(name)
+        if bound and isinstance(bound, (tuple, list)) and len(bound) == 2:
+            lo, hi = float(bound[0]), float(bound[1])
+            if np.isfinite(lo) and np.isfinite(hi) and lo > 0 and hi > lo:
+                return lo, hi
+        return fallback
+
+    lo_rise_s, hi_rise_s = _get_bounds('tau_rise', DEFAULT_PARAM_BOUNDS['tau_rise'])
+    lo_fast_s, hi_fast_s = _get_bounds('tau_decay_fast', DEFAULT_PARAM_BOUNDS['tau_decay_fast'])
+
+    def _filter_grid_ms(grid, lo_s, hi_s):
+        lo_ms = lo_s * 1000.0
+        hi_ms = hi_s * 1000.0
+        vals = []
+        for v in grid:
+            try:
+                fv = float(v)
+            except Exception:
+                continue
+            if np.isfinite(fv) and lo_ms <= fv <= hi_ms:
+                vals.append(fv)
+        return vals
+
+    if ('kin_taur_grid_ms' not in cfg) or (cfg.get('kin_taur_grid_ms') is None):
+        cfg['kin_taur_grid_ms'] = (np.logspace(np.log10(lo_rise_s), np.log10(hi_rise_s), 11) * 1000.0).tolist()
+    else:
+        cfg['kin_taur_grid_ms'] = _filter_grid_ms(cfg.get('kin_taur_grid_ms', []), lo_rise_s, hi_rise_s)
+        if not cfg['kin_taur_grid_ms']:
+            cfg['kin_taur_grid_ms'] = (np.logspace(np.log10(lo_rise_s), np.log10(hi_rise_s), 11) * 1000.0).tolist()
+
+    if ('kin_taud0_grid_ms' not in cfg) or (cfg.get('kin_taud0_grid_ms') is None):
+        cfg['kin_taud0_grid_ms'] = (np.logspace(np.log10(lo_fast_s), np.log10(hi_fast_s), 11) * 1000.0).tolist()
+    else:
+        cfg['kin_taud0_grid_ms'] = _filter_grid_ms(cfg.get('kin_taud0_grid_ms', []), lo_fast_s, hi_fast_s)
+        if not cfg['kin_taud0_grid_ms']:
+            cfg['kin_taud0_grid_ms'] = (np.logspace(np.log10(lo_fast_s), np.log10(hi_fast_s), 11) * 1000.0).tolist()
+
     # Peak window: auto if not user-overridden or too wide for ISI
     if ('peak_window_ms' not in cfg) or (float(cfg['peak_window_ms']) >= isi_ms):
         cfg['peak_window_ms'] = max(6.0, min(12.0, 0.45 * isi_ms))
+    # Hard cap: never exceed ISI
+    cfg['peak_window_ms'] = min(float(cfg['peak_window_ms']), isi_ms)
     if ('peak_avg_points' not in cfg) or (int(cfg['peak_avg_points']) > 5):
         cfg['peak_avg_points'] = 3
     if 'pre_peak_ms' not in cfg:
@@ -2269,12 +2314,12 @@ def extract_metrics(
     # Helper: estimate base kinetics from recut average of all trials/events
     def _estimate_from_recut_average():
         try:
-            # Use ISI-aware window: avoid capturing next pulse at high frequencies
+            # Use universal window: cap at 50ms, otherwise 6ms for very fast ISI
             isi_ms = isi * 1000.0
-            if isi_ms < 30.0:
-                post_ms_fit = max(12.0, isi_ms * 0.75)  # Limit to 75% of ISI for fast stim
+            if isi_ms > 6.0:
+                post_ms_fit = min(50.0, isi_ms - 5.0)
             else:
-                post_ms_fit = min(50.0, isi_ms - 5.0)  # Standard window for slow stim
+                post_ms_fit = 6.0
 
             # Honor explicit top-level option 'recut_snippets'.
             need_snips = bool(
@@ -3142,26 +3187,15 @@ def extract_metrics(
                             tau_superslow_s = float(fitted_params.get('tau_decay_superslow', 0.040))
                             tau_fast_base = float(fitted_params.get('tau_decay_fast', 0.003))
                             tau_slow_base = float(fitted_params.get('tau_decay_slow', 0.015))
-                            # Check if force_tau_slow_override is active: tau_slow equals tau_superslow
-                            force_slow_active = abs(tau_slow_base - tau_superslow_s) < 1e-6
-                            # When force override is active, use tau_fast from fitted_params (param_bounds upper)
-                            # not from tau_d argument which comes from global fit (early events)
-                            if force_slow_active:
-                                tau_fast_s = float(tau_fast_base)
-                                tau_slow_s = float(tau_slow_base)
-                            else:
-                                # Normal case: use tau_d from argument (from global fit)
-                                tau_fast_s = float(tau_d) if np.isfinite(tau_d) and tau_d > 0 else tau_fast_base
-                                ratio_slow = tau_slow_base / max(tau_fast_base, 1e-6)
-                                if not np.isfinite(ratio_slow) or ratio_slow <= 1.0:
-                                    ratio_slow = 1.5
-                                tau_slow_s = tau_fast_s * ratio_slow
-                                if tau_slow_override is not None and np.isfinite(tau_slow_override) and tau_slow_override > 0:
-                                    tau_slow_s = float(tau_slow_override)
-                                if tau_slow_s <= tau_fast_s:
-                                    tau_slow_s = tau_fast_s * 1.1
-                                if tau_slow_s > tau_superslow_s:
-                                    tau_slow_s = tau_superslow_s * 0.6
+                            # Use recut-derived taus for NNLS variants; only ratios vary.
+                            tau_fast_s = float(tau_fast_base)
+                            tau_slow_s = float(tau_slow_base)
+                            if tau_slow_override is not None and np.isfinite(tau_slow_override) and tau_slow_override > 0:
+                                tau_slow_s = float(tau_slow_override)
+                            if tau_slow_s <= tau_fast_s:
+                                tau_slow_s = tau_fast_s * 1.1
+                            if tau_slow_s > tau_superslow_s:
+                                tau_slow_s = tau_superslow_s * 0.6
                             params = [
                                 1.0,  # amp (will be normalized)
                                 tau_r,  # tau_rise from global fit
@@ -3222,7 +3256,8 @@ def extract_metrics(
                             tau_slow_use = fitted_params['tau_decay_slow']
                             if tau_slow_override is not None and np.isfinite(tau_slow_override) and tau_slow_override > 0:
                                 tau_slow_use = float(tau_slow_override)
-                            tau_fast_use = float(tau_d) if tau_d > 0 else fitted_params['tau_decay_fast']
+                            # Use recut-derived fast tau for NNLS variants; only ratios vary.
+                            tau_fast_use = fitted_params['tau_decay_fast']
                             params = [
                                 1.0,  # amp (will be normalized)
                                 tau_r,  # tau_rise from global fit
