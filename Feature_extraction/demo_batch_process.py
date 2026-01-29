@@ -132,7 +132,7 @@ def _build_options_presets(peak_window_ms, pre_zoom_s, post_zoom_s):
             'nnls_weight_tau_s': None,                                      # Time constant for exponential weighting (s) ; only used if nnls_weight_mode is 'exponential'
             'nnls_peak_window_s': 0.010,                                    # Peak-emphasis window after each stimulus (s)
             'nnls_peak_weight': 3.0,                                        # Weight multiplier inside the peak window
-            'nnls_last_event_tail_tau_s': 'auto',                           # Last event tail downweight tau (s); None=off, 'auto'=ISI, or float; reduces overshoot
+            'nnls_last_event_tail_tau_s': 'best',                           # Last event tail downweight tau (s); None=off, 'auto'=ISI, or float; reduces overshoot
             'fit_diagnostic_plot': False,                                   # Whether to generate fit diagnostic plots
             'huber_delta': 2.5,                                             # Huber loss delta for robust fitting (in std units); set to None to disable robust fitting
             'irls_iters': 20,                                               # Number of IRLS iterations for robust fitting ; only used if huber_delta is set
@@ -414,10 +414,13 @@ def run_batch():
     os.makedirs(OUT_DIR, exist_ok=True)
 
     tasks = []
+    failures = []
     for condition in conditions:
         in_dir = os.path.join(DATA_ROOT, condition)
         if not os.path.isdir(in_dir):
-            print(f"[skip] Missing folder: {in_dir}")
+            msg = f"[skip] Missing folder: {in_dir}"
+            print(msg)
+            failures.append(msg)
             continue
         for xlsx_path in _iter_xlsx_files(in_dir, FILE_GLOB):
             tasks.append((condition, xlsx_path))
@@ -441,10 +444,14 @@ def run_batch():
                 try:
                     result = fut.result()
                 except Exception as e:
-                    print(f"[skip] Worker failure: {e}")
+                    msg = f"[skip] Worker failure: {e}"
+                    print(msg)
+                    failures.append(msg)
                     continue
                 if result.get('error'):
-                    print(result['error'])
+                    msg = result['error']
+                    print(msg)
+                    failures.append(msg)
                     continue
                 summary_rows.append(result['row'])
                 per_trial_rows.extend(result['per_trial_rows'])
@@ -457,7 +464,9 @@ def run_batch():
         for task in tasks:
             result = _process_one_file(task, show_plots=SHOW_PLOTS)
             if result.get('error'):
-                print(result['error'])
+                msg = result['error']
+                print(msg)
+                failures.append(msg)
                 continue
             summary_rows.append(result['row'])
             per_trial_rows.extend(result['per_trial_rows'])
@@ -470,6 +479,17 @@ def run_batch():
     # =============================================================================
     #                              SUMMARY OUTPUT
     # =============================================================================
+
+    if failures:
+        log_path = os.path.join(OUT_DIR, "log.txt")
+        try:
+            with open(log_path, "w", encoding="utf-8") as f:
+                f.write("Failed extractions:\n")
+                for msg in failures:
+                    f.write(str(msg).rstrip() + "\n")
+            print(f"[export] Saved failure log to: {log_path}")
+        except Exception as e:
+            print(f"[export] Failed to write failure log: {e}")
 
     if summary_rows:
         df_rows = pd.DataFrame(summary_rows)

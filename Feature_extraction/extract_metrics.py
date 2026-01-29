@@ -720,11 +720,15 @@ def _apply_last_event_tail_weights(
     if tail_tau_s is None or len(stim_times) == 0:
         return weights
 
-    # Handle 'auto' mode - use ISI as base, but make it aggressive enough to matter
+    # Handle string modes
     if isinstance(tail_tau_s, str):
-        if tail_tau_s.lower() == 'auto':
-            # Use ISI as tau, but ensure it's short enough to have an effect
-            # For 50Hz (ISI=0.02s), this gives tau=0.02s which decays quickly
+        mode = tail_tau_s.lower()
+        if mode == 'auto':
+            # Use ISI as tau
+            tail_tau_s = isi
+        elif mode == 'best':
+            # 'best' mode requires search - caller should resolve before calling
+            # Fall back to 'auto' behavior here
             tail_tau_s = isi
         else:
             try:
@@ -762,6 +766,119 @@ def _apply_last_event_tail_weights(
             pass
 
     return weights
+
+
+def _compute_residual_whiteness(residual: np.ndarray) -> float:
+    """Compute a whiteness score for residuals (higher = more white noise-like).
+
+    Uses multiple metrics combined:
+    - Lag-1 autocorrelation (should be ~0 for white noise)
+    - Sign-change frequency (should be ~50% for white noise)
+    - Running mean envelope (should be small for white noise)
+
+    Returns:
+        Whiteness score (0-1, higher is better/whiter)
+    """
+    if len(residual) < 10:
+        return 0.0
+
+    r = residual - np.mean(residual)
+    var_r = np.var(r)
+    if var_r < 1e-12:
+        return 1.0  # Zero residual is perfect
+
+    # 1. Lag-1 autocorrelation penalty (ideal = 0)
+    autocorr_1 = np.corrcoef(r[:-1], r[1:])[0, 1] if len(r) > 1 else 0
+    autocorr_score = 1.0 - abs(autocorr_1)  # 1 if no autocorr, 0 if perfect corr
+
+    # 2. Sign-change frequency (ideal = ~50%)
+    signs = np.sign(r)
+    sign_changes = np.sum(signs[:-1] != signs[1:])
+    sign_change_freq = sign_changes / (len(r) - 1) if len(r) > 1 else 0.5
+    # Score peaks at 0.5, drops toward 0 or 1
+    sign_score = 1.0 - 2 * abs(sign_change_freq - 0.5)
+
+    # 3. Running mean envelope (systematic bias)
+    window = max(5, len(r) // 20)
+    cumsum = np.cumsum(np.insert(r, 0, 0))
+    running_mean = (cumsum[window:] - cumsum[:-window]) / window
+    envelope_rms = np.sqrt(np.mean(running_mean ** 2))
+    noise_rms = np.sqrt(var_r)
+    # Envelope should be much smaller than noise RMS
+    envelope_score = 1.0 / (1.0 + (envelope_rms / (noise_rms + 1e-9)) ** 2)
+
+    # Combined score (weighted average)
+    whiteness = 0.5 * autocorr_score + 0.2 * sign_score + 0.3 * envelope_score
+    return float(whiteness)
+
+
+def _find_best_tail_tau(
+    t: np.ndarray,
+    y: np.ndarray,
+    X: np.ndarray,
+    stim_times: np.ndarray,
+    isi: float,
+    base_weights: np.ndarray,
+    peak_window_s: float = 0.010,
+    tau_candidates: Optional[list] = None,
+    verbose: bool = False,
+) -> float:
+    """Search for the tail tau that produces the whitest residuals.
+
+    Uses the pre-built design matrix X for fast evaluation.
+
+    Args:
+        t: Time array
+        y: Data array
+        X: Pre-built design matrix (from variant selection pass)
+        stim_times: Stimulus times
+        isi: Inter-stimulus interval
+        base_weights: Base weights before tail adjustment
+        peak_window_s: Peak window duration
+        tau_candidates: List of tau values to try (in seconds)
+        verbose: Print search progress
+
+    Returns:
+        Best tau value in seconds
+    """
+    if tau_candidates is None:
+        # Try a range from 0.3*ISI to 3*ISI
+        tau_candidates = [isi * m for m in [0.3, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0]]
+
+    best_tau = isi  # Default fallback
+    best_score = -1.0
+
+    try:
+        from smoothing import progress_print
+    except ImportError:
+        progress_print = print
+
+    scores = []
+    for tau in tau_candidates:
+        # Apply tail weighting with this tau
+        w_test = _apply_last_event_tail_weights(
+            base_weights.copy(), t, stim_times, isi, tau, peak_window_s
+        )
+        # Quick NNLS with pre-built design matrix
+        try:
+            a_test = _nnls_weighted(X, y, w_test)
+            residual = y - X @ a_test
+        except Exception:
+            continue
+
+        # Score the residuals
+        score = _compute_residual_whiteness(residual)
+        scores.append((tau, score))
+
+        if score > best_score:
+            best_score = score
+            best_tau = tau
+
+    if verbose and scores:
+        scores_str = ", ".join([f"{tau*1000:.0f}ms:{s:.3f}" for tau, s in scores])
+        progress_print(f"[tail-best] τ search: {scores_str} → best={best_tau*1000:.1f}ms (score={best_score:.3f})")
+
+    return best_tau
 
 
 def _trim_spines(ax):
@@ -951,10 +1068,15 @@ def fit_amplitudes_with_template_variants(
         peak_window_s=peak_window_s,
         peak_weight=peak_weight,
     )
-    # Compute tail-weighted version for final amplitude refinement (not for variant selection)
+
+    # Handle 'best' mode flag - actual search happens after X is built
     pw_s = peak_window_s if peak_window_s is not None else 0.010
+    do_best_search = isinstance(last_event_tail_tau_s, str) and last_event_tail_tau_s.lower() == 'best'
+    resolved_tail_tau = last_event_tail_tau_s if not do_best_search else isi  # Temporary default
+
+    # Compute tail-weighted version (may be updated after best search)
     tail_weighted = _apply_last_event_tail_weights(
-        base_weights.copy(), t, stim_times, isi, last_event_tail_tau_s, pw_s
+        base_weights.copy(), t, stim_times, isi, resolved_tail_tau, pw_s
     )
     use_tail_weighting = last_event_tail_tau_s is not None
 
@@ -982,7 +1104,7 @@ def fit_amplitudes_with_template_variants(
         is_last_iter = (iteration == residual_reweight_iters - 1)
         if iteration == 0:
             weights = base_weights.copy()
-        elif is_last_iter and use_tail_weighting:
+        elif is_last_iter and use_tail_weighting and not do_best_search:
             weights = tail_weighted.copy()
         
         # NNLS solve
@@ -1092,6 +1214,15 @@ def fit_amplitudes_with_template_variants(
     # Now that we have selected the best variants, re-fit with tail-weighted
     # This prevents last-event overshoot without affecting variant selection
     if use_tail_weighting:
+        # If 'best' mode, search for optimal tau using the built design matrix X
+        if do_best_search:
+            resolved_tail_tau = _find_best_tail_tau(
+                t, y, X, stim_times, isi, base_weights,
+                peak_window_s=pw_s, verbose=True
+            )
+            tail_weighted = _apply_last_event_tail_weights(
+                base_weights.copy(), t, stim_times, isi, resolved_tail_tau, pw_s
+            )
         a_variants = _nnls_weighted(X, y, tail_weighted)
         yhat_iter = X @ a_variants
 
