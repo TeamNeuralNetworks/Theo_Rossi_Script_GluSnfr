@@ -2812,18 +2812,12 @@ def extract_metrics(
         # Always use fit_average_event with consistent long window for proper kinetics fitting
         # Stim time verification disabled for cleaner output
 
-        # Use ISI-aware window for fitting: avoid capturing next pulse at high frequencies
-        # For fast stimulation (ISI<30ms), limit to 75% of ISI to prevent contamination
-        # For slower stimulation, use standard 50ms window
+        # Universal recut window: cap at 50ms, otherwise 6ms for very fast ISI
         isi_ms = isi * 1000.0
-        if isi_ms < 30.0:
-            # High-frequency trains: the recut window is CONTAMINATED by next pulse
-            # Use 75% of ISI to avoid contamination, but this limits kinetics fitting
-            # For bi-exponential models, we can't reliably fit tau_slow from recut
-            # Instead, rely on the last-event decay estimate (see below)
-            post_ms_for_fit = max(12.0, isi_ms * 0.75)
+        if isi_ms > 6.0:
+            post_ms_for_fit = min(50.0, isi_ms - 5.0)
         else:
-            post_ms_for_fit = min(50.0, isi_ms - 5.0)  # Standard: 50ms or ISI-5ms
+            post_ms_for_fit = 6.0
         # Recut fitting window logging disabled for cleaner output
 
         # === Estimate tau_slow from last-event decay (bi-exp only) ===
@@ -3324,33 +3318,33 @@ def extract_metrics(
             tau_d_vec_raw = np.asarray(tau_d_vec0, float)
             tau_d_vec_constrained = None  # No constraints applied in fixed mode
         elif dec_mode in ('linear', 'free_monotonic'):
-            # Fit tau for each event on average trace
-            tau_per_evt, amp_per_evt, param_map = _fit_all_events_on_average(tau_r, tau_d0)
-            per_event_param_map = {k: np.asarray(v, float) for k, v in param_map.items()}
-            tau_d_vec_raw = np.asarray(tau_per_evt, float)
+            # Global mode: keep a single tau_d unless anchors are requested.
+            anchor_first = bool(cfg.get('anchor_first_tau', False))
+            anchor_final = bool(cfg.get('anchor_final_tau', True))
 
-            # Anchor global tau at middle event
-            mid_idx = n_pulses // 2
-            tau_anchor = float(tau_d0)  # Global tau from recut template
+            if anchor_first or anchor_final:
+                tau_first = float(tau_d0)
+                tau_last = float(tau_d0)
+                amp_first = None
+                amp_last = None
+                if anchor_first:
+                    tau_first, amp_first, _ = _estimate_single_event_tau(0, tau_r, tau_d0)
+                if anchor_final:
+                    tau_last, amp_last, _ = _estimate_single_event_tau(n_pulses - 1, tau_r, tau_d0)
 
-            # Apply constraints: force middle event to global tau, then clip others
-            tau_constrained = np.copy(tau_per_evt)
-            tau_constrained[mid_idx] = tau_anchor  # Force middle event to global tau
-
-            # Events before mid cannot be slower than anchor
-            for i in range(mid_idx):
-                if tau_constrained[i] > tau_anchor:
-                    tau_constrained[i] = tau_anchor
-
-            # Events after mid cannot be faster than anchor
-            for i in range(mid_idx + 1, n_pulses):
-                if tau_constrained[i] < tau_anchor:
-                    tau_constrained[i] = tau_anchor
-
-            tau_d_vec_constrained = np.asarray(tau_constrained, float)
-            tau_d_vec0 = tau_constrained
-            tau_last_display = float(tau_per_evt[-1])
-            amp_last_display = float(amp_per_evt[-1])
+                tau_d_vec_raw = np.full(n_pulses, float(tau_d0))
+                tau_d_vec0 = np.asarray(tau_d_vec_raw, float)
+                if anchor_first:
+                    tau_d_vec0[0] = float(tau_first)
+                if anchor_final:
+                    tau_d_vec0[-1] = float(tau_last)
+                    tau_last_display = float(tau_last)
+                    if amp_last is not None:
+                        amp_last_display = float(amp_last)
+            else:
+                tau_d_vec0 = np.full(n_pulses, float(tau_d0))
+                tau_d_vec_raw = np.asarray(tau_d_vec0, float)
+            tau_d_vec_constrained = None
         else:
             tau_d_vec0 = np.full(n_pulses, float(tau_d0))
             tau_d_vec_raw = np.asarray(tau_d_vec0, float)
@@ -4755,11 +4749,30 @@ def extract_metrics(
                 a_slow = le_fit.get('a_slow', 0.0)
                 tau_slow = le_fit.get('tau_slow', np.nan)
                 t_fit = np.linspace(t_start, t_end, 100)
-                y_fit = np.full_like(t_fit, baseline, dtype=float)
+                # Anchor the decay to the actual trace at the fit start
+                y_fit = np.full_like(t_fit, 0.0, dtype=float)
+                t_anchor = t_start
+                try:
+                    last_st = float(stim_times[-1])
+                    if t_anchor < last_st - 0.25 * float(isi):
+                        t_anchor = last_st
+                        t_fit = t_anchor + (t_fit - t_start)
+                except Exception:
+                    t_anchor = t_start
+                try:
+                    y_at_start = float(np.interp(t_anchor, t, y_avg))
+                except Exception:
+                    y_at_start = baseline
                 if np.isfinite(tau_fast) and a_fast > 0:
                     y_fit += a_fast * np.exp(-(t_fit - t_start) / max(tau_fast, 1e-6))
                 if np.isfinite(tau_slow) and a_slow > 0:
                     y_fit += a_slow * np.exp(-(t_fit - t_start) / max(tau_slow, 1e-6))
+                # Shift so the fit starts on the trace
+                try:
+                    y0_fit = float(y_fit[0])
+                    y_fit = y_fit + (y_at_start - y0_fit)
+                except Exception:
+                    pass
                 ax.plot(
                     t_fit,
                     y_fit,

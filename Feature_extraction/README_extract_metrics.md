@@ -6,7 +6,7 @@ The function keeps the math equivalent to the main pipeline while exposing a sma
 
 - Import path: `from extract_metrics import extract_metrics`
 - Plot controls: `options['plot'] = {'enabled': True, 'traces': ['raw','savgol','nnls'], 'show_decay': True, 'trials': False, 'baseline': False}`
-- Always enforces non‑decreasing τd across pulses for stability.
+- When decay progression rules specify monotonic increase (default), τd is constrained non‑decreasing for stability.
 - Core controls:
   - `measurement`: `'NNLS'|'SAVGOL'|'RAW'` (default `'NNLS'`) — p‑values use this amplitude series
   - `fail_method`: `'NNLS'|'SAVGOL'|'RAW'` (default: same as `measurement`) — controls null/threshold rule
@@ -17,13 +17,14 @@ The function keeps the math equivalent to the main pipeline while exposing a sma
     - `event_model`: kernel used for fitting. Default `'double_exp'`. For iGluSnFR use `'iglusnfr'` (bi‑exp) or `'iglusnfr_tri'` (tri‑exp). In tri‑exp mode, recut fits are bi‑exp for fast/slow taus and superslow tau is estimated from the final event decay.
     - Extras for `'cooperative'`: `event_model_settings={'n_coop': 2.0}`
   - `fit_source`: `'global'|'average'|'individual'` (default `'global'`)
-    - `global`: fit a single template from all trials (recut median) then apply progression
-    - `average`: fit kinetics on the average trace per event then smooth via progression
-    - `individual`: fit per trial then aggregate (median) and smooth
+    - `global`: fit a **single recut event** (all trials) to get τr and decay(s); apply those τs to all events.
+      Progression affects **ratios/fractions** (and anchors if enabled), not per‑event τ unless anchors are requested.
+    - `average`: fit kinetics **per event on the average trace** then smooth via progression.
+    - `individual`: fit kinetics **per trial** then aggregate (median) and smooth.
   - `decay_progression_mode`: `'fixed'|'free_monotonic'|'linear'` (default `'linear'`)
-    - `fixed`: one τd for the whole train (median)
-    - `free_monotonic`: interpolate τd between first and last event (non‑decreasing)
-    - `linear`: non‑negative‑slope linear trend across pulses
+    - `fixed`: one τd for the whole train
+    - `free_monotonic`: monotonic regression (default: non‑decreasing) between first and last event
+    - `linear`: robust linear trend (slope constrained by progression rules)
 
 ---
 
@@ -37,10 +38,20 @@ The decay progression system determines how decay time constants (τd) evolve ac
 
 Tri‑exp mode behaves like the bi‑exp model for the recut fit (fast/slow taus), then adds a superslow component only during NNLS screening:
 
-- **Fast/slow taus**: taken from the recut fit (same as bi‑exp).
-- **Superslow tau**: estimated from the decay after the final event (last peak + 5 ms to baseline or end of trace).
-- **Template variants**: scan slow fraction (`template_variant_ratios`) and superslow fraction at the **final** event (`template_variant_superslow_fracs`). Superslow ramps monotonically from 0 to the chosen max across the train.
+- **Fast/slow taus**: taken from the **global recut fit** and reused for all events.
+- **Superslow tau**: estimated from the **last‑event decay** using a robust single‑exponential fit (50 ms max window).
+  The fit is **amplitude‑weighted** (Savgol‑weighted if available, raw otherwise).
+- **Template variants**: scan slow fraction (`template_variant_ratios`) and superslow fraction at the **final** event (`template_variant_superslow_fracs`).
+  Superslow ramps monotonically from 0 to the chosen max across the train.
 - **Safeguard**: if the estimated superslow tau is too close to the slow tau (ratio below `superslow_min_ratio`, default 1.0), superslow variants are disabled and the fit reduces to bi‑exp templates.
+  If `allow_tau_slow_override=True` and the last‑event fit is **faster** than the recut slow tau, slow can be replaced; `force_tau_slow_override=True` always forces slow = superslow.
+
+**Soft vs hard variant selection**
+- `template_variant_select='soft'` (default): NNLS mixes multiple variants per event.
+- `template_variant_select='hard'`: NNLS selects one dominant variant per event.
+- The **parameter‑evolution plot** mirrors this:
+  - Soft mode shows **weighted average fractions** (from NNLS variant weights).
+  - Hard mode shows **single‑variant fractions**.
 
 Deprecated settings: `template_variant_weights`, `triexp_weight_step`, and `triexp_weight_min` are no longer used; replace them with `template_variant_ratios` + `template_variant_superslow_fracs`.
 
@@ -48,9 +59,11 @@ Deprecated settings: `template_variant_weights`, `triexp_weight_step`, and `trie
 
 The system operates in **three stages**:
 
-1. **Initial Estimation**: Fit τd for each event (or use global template)
-2. **Constraint Application**: Apply anchoring and clipping rules (for `global` mode)
-3. **Progression Fitting**: Apply smoothing/regression based on `decay_progression_mode`
+1. **Initial kinetics**:  
+   - `global`: fit a **single recut event** to get τr and decay(s).  
+   - `average`/`individual`: estimate τ per event (average trace or per‑trial).
+2. **Anchoring (optional)**: apply `anchor_first_tau` / `anchor_final_tau`.
+3. **Progression**: apply smoothing/regression based on `decay_progression_mode`.
 
 ### Key Options
 
@@ -67,42 +80,54 @@ options = {
 
 ### 1. Fit Source (`fit_source`)
 
-Controls how initial per-event τd values are estimated:
+Controls how initial τ values are estimated:
 
 #### `'global'` (default, most robust)
-- Fits a **single global template** by recutting and averaging all events from all trials
-- For `linear` or `free_monotonic` modes:
-  1. Fits each event individually on the average trace
-  2. **Anchors** the global τd at the **middle event** (event 5 for 10 pulses)
-  3. **Clips** surrounding events:
-     - Events 1-4: cannot be slower than anchor (ensures realistic baseline)
-     - Events 6-10: cannot be faster than anchor (ensures monotonic trend)
-  4. Applies progression mode
+- Fits a **single global recut event** by recutting and averaging all events from all trials.
+- **τr and decay(s)** from the recut fit are reused for all events.
+- Per‑event τ fitting is **skipped** in global mode unless anchors are explicitly enabled.
+  - If `anchor_first_tau` and/or `anchor_final_tau` are enabled, only those events are fitted and used as anchor points.
+- Progression in global mode **only acts on ratios/fractions** (slow/fast/superslow), not on τ values.
 
 **Best for**: Most datasets, especially with noisy trials
 
 #### `'average'`
-- Fits each event **individually on the multi-trial average trace**
-- No middle-event anchoring (unlike `global`)
-- Directly applies progression mode to per-event estimates
+- Fits each event **individually on the multi‑trial average trace**
+- Progression applies to **per‑event τ estimates**
 
 **Best for**: Clean average traces, when you want per-event detail without global anchoring
 
 #### `'individual'`
 - Fits each **trial independently**, then aggregates (median)
-- Can be noisy due to single-trial variability
-- Applies progression mode to aggregated estimates
+- Progression applies to aggregated per‑event τ estimates
 
 **Best for**: Highly consistent trials, or when trial-to-trial variability is of interest
 
 ---
 
+### Global recut fit (`fit_average_event`)
+
+In `global` mode the recut average is fit once to obtain τr and decay(s). The fit process is:
+
+1. **Grid search** on the recut average (robust, coarse).
+2. **curve_fit refinement** using the grid result as a seed.
+3. If curve_fit is **worse than the grid** (higher weighted SSE), the grid result is kept and you will see:
+   `curve_fit worse than grid search, using grid search params`.
+
+This message does **not** mean per‑event fitting is happening; it only reports that the global recut refinement was rejected.
+
+Recut window for the global fit:
+- `post_ms = min(50, isi_ms - 5)` when `isi_ms > 6`, otherwise `post_ms = 6`.
+
+---
+
 ### 2. Decay Progression Mode (`decay_progression_mode`)
 
-Controls how the per-event τd estimates are smoothed/fit:
+Controls how the per-event τd estimates are smoothed/fit.  
+In `global` mode, τ values are fixed and progression applies **only to ratios/fractions**.
 
 #### `'fixed'`
-- Uses a **single τd for all events** (median of estimates)
+- Uses a **single τd for all events**
 - Flat line in decay progression plot
 - Ignores per-event variation
 
@@ -130,10 +155,10 @@ Controls how the per-event τd estimates are smoothed/fit:
 Fine-tune the progression by anchoring to specific events:
 
 #### `anchor_final_tau` (default: `True`)
-- **Anchors the last event's τd** as the maximum (slowest) decay time
-- **Rationale**: Last event has no following events → cleanest decay window → most reliable estimate
-- For `linear`: Forces regression line through final point
-- For `free_monotonic`: Forces spline endpoint to final τd
+- **Anchors the last event's τd** as the maximum (slowest) decay time.
+- For `linear`: Forces regression line through the final point.
+- For `free_monotonic`: Forces spline endpoint to the final τd.
+- In `global` mode, only the **last event** is fit for anchoring (no full per‑event fit).
 
 **Recommended**: Keep enabled (default) for most robust results
 
@@ -142,6 +167,7 @@ Fine-tune the progression by anchoring to specific events:
 - Useful for enforcing a specific baseline decay
 - For `linear`: Forces regression line through first point
 - For `free_monotonic`: Forces spline start to first τd
+ - In `global` mode, only the **first event** is fit for anchoring (no full per‑event fit)
 
 **Use when**: You want to enforce a specific starting τd value
 
@@ -149,6 +175,7 @@ Fine-tune the progression by anchoring to specific events:
 - Forces progression **between first and last** τd values
 - For `linear`: Direct line from event 1 to event 10
 - For `free_monotonic`: Smooth curve constrained between endpoints
+ - In `global` mode, only first/last events are fitted to define anchors; no full per‑event τ fit is done.
 
 ---
 
@@ -163,8 +190,8 @@ options = {
     'anchor_final_tau': True,  # Anchor to most reliable estimate
 }
 ```
-- Global template anchored at middle event
-- Robust linear fit through per-event estimates
+- Global recut template (single τ)
+- Ratios/fractions smoothed
 - Final event anchored (most reliable)
 - **Best for**: Most experiments, especially with noisy data
 
@@ -212,14 +239,12 @@ options = {
 
 When `fit_diagnostic_plot=True`, the decay progression plot shows:
 
-1. **Red dotted line with circles**: Initial per-event τd estimates
-2. **Orange X markers** (`global` mode only): Constrained values after clipping
-3. **Green solid line with squares**: Final progression fit
-4. **Vertical lines with markers**: Anchor points
-   - **Blue diamond** (`global` mode): Middle event anchor (global τd)
+1. **Red dotted line with circles**: Initial per‑event τd estimates (not shown in `global` mode).
+2. **Green solid line with squares**: Final progression fit.
+3. **Vertical lines with markers**: Anchor points
    - **Green square** (`anchor_first_tau=True`): First event anchor
    - **Purple star** (`anchor_final_tau=True`): Final event anchor
-5. **Horizontal dotted lines**: Show anchor τd values for reference
+4. **Horizontal dotted lines**: Show anchor τd values for reference
 
 #### Interpreting the Plot
 
@@ -252,9 +277,18 @@ This means events 4 and 7 were automatically downweighted (weights 0.31 and 0.28
 
 For models with multiple decay components (e.g., `iglusnfr` with `tau_decay_fast` and `tau_decay_slow`):
 
-- The **fast component** is used as the primary decay for progression
-- Falls back to slow component if fast is unavailable
-- Global anchor uses the fitted fast component
+- `global` mode: **fixed decays** from the recut fit (fast/slow, plus superslow if tri‑exp).
+  Progression acts on **fractions/ratios**, not on τ values.
+- `average` / `individual`: progression is applied to the **per‑event τ estimates**.
+
+---
+
+### Last‑event decay fit (superslow estimate + overlay)
+
+- The final‑event decay is fit with a **robust single‑exponential** model.
+- Fit window is capped to **50 ms** after the decay start.
+- Weights are **amplitude‑based** (Savgol‑weighted if available; raw otherwise).
+- The orange dashed overlay is anchored to the **trace value at the last event** so it sits on the data.
 
 ---
 
@@ -583,9 +617,9 @@ res = extract_metrics(
 
 ### Output structure
 - `tau_r_s` (float): rise time (s)
-- `tau_d_s` (array): per‑pulse decay times (s), non‑decreasing by construction
+- `tau_d_s` (array): per‑pulse decay times (s); constant in `global` mode unless anchors are enabled
 - `stim_times_s` (array): stimulus times (s)
-- `average` (dict): `y_avg`, `yhat_avg`, `amp_raw`, `amp_savgol`, `amp_nnls`, `ppr_nnls`
+- `average` (dict): `y_avg`, `yhat_avg`, `amp_raw`, `amp_savgol`, `amp_nnls`, `ppr_nnls` (PPR = AMPn / AMP1)
 - `per_trial` (list of dict): for each trial, the same amplitude/PPR triplets plus fitted `a_coeff`, `delta_s`, shared threshold (`thr_shared`), and `pval_amp1/2/3`
 - `threshold_amp1` (array): MAD‑rule thresholds for pulse 1 per trial
 - `pval_amp1` (array): empirical p‑values for pulse 1 per trial
@@ -600,16 +634,18 @@ All defaults live in a single dictionary inside `extract_metrics.py` named `DEFA
 - Peak window: `peak_window_ms`, `peak_avg_points`, `pre_peak_ms`
 - Peak window controls determine how stimulus-locked maxima are located and
   quantified:
-  - `peak_window_ms` bounds how far after each stimulus `windowed_max`
+- `peak_window_ms` bounds how far after each stimulus `windowed_max`
     searches for the response (`[stimulus − pre_peak_ms, stimulus +
     peak_window_ms]`). Larger values permit slower peaks but can pull in
     unrelated fluctuations; smaller values tighten detection around rapid
-    responses. The same window is used for null-sample amplitudes and bleach
+    responses. The window is **clamped to ISI** so it never extends into the next pulse.
+    The same window is used for null-sample amplitudes and bleach
     masking, so it shapes both detection sensitivity and thresholds.
   - `pre_peak_ms` extends the window before the stimulus, ensuring early-rising
     responses remain measurable. Increasing it can shorten the "quiet" segment
     reserved for bleach correction because the algorithm assumes anything in
-    the window may belong to the evoked peak.
+    the window may belong to the evoked peak. It also **affects the local baseline**
+    used for amplitude measurements.
   - `peak_avg_points` sets the symmetric sample count averaged around each
     detected maximum (±⌊N/2⌋). Higher values dampen noise and stabilize the
     reported amplitude, while lower values preserve temporal precision but are
@@ -617,6 +653,11 @@ All defaults live in a single dictionary inside `extract_metrics.py` named `DEFA
     real and null peaks so statistical thresholds stay consistent.
 - Baseline/null: `f0_window_s`, `null_sim_max_points`, `null_min_post_zoom_s`, `null_N`
 - Kinetics grids (ms): `kin_taur_grid_ms`, `kin_taud0_grid_ms`, `kin_slope_grid_ms`
+  - If `kin_taur_grid_ms` / `kin_taud0_grid_ms` are **not provided**, they are auto‑built as
+    **11‑point log‑spaced grids** within the active `parameter_bounds` (or defaults).
+    Default bounds are τrise 0.5–3 ms and τfast 3–10 ms.
+  - If you provide a grid, values **outside bounds are removed**; if nothing remains, the
+    grid falls back to the auto‑built version.
 - Robust NNLS + shifts: `huber_delta`, `irls_iters`, `delta_max_s`, `delta_step_s`, `shift_min_s`
 - Bleach correction: `bleach_huber_delta`, `bleach_tau_range_factor`, `bleach_n_tau`
 - Plot control: `plot = {'enabled': bool, 'traces': [...], 'show_decay': bool, 'trials': bool, 'baseline': bool, 'residual_buildup': bool, 'nnls_residual': bool, 'nnls_n_minus_1': bool}`
@@ -624,4 +665,4 @@ All defaults live in a single dictionary inside `extract_metrics.py` named `DEFA
 Notes:
 - Provide `train_start`, `isi`, and `n_pulses` appropriate to each dataset.
 - ΔF/F0 is used by default; disable by `options['normalize_dff'] = False` if you need raw ΔF.
-- τd is always enforced non‑decreasing across pulses to avoid non‑physical regressions and improve stability.
+- When progression rules specify monotonic increase (default for decay), τd is constrained non‑decreasing.
