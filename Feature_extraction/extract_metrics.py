@@ -138,7 +138,7 @@ DEFAULTS = {
     'use_template_variants': False,  # Enable multi-template NNLS (single pass, data-driven slow component)
     # Bi-exp: slow component fractions per event.
     # Tri-exp: slow fraction grid paired with template_variant_superslow_fracs.
-    'template_variant_ratios': [0.2, 0.4, 0.6, 0.8],  # Reduced from linspace(0,1,10) for ~2.5× faster NNLS
+    'template_variant_ratios': np.linspace(0.0, 1.0, 10),
 }
 
 # Recut options: oversample factor and projection ('mean'|'median'|'std')
@@ -5622,7 +5622,19 @@ def extract_metrics(
         try:
             is_tri = (event_model == 'iglusnfr_tri')
             dominant_ratios = variant_info_avg.get('dominant_template_ratio', [])
-            
+            template_variant_sums = variant_info_avg.get('template_variant_sums', None)
+            variant_ratios = variant_info_avg.get('variant_ratios', None)
+            hard_select = bool(variant_info_avg.get('hard_select', False))
+
+            use_soft_weights = (
+                (template_variant_sums is not None)
+                and (variant_ratios is not None)
+                and (not hard_select)
+                and (len(dominant_ratios) == n_pulses)
+                and (np.asarray(template_variant_sums).shape[0] == n_pulses)
+                and (len(variant_ratios) == np.asarray(template_variant_sums).shape[1])
+            )
+
             if dominant_ratios is not None and len(dominant_ratios) == n_pulses:
                 event_indices = np.arange(1, n_pulses + 1)
                 
@@ -5635,25 +5647,67 @@ def extract_metrics(
                     frac_slow_arr = np.zeros(n_pulses)
                     frac_superslow_arr = np.zeros(n_pulses)
                     frac_fast_arr = np.zeros(n_pulses)
-                    
-                    for i, r in enumerate(dominant_ratios):
-                        if isinstance(r, (list, tuple)) and len(r) >= 2:
-                            frac_slow_base = float(r[0])
-                            frac_superslow_max = float(r[1])
-                            ramp = float(i) / float(n_pulses - 1) if n_pulses > 1 else 0.0
-                            frac_superslow = frac_superslow_max * ramp
-                            frac_slow = frac_slow_base
-                            if frac_slow + frac_superslow > 1.0:
-                                frac_slow = max(0.0, 1.0 - frac_superslow)
-                            frac_fast = max(0.0, 1.0 - frac_slow - frac_superslow)
+
+                    for i in range(n_pulses):
+                        if use_soft_weights:
+                            weights = np.asarray(template_variant_sums[i], float)
+                            wsum = float(np.sum(weights))
+                            if wsum > 0:
+                                wnorm = weights / wsum
+                                for w, r in zip(wnorm, variant_ratios):
+                                    if isinstance(r, (list, tuple)) and len(r) >= 2:
+                                        frac_slow_base = float(r[0])
+                                        frac_superslow_max = float(r[1])
+                                        ramp = float(i) / float(n_pulses - 1) if n_pulses > 1 else 0.0
+                                        frac_superslow = frac_superslow_max * ramp
+                                        frac_slow = frac_slow_base
+                                        if frac_slow + frac_superslow > 1.0:
+                                            frac_slow = max(0.0, 1.0 - frac_superslow)
+                                        frac_fast = max(0.0, 1.0 - frac_slow - frac_superslow)
+                                    else:
+                                        frac_slow = float(r) if np.isscalar(r) else 0.5
+                                        frac_superslow = 0.0
+                                        frac_fast = 1.0 - frac_slow
+                                    frac_fast_arr[i] += w * frac_fast
+                                    frac_slow_arr[i] += w * frac_slow
+                                    frac_superslow_arr[i] += w * frac_superslow
+                            else:
+                                r = dominant_ratios[i]
+                                if isinstance(r, (list, tuple)) and len(r) >= 2:
+                                    frac_slow_base = float(r[0])
+                                    frac_superslow_max = float(r[1])
+                                    ramp = float(i) / float(n_pulses - 1) if n_pulses > 1 else 0.0
+                                    frac_superslow = frac_superslow_max * ramp
+                                    frac_slow = frac_slow_base
+                                    if frac_slow + frac_superslow > 1.0:
+                                        frac_slow = max(0.0, 1.0 - frac_superslow)
+                                    frac_fast = max(0.0, 1.0 - frac_slow - frac_superslow)
+                                else:
+                                    frac_slow = float(r) if np.isscalar(r) else 0.5
+                                    frac_superslow = 0.0
+                                    frac_fast = 1.0 - frac_slow
+                                frac_fast_arr[i] = frac_fast
+                                frac_slow_arr[i] = frac_slow
+                                frac_superslow_arr[i] = frac_superslow
                         else:
-                            frac_slow = float(r) if np.isscalar(r) else 0.5
-                            frac_superslow = 0.0
-                            frac_fast = 1.0 - frac_slow
-                        
-                        frac_fast_arr[i] = frac_fast
-                        frac_slow_arr[i] = frac_slow
-                        frac_superslow_arr[i] = frac_superslow
+                            r = dominant_ratios[i]
+                            if isinstance(r, (list, tuple)) and len(r) >= 2:
+                                frac_slow_base = float(r[0])
+                                frac_superslow_max = float(r[1])
+                                ramp = float(i) / float(n_pulses - 1) if n_pulses > 1 else 0.0
+                                frac_superslow = frac_superslow_max * ramp
+                                frac_slow = frac_slow_base
+                                if frac_slow + frac_superslow > 1.0:
+                                    frac_slow = max(0.0, 1.0 - frac_superslow)
+                                frac_fast = max(0.0, 1.0 - frac_slow - frac_superslow)
+                            else:
+                                frac_slow = float(r) if np.isscalar(r) else 0.5
+                                frac_superslow = 0.0
+                                frac_fast = 1.0 - frac_slow
+
+                            frac_fast_arr[i] = frac_fast
+                            frac_slow_arr[i] = frac_slow
+                            frac_superslow_arr[i] = frac_superslow
                     
                     # Panel 1: stacked fractions
                     ax1.stackplot(event_indices, frac_fast_arr, frac_slow_arr, frac_superslow_arr,
@@ -5686,11 +5740,30 @@ def extract_metrics(
                 else:
                     # Bi-exponential: frac_slow per event
                     frac_slow_arr = np.zeros(n_pulses)
-                    for i, r in enumerate(dominant_ratios):
-                        if isinstance(r, (list, tuple)):
-                            frac_slow_arr[i] = float(r[0]) if len(r) > 0 else 0.5
+                    for i in range(n_pulses):
+                        if use_soft_weights:
+                            weights = np.asarray(template_variant_sums[i], float)
+                            wsum = float(np.sum(weights))
+                            if wsum > 0:
+                                wnorm = weights / wsum
+                                for w, r in zip(wnorm, variant_ratios):
+                                    if isinstance(r, (list, tuple)):
+                                        frac_slow = float(r[0]) if len(r) > 0 else 0.5
+                                    else:
+                                        frac_slow = float(r)
+                                    frac_slow_arr[i] += w * frac_slow
+                            else:
+                                r = dominant_ratios[i]
+                                if isinstance(r, (list, tuple)):
+                                    frac_slow_arr[i] = float(r[0]) if len(r) > 0 else 0.5
+                                else:
+                                    frac_slow_arr[i] = float(r)
                         else:
-                            frac_slow_arr[i] = float(r)
+                            r = dominant_ratios[i]
+                            if isinstance(r, (list, tuple)):
+                                frac_slow_arr[i] = float(r[0]) if len(r) > 0 else 0.5
+                            else:
+                                frac_slow_arr[i] = float(r)
                     frac_fast_arr = 1.0 - frac_slow_arr
                     
                     # Panel 1: stacked fractions
