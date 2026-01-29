@@ -22,6 +22,8 @@ same formulas and defaults as the original pipeline for equivalence.
 
 from typing import Optional, Dict, List, Tuple, Any
 
+import os
+
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.optimize import nnls
@@ -839,7 +841,6 @@ def fit_amplitudes_with_template_variants(
     current_tau_d = tau_d_vec_s.copy()
     current_t0 = event_t0_s
     kinetics_adjusted = False
-
     # Compute base weights once
     base_weights = _calculate_nnls_weights(
         t, stim_times, isi, weight_mode, weight_tau_s, y_ref=y

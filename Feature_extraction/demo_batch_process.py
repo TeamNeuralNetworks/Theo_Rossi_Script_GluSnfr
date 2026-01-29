@@ -101,11 +101,11 @@ def _build_options_presets(peak_window_ms, pre_zoom_s, post_zoom_s):
             'anchor_first_tau': False,                                      # Whether to anchor the first event tau to a fixed value
             
             # --- Event Model ---
-            'event_model': 'iglusnfr',                                      # 'double_exp', 'iglusnfr', 'iglusnfr_tri', 'single_exp', 'cooperative'
+            'event_model': 'iglusnfr_tri',                                  # 'double_exp', 'iglusnfr', 'iglusnfr_tri', 'single_exp', 'cooperative'
             'parameter_bounds': {
-                'tau_decay_fast': (0.002, 0.010),                           # fast decay bounds (s)
-                'tau_decay_slow': (0.010, 0.050),                           # slow decay bounds (s)
-                'tau_superslow': (0.050, 0.150),                            # superslow decay bounds (s) - only for tri-exponential
+                'tau_decay_fast': (0.003, 0.008),                           # fast decay bounds (s)
+                'tau_decay_slow': (0.008, 0.035),                           # slow decay bounds (s)
+                'tau_superslow': (0.035, 0.150),                            # superslow decay bounds (s) - only for tri-exponential
                 'amplitude_ratio': (0.0, 1.0),                              # amplitude ratio bounds (0 to 1) ; 0 means all fast, 1 means all slow
             },
             'early_events_only': 0,                                         # Use only first N events for kinetics fitting (0 = all events)

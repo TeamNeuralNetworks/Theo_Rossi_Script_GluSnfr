@@ -188,7 +188,7 @@ def _build_options_presets(peak_window_ms, pre_zoom_s, post_zoom_s):
                 'nnls_residual': False,                                     # Whether to show NNLS residuals on average plot
                 'nnls_n_minus_1': False,                                    # Whether to show NNLS n-1 fit on average plot
                 'plot_peaks_details': True,                                 # Show peak detection details on traces
-                'param_evolution': True,                                    # Show parameter evolution across events
+                'param_evolution': False,                                   # Show parameter evolution across events
             },
             
             # --- Template Variants ---
@@ -276,7 +276,6 @@ base = os.path.splitext(os.path.basename(xlsx_path))[0]
 # =============================================================================
 #                              RUN ANALYSIS
 # =============================================================================
-
 res = extract_metrics(
     time, trials,
     train_start=START,
@@ -353,24 +352,9 @@ if per_trial_rows:
 fig = res.get('figure')
 if fig is not None:
     try:
-        fig.savefig(os.path.join(OUT_DIR, "fiber_plot.png"), dpi=150)
+        fig.savefig(os.path.join(OUT_DIR, "traces_converted_plot.png"), dpi=150)
     except Exception:
         pass
-
-    # Overlay recut snippets if available
-    snips = res.get('recut_snippets')
-    t_rel_rec = res.get('recut_t_rel')
-    avg_rec = res.get('recut_avg')
-    if snips is not None and t_rel_rec is not None and avg_rec is not None:
-        try:
-            from smoothing import build_median_recut_figure
-            ax_target = fig.axes[0] if fig.axes else None
-            fig2 = build_median_recut_figure(t_rel_rec, avg_rec, snippets=snips, ax=ax_target, plot_median_first=True)
-            outpath = os.path.join(OUT_DIR, "fiber_recuts_overlay.png")
-            (fig if ax_target else fig2).savefig(outpath, dpi=150)
-            print(f"[demo] saved overlay to {outpath}")
-        except Exception as e:
-            print(f"[demo] error building overlay: {e}")
 
     try:
         plt.show()
