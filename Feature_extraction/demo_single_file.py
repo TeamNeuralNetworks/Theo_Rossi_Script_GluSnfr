@@ -186,8 +186,8 @@ def _build_options_presets(peak_window_ms, pre_zoom_s, post_zoom_s):
                 'figsize': (10, 6),                                         # Figure size
                 'show_decay': True,                                         # Show decay fits on average plot
                 'show_onsets': True,                                        # Show detected onsets on recut snippets
-                'trials': False,                                            # Whether to generate per-trial figures
-                'baseline': False,                                          # Whether to show baseline F0 levels on traces
+                'trials': True,                                            # Whether to generate per-trial figures
+                'baseline': True,                                          # Whether to show baseline F0 levels on traces
                 'residuals': True,                                          # Whether to show residuals on average plot
                 'nnls_residual': False,                                     # Whether to show NNLS residuals on average plot
                 'nnls_n_minus_1': False,                                    # Whether to show NNLS n-1 fit on average plot

@@ -94,33 +94,33 @@ Not all parts of the trace are equally informative about event amplitudes. Regio
 
 For iGluSnFR trains, weighting based on the smoothed trace (`nnls_weight_mode="savgol"`) is typically used. This emphasizes time points where genuine fluorescence transients are present and down‑weights flat baseline or noise‑dominated regions, improving robustness of the estimated amplitudes without biasing them toward any particular kinetic assumption.
 
-### Per‑event residual analysis (Figure 5)
+### Residual analysis and diagnostics (Figure 5)
 
-The pipeline uses the word “residual” in several related but distinct senses:
+The word "residual" appears in several related but distinct senses in this pipeline:
 
-- **NNLS fit residual norm** (Figure 4): the scalar \(\lVert Ka - y \rVert_2\) used to compare different template grids during fitting.
-- **Data–fit residual trace** (purple in the original plots): the time series \(r(t) = y(t) - \hat y(t)\) after a given NNLS solution.
-- **Inter‑event baseline residual** (red/white triangles and orange dashed baseline): the contribution of earlier events evaluated at the peak of a later event, which must be subtracted when interpreting peaks or computing PPR.
+- **NNLS fit residual norm** (Figure 4): the scalar \(\lVert Ka - y \rVert_2\) used to compare different template grids during fitting. This is computed for every fit and is the primary metric for template selection.
+- **Data–fit residual trace** (purple in the diagnostic plots): the time series \(r(t) = y(t) - \hat y(t)\) after a given NNLS solution. This is always computed and can be inspected via `options['plot']['nnls_residual'] = True`.
+- **Inter‑event baseline residual**: the contribution of earlier events evaluated at the peak of a later event, which is subtracted when computing peak amplitudes and PPR. This correction is implemented in the pipeline's peak‑detection logic.
 
-Residuals in the first two senses are always computed, at every frequency, as the primary diagnostics that the fitted template family is adequate. Besides the global data–fit residual trace, the implementation also constructs event‑subtracted residuals that isolate the contribution of each event in turn: for event \(i\), the fitted contribution of all other events is subtracted from both the data and the global fit, and the remaining mismatch between this isolated trace and the event’s own template is summarized by its root‑mean‑square (RMS) value.
+Residuals in the first two senses are always computed, at every frequency, as the primary diagnostics that the fitted template family is adequate.
 
-`fig8_event_subtracted_residuals.png` visualizes this procedure. The top panel shows the global fit across the entire train (data in black, fit in blue, global data–fit residual in purple). In the lower panels, each event is examined separately: the orange curve represents the fit of all other events (the “baseline” from earlier pulses), the green curve the isolated signal for the event of interest, and the blue dotted curve the corresponding template. The gray shaded area indicates the event‑subtracted residual, and the panel title reports its RMS. These diagnostics help identify specific events whose kinetics deviate from the chosen model, are contaminated by artifacts, or are poorly constrained by the data; thresholds on RMS can be used to flag events or trials for exclusion without changing the underlying amplitudes.
+**Concept: event‑subtracted residuals.** A useful diagnostic extension (illustrated in `fig8_event_subtracted_residuals.png` but not yet implemented in `extract_metrics`) would isolate each event by subtracting the fitted contribution of all other events, then compare the remaining signal to the event's own template. The RMS of this event‑subtracted residual could flag specific events whose kinetics deviate from the chosen model. The figure below shows this concept on synthetic data.
 
 ![Event‑subtracted residuals](docs/figures/fig8_event_subtracted_residuals.png)
 
-*Figure 5. Per‑event residual analysis using event subtraction. A global NNLS fit is decomposed into contributions from individual events; subtracting all but one event isolates the signal for that pulse, and comparing it to the fitted template yields an event‑specific residual whose RMS can be used to flag poorly modeled events.*
+*Figure 5. Conceptual illustration of per‑event residual analysis. A global NNLS fit is decomposed into contributions from individual events; subtracting all but one event isolates the signal for that pulse, and comparing it to the fitted template yields an event‑specific residual whose RMS could be used to flag poorly modeled events. This diagnostic is not yet part of the automated pipeline.*
 
-### Residual‑based correction for 50 Hz trains (Figure 6)
+### The 50 Hz overlap challenge and residual carry‑over (Figure 6)
 
-In addition to using residuals as diagnostics, the code can also use them to *modify* amplitudes in the special case where pulses are so close that the slow decay of one event has not yet relaxed when the next one starts. This situation mainly arises at 50 Hz (20 ms inter‑stimulus interval), where even a good bi‑exponential template tends to leave a positive baseline “floor” between pulses that would otherwise be folded into the next amplitude.
+At 50 Hz (20 ms ISI), even a good bi‑exponential template can leave a positive baseline "floor" between pulses because the slow decay component has not fully relaxed before the next stimulus arrives. This residual carry‑over, if unaccounted for, inflates the measured amplitude of later events.
 
-For such high‑frequency trains, the pipeline offers an optional residual‑based correction. After an initial NNLS fit, the residual trace is examined immediately before each pulse; if there is a systematic positive residual there, a corresponding offset is subtracted from that event’s amplitude and the fit is recomputed. At lower stimulation frequencies, where events have time to decay back toward baseline, this correction is typically unnecessary and residuals are used only for quality control, not for amplitude adjustment.
+The current pipeline addresses this primarily through the **inter‑event baseline subtraction** built into the peak‑detection logic: each event's amplitude is measured after subtracting the cumulative NNLS reconstruction from all earlier pulses. Additionally, the template variant grid and decay progression system help the NNLS fit absorb slow‑decay residuals by selecting appropriate kinetics per event.
 
-`fig5_residual_correction.png` illustrates the effect of this procedure on simulated 50 Hz data. The upper panel highlights how positive residuals between pulses inflate later amplitudes, and the lower panel shows that applying the correction reduces this carry‑over and brings recovered amplitudes closer to their true values.
+**Concept: explicit residual‑based correction.** A more aggressive approach (illustrated in `fig5_residual_correction.png` but not yet implemented in `extract_metrics`) would examine the data–fit residual immediately before each pulse and subtract any systematic positive offset from that event's amplitude. The figure below demonstrates this concept on synthetic 50 Hz data.
 
 ![Residual correction at 50 Hz](docs/figures/fig5_residual_correction.png)
 
-*Figure 6. Residual‑based amplitude correction for 50 Hz stimulus trains. Simulated 50 Hz data show how positive residuals between pulses can inflate later amplitudes; applying a residual‑based correction reduces this carry‑over and brings the recovered amplitudes closer to their true values.*
+*Figure 6. Illustration of residual carry‑over at 50 Hz. Simulated data show how positive residuals between closely spaced pulses can inflate later amplitudes; an explicit residual‑based correction (not yet in the automated pipeline) reduces this carry‑over and brings recovered amplitudes closer to their true values.*
 
 ### Null distribution of NNLS amplitudes and significance testing (Figure 7)
 
@@ -152,4 +152,6 @@ The analysis routines are exposed through `Feature_extraction.extract_metrics`, 
 
 For single recordings, `demo_single_file.py` demonstrates how to load an individual Excel file, configure an `iglusnfr` event model with template and jitter variants, and visualize raw traces, NNLS fits, residuals, and per‑pulse amplitudes. For large datasets, `demo_batch_process.py` shows how to apply the same analysis settings to multiple folders of files, aggregate amplitude and PPR summaries, and export them to CSV/Excel. The figure‑generation script `generate_readme_figures.py` provides a compact, data‑driven reference for the behavior of each processing step and is a useful starting point for adapting the methods to new experimental paradigms.
 
-The overall workflow is therefore: (i) correct raw traces for bleaching and normalize to ΔF/F0; (ii) construct a high‑SNR template by recutting and oversampling trial‑averaged responses; (iii) generate a family of template and jitter variants; (iv) estimate non‑negative event amplitudes via weighted NNLS; (v) assess per‑event fit quality using event‑subtracted residuals and, for high‑frequency trains, apply residual‑based corrections; and (vi) use an empirically derived null distribution of NNLS amplitudes to set detection thresholds and stabilize paired‑pulse measurements.
+The overall workflow is therefore: (i) correct raw traces for bleaching and normalize to ΔF/F0; (ii) construct a high‑SNR template by recutting and oversampling trial‑averaged responses; (iii) generate a family of template and jitter variants; (iv) estimate non‑negative event amplitudes via weighted NNLS with inter‑event baseline subtraction; and (v) use an empirically derived null distribution of NNLS amplitudes to set detection thresholds and stabilize paired‑pulse measurements.
+
+For an interactive introduction to the NNLS decomposition approach and its connection to the biological questions in our study (Rossi, Perrot, Huber, Poulain, Doussau, Valera & Isope — *Bouton‑Specific Diversity of Glutamate Release from Single Axons*), see the companion notebook [`NNLS_Lecture_Demo.ipynb`](NNLS_Lecture_Demo.ipynb). It walks through the overlap problem, design matrix construction, kernel design for SF‑iGluSnFR.S72A, weighted and robust NNLS, and decay progression — with runnable code and simulated examples.

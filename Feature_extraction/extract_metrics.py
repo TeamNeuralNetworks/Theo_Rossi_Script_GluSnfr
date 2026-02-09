@@ -1449,6 +1449,168 @@ def fit_amplitudes_no_overlap_forward(
     
     return a, d, X, yhat, components
 
+
+def fit_amplitudes_with_fixed_variants(
+    y: np.ndarray,
+    t: np.ndarray,
+    stim_times: np.ndarray,
+    tau_r_s: float,
+    tau_d_vec_s: np.ndarray,
+    *,
+    dominant_template_ratios,
+    pre_zoom_s: float,
+    post_zoom_s: float,
+    robust: bool = True,
+    huber_delta: float,
+    irls_iters: int,
+    allow_shift: bool = True,
+    delta_max_s: float,
+    delta_step_s: float,
+    shift_min_s: float,
+    event_t0_s: float = 0.0,
+):
+    """Forward, non-overlap per-pulse fitting using variant kernels with fixed ratios.
+
+    Similar to fit_amplitudes_no_overlap_forward but uses _build_variant_kernel
+    with the dominant template ratios from the average fit. This ensures per-trial
+    decay curves match the corresponding event tau from the average.
+
+    Args:
+        dominant_template_ratios: Per-event slow fraction ratios from average fit.
+            Can be scalar array for bi-exp or tuple array for tri-exp.
+
+    Returns (amplitudes, shifts, design, reconstruction, components_list).
+    """
+    n = len(stim_times)
+    a = np.zeros(n, float)
+    d = np.zeros(n, float)
+    residual = y.copy()
+    
+    event_t0_s = float(event_t0_s)
+    n_events = n
+
+    for p in range(n):
+        st = float(stim_times[p])
+        anchor = st + event_t0_s
+        if p < n - 1:
+            next_anchor = float(stim_times[p + 1]) + event_t0_s
+        else:
+            next_anchor = None
+        max_end = min(anchor + post_zoom_s, next_anchor) if next_anchor is not None else (anchor + post_zoom_s)
+        avail_post = max(0.0, max_end - anchor)
+        
+        if avail_post < 1e-6:
+            continue
+        
+        # Get the dominant ratio for this pulse
+        frac_slow = dominant_template_ratios[p] if p < len(dominant_template_ratios) else 0.5
+            
+        a_p, d_p = _fit_single_pulse_amp_variant(
+            residual, t, st, tau_r_s, float(tau_d_vec_s[p]), frac_slow,
+            pre_zoom_s=pre_zoom_s, post_zoom_s=avail_post,
+            robust=robust, huber_delta=huber_delta, irls_iters=irls_iters,
+            allow_shift=allow_shift, delta_max_s=delta_max_s, delta_step_s=delta_step_s,
+            shift_min_s=shift_min_s, event_t0_s=event_t0_s,
+            event_idx=p, n_events=n_events,
+        )
+        
+        a[p] = a_p
+        d[p] = d_p
+        
+        # Subtract this component from residual for next iteration
+        k = _build_variant_kernel(t - (anchor + d_p), tau_r_s, float(tau_d_vec_s[p]), frac_slow,
+                                  event_idx=p, n_events=n_events)
+        comp = a_p * k
+        residual = residual - comp
+    
+    # Reconstruct all components using the fitted parameters
+    components = []
+    for p in range(n):
+        frac_slow = dominant_template_ratios[p] if p < len(dominant_template_ratios) else 0.5
+        if a[p] > 0:
+            anchor_p = float(stim_times[p]) + event_t0_s
+            k = _build_variant_kernel(t - (anchor_p + d[p]), tau_r_s, float(tau_d_vec_s[p]), frac_slow,
+                                      event_idx=p, n_events=n_events)
+            components.append(a[p] * k)
+        else:
+            components.append(np.zeros_like(y))
+    
+    yhat = np.sum(components, axis=0) if components else np.zeros_like(y)
+    
+    # Build design matrix for reference
+    X = (
+        np.column_stack([
+            _build_variant_kernel(
+                t - (float(stim_times[p]) + event_t0_s + d[p]),
+                tau_r_s,
+                float(tau_d_vec_s[p]),
+                dominant_template_ratios[p] if p < len(dominant_template_ratios) else 0.5,
+                event_idx=p, n_events=n_events,
+            )
+            for p in range(n)
+        ])
+        if n
+        else np.zeros((t.size, 0))
+    )
+    
+    return a, d, X, yhat, components
+
+
+def _fit_single_pulse_amp_variant(
+    y: np.ndarray,
+    t: np.ndarray,
+    stim_time: float,
+    tau_r_s: float,
+    tau_d_s: float,
+    frac_slow: float,
+    *,
+    pre_zoom_s: float,
+    post_zoom_s: float,
+    robust: bool,
+    huber_delta: float,
+    irls_iters: int,
+    allow_shift: bool,
+    delta_max_s: float,
+    delta_step_s: float,
+    shift_min_s: float,
+    event_t0_s: float,
+    event_idx: int,
+    n_events: int,
+):
+    """Fit single pulse amplitude using variant kernel with fixed slow fraction.
+    
+    Similar to _fit_single_pulse_amp but uses _build_variant_kernel.
+    """
+    anchor = float(stim_time) + float(event_t0_s)
+    local_mask = (t >= (anchor - pre_zoom_s)) & (t <= (anchor + post_zoom_s))
+    if not np.any(local_mask):
+        return 0.0, 0.0
+    y_seg = y[local_mask]
+    best_a, best_d = 0.0, 0.0
+    
+    if allow_shift:
+        start = max(float(shift_min_s), 0.0)
+        if delta_max_s > 0 and start <= delta_max_s + 1e-12:
+            pos_shifts = np.arange(start, delta_max_s + 1e-12, delta_step_s)
+            shifts = np.concatenate(([0.0], pos_shifts)) if pos_shifts.size else np.array([0.0])
+        else:
+            shifts = np.array([0.0])
+    else:
+        shifts = np.array([0.0])
+    shifts = np.unique(shifts.astype(float))
+    
+    for d in shifts:
+        k_full = _build_variant_kernel(t - (anchor + d), tau_r_s, tau_d_s, frac_slow,
+                                       event_idx=event_idx, n_events=n_events)
+        k_loc = k_full[local_mask]
+        if k_loc.size < 3 or np.all(k_loc == 0):
+            continue
+        a_loc = _nnls_irls_singlecol(y_seg, k_loc, robust=robust, huber_delta=huber_delta, iters=irls_iters)
+        if a_loc > best_a:
+            best_a, best_d = a_loc, d
+    return float(best_a), float(best_d)
+
+
 def compute_localmax_corrected_amps(
     t: np.ndarray,
     y: np.ndarray,
@@ -5459,17 +5621,35 @@ def extract_metrics(
     thr_list: List[float] = []
     pval_list: List[float] = []
     figures_trials = []  # optional per-trial figures
+    
+    # Get dominant template ratios from average fit for per-trial fitting
+    dominant_template_ratios = None
+    if variant_info_avg is not None:
+        dominant_template_ratios = variant_info_avg.get('dominant_template_ratio')
+    
     for j in range(Yd.shape[1]):
         yj = Yd[:, j]
         # Always compute SG-smoothed series; may be used for SAVGOL-based thresholds
         yj_sg = sg_smooth(yj, sgW, sgP)
-        a_t, d_t, X_t, yhat_t, comp_t = fit_amplitudes_no_overlap_forward(
-            yj, t, stim_times, tau_r, tau_d_vec,
-            pre_zoom_s=cfg['pre_zoom_s'], post_zoom_s=cfg['post_zoom_s'],
-            robust=True, huber_delta=cfg['huber_delta'], irls_iters=cfg['irls_iters'],
-            allow_shift=allow_shift, delta_max_s=cfg['delta_max_s'], delta_step_s=cfg['delta_step_s'],
-            shift_min_s=cfg['shift_min_s'], event_t0_s=event_t0_s,
-        )
+        
+        # Use variant kernel fitting if template variants were used for the average
+        if dominant_template_ratios is not None and _VARIANT_KERNEL_BUILDER is not None:
+            a_t, d_t, X_t, yhat_t, comp_t = fit_amplitudes_with_fixed_variants(
+                yj, t, stim_times, tau_r, tau_d_vec,
+                dominant_template_ratios=dominant_template_ratios,
+                pre_zoom_s=cfg['pre_zoom_s'], post_zoom_s=cfg['post_zoom_s'],
+                robust=True, huber_delta=cfg['huber_delta'], irls_iters=cfg['irls_iters'],
+                allow_shift=allow_shift, delta_max_s=cfg['delta_max_s'], delta_step_s=cfg['delta_step_s'],
+                shift_min_s=cfg['shift_min_s'], event_t0_s=event_t0_s,
+            )
+        else:
+            a_t, d_t, X_t, yhat_t, comp_t = fit_amplitudes_no_overlap_forward(
+                yj, t, stim_times, tau_r, tau_d_vec,
+                pre_zoom_s=cfg['pre_zoom_s'], post_zoom_s=cfg['post_zoom_s'],
+                robust=True, huber_delta=cfg['huber_delta'], irls_iters=cfg['irls_iters'],
+                allow_shift=allow_shift, delta_max_s=cfg['delta_max_s'], delta_step_s=cfg['delta_step_s'],
+                shift_min_s=cfg['shift_min_s'], event_t0_s=event_t0_s,
+            )
         amp_raw = compute_localmax_corrected_amps(
             t, yj, stim_times, win_ms, n_avg, pre_ms, d_t, tau_r, tau_d_vec,
             event_t0_s=event_t0_s,
