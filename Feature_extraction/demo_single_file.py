@@ -48,7 +48,7 @@ OUT_DIR = os.path.join(DATA_ROOT, "Testout")
 CONDITION = ""  # Leave empty to auto-detect from file location
 TARGET_FILE = "20191017_linescan3_50Hz_10pulses_2.5mMCa_bouton2_traces_converted.xlsx"
 #TARGET_FILE = "20210722_linescan3_50Hz_10pulses_1.5mMCa_bouton12_traces_converted.xlsx"
-TARGET_FILE = "20210721_linescan1_50Hz_10pulses_4mMCa_bouton1_traces_converted.xlsx"
+#TARGET_FILE = "20210721_linescan1_50Hz_10pulses_4mMCa_bouton1_traces_converted.xlsx"
 # --- Select analysis preset ---
 PRESET_NAME = 'iglusnfr_optimized'  # Options: 'iglusnfr_optimized', 'double_exp', 'single_exp_fixed_8ms'
 
@@ -143,7 +143,7 @@ def _build_options_presets(peak_window_ms, pre_zoom_s, post_zoom_s):
             'onset_baseline_threshold': 0.10,                               # Threshold (fraction of peak) for baseline_threshold onset detection
             
             # --- PPR Safety ---
-            'amplitude_floor_to_noise': True,                               # Floor amplitudes to noise level before computing PPR; defined as 1*std of baseline
+            'amplitude_floor_to_noise': True,                               # Floor all pulse amplitudes to the per-trial A1 threshold (thr1) before PPR; average uses median(thr1)
             
             # --- NNLS Fitting ---
             'nnls_weight_mode': 'savgol',                                   # 'uniform', 'linear', 'exponential', 'savgol', 'peak' ; weighting scheme for NNLS fitting
@@ -166,9 +166,9 @@ def _build_options_presets(peak_window_ms, pre_zoom_s, post_zoom_s):
             'pre_peak_ms': 1.0,                                             # Pre-peak baseline window (ms) ; controls how local baseline before each peak is computed ;
             
             # --- Thresholding ---
-            'measurement': 'NNLS',                                          # 'NNLS', 'AMP1' ; measurement used for thresholding the first event (to estimate failures)
-            'fail_method': 'SAVGOL',                                        # 'SAVGOL', 'STD' ; method for estimating noise level for thresholding
-            'threshold_mode': 'auto',                                       # 'auto', 'fixed' ; whether to use automatic or fixed thresholding; auto means threshold is computed from estimated noise; fixed means user provides threshold value
+            'measurement': 'NNLS',                                          # 'NNLS', 'SAVGOL', 'RAW' ; amplitude series used for p-values/classification
+            'fail_method': 'SAVGOL',                                        # 'NNLS', 'SAVGOL', 'RAW' ; method used to build null/noise amplitudes for thresholding
+            'threshold_mode': 'auto',                                       # 'auto', 'mad', 'sd' ; auto => mad for NNLS null, sd for SAVGOL/RAW null
             'null_N': 1.0,                                                  # Multiplier for null distribution to set threshold ; only used if threshold_mode is 'auto'
             'null_sim_max_points': 1000,                                    # Max points for null distribution simulation
             'null_min_post_zoom_s': 0.05,                                   # Minimum post-zoom duration (s) to use for null distribution simulation

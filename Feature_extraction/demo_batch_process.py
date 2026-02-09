@@ -125,7 +125,7 @@ def _build_options_presets(peak_window_ms, pre_zoom_s, post_zoom_s):
             'onset_baseline_threshold': 0.10,                               # Threshold (fraction of peak) for baseline_threshold onset detection
             
             # --- PPR Safety ---
-            'amplitude_floor_to_noise': True,                               # Floor amplitudes to noise level before computing PPR; defined as 1*std of baseline
+            'amplitude_floor_to_noise': True,                               # Floor all pulse amplitudes to the per-trial A1 threshold (thr1) before PPR; average uses median(thr1)
             
             # --- NNLS Fitting ---
             'nnls_weight_mode': 'savgol',                                     # 'uniform', 'linear', 'exponential', 'savgol', 'peak' ; weighting scheme for NNLS fitting
@@ -148,9 +148,9 @@ def _build_options_presets(peak_window_ms, pre_zoom_s, post_zoom_s):
             'pre_peak_ms': 1.0,                                             # Pre-peak baseline window (ms) ; controls how local baseline before each peak is computed ;
             
             # --- Thresholding ---
-            'measurement': 'NNLS',                                          # 'NNLS', 'AMP1' ; measurement used for thresholding the first event (to estimate failures)
-            'fail_method': 'SAVGOL',                                        # 'SAVGOL', 'STD' ; method for estimating noise level for thresholding
-            'threshold_mode': 'auto',                                       # 'auto', 'fixed' ; whether to use automatic or fixed thresholding; auto means threshold is computed from estimated noise; fixed means user provides threshold value
+            'measurement': 'NNLS',                                          # 'NNLS', 'SAVGOL', 'RAW' ; amplitude series used for p-values/classification
+            'fail_method': 'SAVGOL',                                        # 'NNLS', 'SAVGOL', 'RAW' ; method used to build null/noise amplitudes for thresholding
+            'threshold_mode': 'auto',                                       # 'auto', 'mad', 'sd' ; auto => mad for NNLS null, sd for SAVGOL/RAW null
             'null_N': 1.0,                                                  # Multiplier for null distribution to set threshold ; only used if threshold_mode is 'auto'
             'null_sim_max_points': 1000,                                    # Max points for null distribution simulation
             'null_min_post_zoom_s': 0.05,                                   # Minimum post-zoom duration (s) to use for null distribution simulation
@@ -321,18 +321,38 @@ def _process_one_file(task: tuple[str, str], *, show_plots: bool) -> dict:
     fail_counts = {i: [0, 0] for i in range(1, 4)}
     for idx_trial, rtrial in enumerate(res.get('per_trial', [])):
         amp_trial = np.asarray(rtrial.get('amp_nnls_corr', rtrial.get('amp_nnls')), float)
+        amp_trial_unfloored = np.asarray(
+            rtrial.get('amp_nnls_corr_unfloored', rtrial.get('amp_nnls_corr', rtrial.get('amp_nnls'))),
+            float
+        )
         thr = float(rtrial.get('thr_shared', np.nan))
+        noise_level = float(rtrial.get('noise_level', np.nan))
         a1 = amp_trial[0] if amp_trial.size else np.nan
         status = 'NA'
         if np.isfinite(a1) and np.isfinite(thr):
             status = 'success' if a1 > thr else 'failure'
-            per_trial_rows.append({
-                'AMP1': float(a1),
-                'status': status,
-                'file': base,
-                'condition': condition,
-                'trial': idx_trial + 1,
-            })
+
+        trial_row = {
+            'status': status,
+            'file': base,
+            'condition': condition,
+            'trial': idx_trial + 1,
+            'thr_shared': thr,
+            'noise_level': noise_level,
+        }
+        for p in range(1, int(n_pulses) + 1):
+            vc = float(amp_trial[p - 1]) if p <= amp_trial.size and np.isfinite(amp_trial[p - 1]) else np.nan
+            vu = (
+                float(amp_trial_unfloored[p - 1])
+                if p <= amp_trial_unfloored.size and np.isfinite(amp_trial_unfloored[p - 1])
+                else np.nan
+            )
+            trial_row[f'AMP{p}_CORR'] = vc
+            trial_row[f'AMP{p}_UNCORR'] = vu
+        # Backward-compatible legacy column
+        trial_row['AMP1'] = trial_row.get('AMP1_CORR', np.nan)
+        per_trial_rows.append(trial_row)
+
         for p in range(1, min(3, amp_trial.size) + 1):
             val = amp_trial[p - 1]
             if np.isfinite(val) and np.isfinite(thr):
@@ -512,7 +532,19 @@ def run_batch():
                 )
 
         if per_trial_rows:
-            pd.DataFrame(per_trial_rows).to_excel(os.path.splitext(xl_out)[0] + "_trials.xlsx", index=False)
+            df_trials = pd.DataFrame(per_trial_rows)
+            trial_cols = (
+                ['condition', 'file', 'trial', 'status', 'thr_shared', 'noise_level']
+                + [f'AMP{i}_CORR' for i in range(1, DEFAULT_N_PULSES + 1)]
+                + [f'AMP{i}_UNCORR' for i in range(1, DEFAULT_N_PULSES + 1)]
+                + ['AMP1']
+            )
+            for col in trial_cols:
+                if col not in df_trials.columns:
+                    df_trials[col] = np.nan
+            rest_cols = [c for c in df_trials.columns if c not in trial_cols]
+            df_trials = df_trials[trial_cols + rest_cols]
+            df_trials.to_excel(os.path.splitext(xl_out)[0] + "_trials.xlsx", index=False)
 
         print(f"[export] Saved summary to: {csv_out}")
         print(f"[export] Saved summary workbook to: {xl_out}")

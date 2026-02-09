@@ -329,7 +329,22 @@ pieces (and the knobs you can adjust) are:
    A single threshold computed from that null distribution is reused for pulse
    1 failures and the pulse 2/3 p-values. Reducing `f0_window_s` or disabling
    `allow_shift` tightens the null when pre-train baselines are short.
-6. **Baseline figures (optional).** Enable `options['plot']['baseline']=True`
+6. **Optional amplitude floor for PPR safety.** If
+   `options['amplitude_floor_to_noise']=True`:
+   - For each trial, after `thr1` and p-values are computed, **all pulse
+     amplitudes** (`raw`, `savgol`, `nnls`, corrected and uncorrected) are
+     floored as `amp := max(amp, thr1)`, then trial PPRs are computed from the
+     floored amplitudes.
+   - For the average trace, the same floor is applied using
+     `median(threshold_amp1)` across trials, and average PPR is recomputed.
+   - This is **not A1-only**: it applies to pulses 1..N.
+   - It primarily stabilizes PPR denominators/ratios and can change exported
+     AMP/PPR values; thresholds and p-values are computed before the floor.
+   - For failure calls using `amp <= thr_shared` (as in the demo batch export),
+     outcomes are unchanged by this floor.
+   - In `demo_batch_process.py` and `demo_single_file.py`, this option is set
+     to `True` in the `iglusnfr_optimized` preset.
+7. **Baseline figures (optional).** Enable `options['plot']['baseline']=True`
    to save per-trial two-panel plots that show the baseline fit, null histogram
    and the stimulus train. This is useful when checking that the baseline mask
    and threshold rule match your expectations.
@@ -624,6 +639,9 @@ res = extract_metrics(
 - `threshold_amp1` (array): MAD‑rule thresholds for pulse 1 per trial
 - `pval_amp1` (array): empirical p‑values for pulse 1 per trial
 - `figure` (matplotlib Figure or None): average trace with selected overlays
+
+If `amplitude_floor_to_noise=True`, the amplitude arrays above are the
+post-floor values used to compute PPR.
 
 ### Configuration via options
 All defaults live in a single dictionary inside `extract_metrics.py` named `DEFAULTS`. You can override any of these keys in the `options` you pass to `extract_metrics`:

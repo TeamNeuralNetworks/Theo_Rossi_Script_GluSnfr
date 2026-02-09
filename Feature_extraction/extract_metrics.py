@@ -5744,6 +5744,27 @@ def extract_metrics(
         p2 = float(pfun(a_for_p[1])) if (a_for_p.size >= 2 and np.isfinite(a_for_p[1])) else np.nan
         p3 = float(pfun(a_for_p[2])) if (a_for_p.size >= 3 and np.isfinite(a_for_p[2])) else np.nan
 
+        # Preserve per-trial amplitudes before optional floor so exports can
+        # report both values even when amplitude_floor_to_noise=True.
+        amp_raw_unfloored = np.asarray(amp_raw, float).copy()
+        amp_raw_corr_unfloored = np.asarray(amp_raw_corr, float).copy()
+        amp_sg_unfloored = np.asarray(amp_sg, float).copy()
+        amp_sg_corr_unfloored = np.asarray(amp_sg_corr, float).copy()
+        amp_nn_unfloored = np.asarray(amp_nn, float).copy()
+        amp_nn_corr_unfloored = np.asarray(amp_nn_corr, float).copy()
+
+        # Per-trial noise spread used by the threshold rule.
+        noise_level = np.nan
+        null_arr = np.asarray(null_amps, float)
+        null_arr = null_arr[np.isfinite(null_arr)]
+        if null_arr.size:
+            if eff_mode == 'sd':
+                noise_level = float(np.nanstd(null_arr))
+            else:
+                med0 = float(np.nanmedian(null_arr))
+                mad0 = float(np.nanmedian(np.abs(null_arr - med0)))
+                noise_level = float(1.4826 * mad0)
+
         # Floor amplitudes to noise threshold before PPR calculation (prevents div by near-zero)
         if cfg.get('amplitude_floor_to_noise', False):
             amp_raw = np.maximum(amp_raw, thr1)
@@ -5760,6 +5781,12 @@ def extract_metrics(
             'amp_savgol_corr': amp_sg_corr,
             'amp_nnls': amp_nn,
             'amp_nnls_corr': amp_nn_corr,
+            'amp_raw_unfloored': amp_raw_unfloored,
+            'amp_raw_corr_unfloored': amp_raw_corr_unfloored,
+            'amp_savgol_unfloored': amp_sg_unfloored,
+            'amp_savgol_corr_unfloored': amp_sg_corr_unfloored,
+            'amp_nnls_unfloored': amp_nn_unfloored,
+            'amp_nnls_corr_unfloored': amp_nn_corr_unfloored,
             'ppr_raw': _norm(amp_raw),
             'ppr_savgol': _norm(amp_sg),
             'ppr_nnls': _norm(amp_nn),
@@ -5772,6 +5799,8 @@ def extract_metrics(
             'yhat': yhat_t,
             'components': comp_t,
             'thr_shared': thr1,
+            'noise_level': noise_level,
+            'noise_mode': eff_mode,
             'pval_amp1': p1,
             'pval_amp2': p2,
             'pval_amp3': p3,
