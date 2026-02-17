@@ -8,7 +8,7 @@ Quick reference for options (see Model_Calibration/event_models.py for details):
   - nnls_weight_mode: 'uniform', 'linear', 'exponential', 'savgol', 'peak'
 """
 
-import os, sys, glob, numpy as np, pandas as pd
+import os, sys, glob, json, numpy as np, pandas as pd
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 # =============================================================================
@@ -17,7 +17,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 
 # --- Data paths ---
 DATA_ROOT = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL"
-OUT_DIR = os.path.join(DATA_ROOT, "FINALOUT")
+OUT_DIR = os.path.join(DATA_ROOT, "FINALOUT2")
 
 # --- Select conditions and files ---
 # If CONDITIONS_TO_RUN is empty/None, the script will process all conditions
@@ -318,6 +318,7 @@ def _process_one_file(task: tuple[str, str], *, show_plots: bool) -> dict:
 
     # --- Per-trial failure counts ---
     per_trial_rows = []
+    per_trial_null_rows = []
     fail_counts = {i: [0, 0] for i in range(1, 4)}
     for idx_trial, rtrial in enumerate(res.get('per_trial', [])):
         amp_trial = np.asarray(rtrial.get('amp_nnls_corr', rtrial.get('amp_nnls')), float)
@@ -327,6 +328,12 @@ def _process_one_file(task: tuple[str, str], *, show_plots: bool) -> dict:
         )
         thr = float(rtrial.get('thr_shared', np.nan))
         noise_level = float(rtrial.get('noise_level', np.nan))
+        baseline_null_mean_including_zero = float(rtrial.get('baseline_null_mean_including_zero', np.nan))
+        baseline_null_median_including_zero = float(rtrial.get('baseline_null_median_including_zero', np.nan))
+        baseline_null_mean_excluding_zero = float(rtrial.get('baseline_null_mean_excluding_zero', np.nan))
+        baseline_null_median_excluding_zero = float(rtrial.get('baseline_null_median_excluding_zero', np.nan))
+        null_amps_nnls = np.asarray(rtrial.get('null_amps_nnls', []), float)
+        null_amps_nnls = null_amps_nnls[np.isfinite(null_amps_nnls)]
         a1 = amp_trial[0] if amp_trial.size else np.nan
         status = 'NA'
         if np.isfinite(a1) and np.isfinite(thr):
@@ -337,8 +344,13 @@ def _process_one_file(task: tuple[str, str], *, show_plots: bool) -> dict:
             'file': base,
             'condition': condition,
             'trial': idx_trial + 1,
+            'trial_input_col_1based': int(rtrial.get('trial_input_col_1based', idx_trial + 1)),
             'thr_shared': thr,
             'noise_level': noise_level,
+            'baseline_null_mean_including_zero': baseline_null_mean_including_zero,
+            'baseline_null_median_including_zero': baseline_null_median_including_zero,
+            'baseline_null_mean_excluding_zero': baseline_null_mean_excluding_zero,
+            'baseline_null_median_excluding_zero': baseline_null_median_excluding_zero,
         }
         for p in range(1, int(n_pulses) + 1):
             vc = float(amp_trial[p - 1]) if p <= amp_trial.size and np.isfinite(amp_trial[p - 1]) else np.nan
@@ -352,6 +364,15 @@ def _process_one_file(task: tuple[str, str], *, show_plots: bool) -> dict:
         # Backward-compatible legacy column
         trial_row['AMP1'] = trial_row.get('AMP1_CORR', np.nan)
         per_trial_rows.append(trial_row)
+        per_trial_null_rows.append({
+            'condition': condition,
+            'file': base,
+            'trial': idx_trial + 1,
+            'trial_input_col_1based': int(rtrial.get('trial_input_col_1based', idx_trial + 1)),
+            'status': status,
+            'nnls_null_n': int(null_amps_nnls.size),
+            'nnls_null_amps_json': json.dumps([float(v) for v in null_amps_nnls.tolist()]),
+        })
 
         for p in range(1, min(3, amp_trial.size) + 1):
             val = amp_trial[p - 1]
@@ -419,6 +440,7 @@ def _process_one_file(task: tuple[str, str], *, show_plots: bool) -> dict:
     return {
         'row': row,
         'per_trial_rows': per_trial_rows,
+        'per_trial_null_rows': per_trial_null_rows,
         'max_pulses': len(amp_avg),
         'trace_time_s': res.get('time_s'),
         'trace_avg': res.get('average', {}).get('y_avg'),
@@ -447,6 +469,7 @@ def run_batch():
 
     summary_rows = []
     per_trial_rows = []
+    per_trial_null_rows = []
     max_pulses_seen = 0
     traces_by_condition = {}
 
@@ -475,6 +498,7 @@ def run_batch():
                     continue
                 summary_rows.append(result['row'])
                 per_trial_rows.extend(result['per_trial_rows'])
+                per_trial_null_rows.extend(result.get('per_trial_null_rows', []))
                 max_pulses_seen = max(max_pulses_seen, result['max_pulses'])
                 t_vec = result.get('trace_time_s')
                 y_avg = result.get('trace_avg')
@@ -490,6 +514,7 @@ def run_batch():
                 continue
             summary_rows.append(result['row'])
             per_trial_rows.extend(result['per_trial_rows'])
+            per_trial_null_rows.extend(result.get('per_trial_null_rows', []))
             max_pulses_seen = max(max_pulses_seen, result['max_pulses'])
             t_vec = result.get('trace_time_s')
             y_avg = result.get('trace_avg')
@@ -534,7 +559,12 @@ def run_batch():
         if per_trial_rows:
             df_trials = pd.DataFrame(per_trial_rows)
             trial_cols = (
-                ['condition', 'file', 'trial', 'status', 'thr_shared', 'noise_level']
+                [
+                    'condition', 'file', 'trial', 'trial_input_col_1based', 'status',
+                    'thr_shared', 'noise_level',
+                    'baseline_null_mean_including_zero', 'baseline_null_median_including_zero',
+                    'baseline_null_mean_excluding_zero', 'baseline_null_median_excluding_zero',
+                ]
                 + [f'AMP{i}_CORR' for i in range(1, DEFAULT_N_PULSES + 1)]
                 + [f'AMP{i}_UNCORR' for i in range(1, DEFAULT_N_PULSES + 1)]
                 + ['AMP1']
@@ -546,10 +576,25 @@ def run_batch():
             df_trials = df_trials[trial_cols + rest_cols]
             df_trials.to_excel(os.path.splitext(xl_out)[0] + "_trials.xlsx", index=False)
 
+        if per_trial_null_rows:
+            df_trials_null = pd.DataFrame(per_trial_null_rows)
+            null_cols = [
+                'condition', 'file', 'trial', 'trial_input_col_1based', 'status',
+                'nnls_null_n', 'nnls_null_amps_json',
+            ]
+            for col in null_cols:
+                if col not in df_trials_null.columns:
+                    df_trials_null[col] = np.nan
+            rest_null_cols = [c for c in df_trials_null.columns if c not in null_cols]
+            df_trials_null = df_trials_null[null_cols + rest_null_cols]
+            df_trials_null.to_excel(os.path.splitext(xl_out)[0] + "_trials_nnls_null.xlsx", index=False)
+
         print(f"[export] Saved summary to: {csv_out}")
         print(f"[export] Saved summary workbook to: {xl_out}")
         if per_trial_rows:
             print(f"[export] Saved per-trial file to: {os.path.splitext(xl_out)[0] + '_trials.xlsx'}")
+        if per_trial_null_rows:
+            print(f"[export] Saved NNLS-null per-trial file to: {os.path.splitext(xl_out)[0] + '_trials_nnls_null.xlsx'}")
         if traces_by_condition:
             out_stem = os.path.join(OUT_DIR, "summary")
             traces_file = f"{out_stem}_traces.xlsx"

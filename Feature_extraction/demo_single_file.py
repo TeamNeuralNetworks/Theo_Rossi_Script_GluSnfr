@@ -8,7 +8,7 @@ Quick reference for options (see Model_Calibration/event_models.py for details):
   - nnls_weight_mode: 'uniform', 'linear', 'exponential', 'savgol', 'peak'
 """
 
-import os, sys, numpy as np, pandas as pd
+import os, sys, json, numpy as np, pandas as pd
 import matplotlib.pyplot as plt
 
 # =============================================================================
@@ -46,9 +46,12 @@ OUT_DIR = os.path.join(DATA_ROOT, "Testout")
 # --- Select condition and file ---
 # If CONDITION is empty/None, the script will search all folders for TARGET_FILE
 CONDITION = ""  # Leave empty to auto-detect from file location
-TARGET_FILE = "20191017_linescan3_50Hz_10pulses_2.5mMCa_bouton2_traces_converted.xlsx"
+#TARGET_FILE = "20191017_linescan3_50Hz_10pulses_2.5mMCa_bouton2_traces_converted.xlsx"
 #TARGET_FILE = "20210722_linescan3_50Hz_10pulses_1.5mMCa_bouton12_traces_converted.xlsx"
-#TARGET_FILE = "20210721_linescan1_50Hz_10pulses_4mMCa_bouton1_traces_converted.xlsx"
+TARGET_FILE = "20210722_linescan3_50Hz_10pulses_1.5mMCa_bouton3_traces_converted.xlsx"
+
+#TARGET_FILE = "250128_Fibre2_Bouton_5.xlsx"
+
 # --- Select analysis preset ---
 PRESET_NAME = 'iglusnfr_optimized'  # Options: 'iglusnfr_optimized', 'double_exp', 'single_exp_fixed_8ms'
 
@@ -314,15 +317,58 @@ for i in range(2, len(ppr_avg) + 1):
     row[f'PPR{i}/1'] = float(ppr_avg[i - 1])
 
 # --- Per-trial failure counts ---
-per_trial_rows, fail_counts = [], {i: [0, 0] for i in range(1, 4)}
+per_trial_rows, per_trial_null_rows, fail_counts = [], [], {i: [0, 0] for i in range(1, 4)}
 for idx_trial, rtrial in enumerate(res.get('per_trial', [])):
     amp_trial = np.asarray(rtrial.get('amp_nnls_corr', rtrial.get('amp_nnls')), float)
+    amp_trial_unfloored = np.asarray(
+        rtrial.get('amp_nnls_corr_unfloored', rtrial.get('amp_nnls_corr', rtrial.get('amp_nnls'))),
+        float
+    )
     thr = float(rtrial.get('thr_shared', np.nan))
+    noise_level = float(rtrial.get('noise_level', np.nan))
+    baseline_null_mean_including_zero = float(rtrial.get('baseline_null_mean_including_zero', np.nan))
+    baseline_null_median_including_zero = float(rtrial.get('baseline_null_median_including_zero', np.nan))
+    baseline_null_mean_excluding_zero = float(rtrial.get('baseline_null_mean_excluding_zero', np.nan))
+    baseline_null_median_excluding_zero = float(rtrial.get('baseline_null_median_excluding_zero', np.nan))
+    null_amps_nnls = np.asarray(rtrial.get('null_amps_nnls', []), float)
+    null_amps_nnls = null_amps_nnls[np.isfinite(null_amps_nnls)]
     a1 = amp_trial[0] if amp_trial.size else np.nan
     status = 'NA'
     if np.isfinite(a1) and np.isfinite(thr):
         status = 'success' if a1 > thr else 'failure'
-        per_trial_rows.append({'AMP1': float(a1), 'status': status, 'file': base, 'trial': idx_trial + 1})
+    trial_row = {
+        'status': status,
+        'file': base,
+        'condition': condition,
+        'trial': idx_trial + 1,
+        'trial_input_col_1based': int(rtrial.get('trial_input_col_1based', idx_trial + 1)),
+        'thr_shared': thr,
+        'noise_level': noise_level,
+        'baseline_null_mean_including_zero': baseline_null_mean_including_zero,
+        'baseline_null_median_including_zero': baseline_null_median_including_zero,
+        'baseline_null_mean_excluding_zero': baseline_null_mean_excluding_zero,
+        'baseline_null_median_excluding_zero': baseline_null_median_excluding_zero,
+    }
+    for p in range(1, int(DEFAULT_N_PULSES) + 1):
+        vc = float(amp_trial[p - 1]) if p <= amp_trial.size and np.isfinite(amp_trial[p - 1]) else np.nan
+        vu = (
+            float(amp_trial_unfloored[p - 1])
+            if p <= amp_trial_unfloored.size and np.isfinite(amp_trial_unfloored[p - 1])
+            else np.nan
+        )
+        trial_row[f'AMP{p}_CORR'] = vc
+        trial_row[f'AMP{p}_UNCORR'] = vu
+    trial_row['AMP1'] = trial_row.get('AMP1_CORR', np.nan)
+    per_trial_rows.append(trial_row)
+    per_trial_null_rows.append({
+        'condition': condition,
+        'file': base,
+        'trial': idx_trial + 1,
+        'trial_input_col_1based': int(rtrial.get('trial_input_col_1based', idx_trial + 1)),
+        'status': status,
+        'nnls_null_n': int(null_amps_nnls.size),
+        'nnls_null_amps_json': json.dumps([float(v) for v in null_amps_nnls.tolist()]),
+    })
     for p in range(1, min(3, amp_trial.size) + 1):
         val = amp_trial[p - 1]
         if np.isfinite(val) and np.isfinite(thr):
@@ -347,7 +393,33 @@ df_rows.to_csv(csv_out, index=False)
 xl_out = os.path.splitext(csv_out)[0] + ".xlsx"
 df_rows.to_excel(xl_out, index=False)
 if per_trial_rows:
-    pd.DataFrame(per_trial_rows).to_excel(os.path.splitext(xl_out)[0] + "_trials.xlsx", index=False)
+    df_trials = pd.DataFrame(per_trial_rows)
+    trial_cols = (
+        [
+            'file', 'trial', 'trial_input_col_1based', 'status',
+            'thr_shared', 'noise_level',
+            'baseline_null_mean_including_zero', 'baseline_null_median_including_zero',
+            'baseline_null_mean_excluding_zero', 'baseline_null_median_excluding_zero',
+        ]
+        + [f'AMP{i}_CORR' for i in range(1, DEFAULT_N_PULSES + 1)]
+        + [f'AMP{i}_UNCORR' for i in range(1, DEFAULT_N_PULSES + 1)]
+        + ['AMP1']
+    )
+    for col in trial_cols:
+        if col not in df_trials.columns:
+            df_trials[col] = np.nan
+    rest_cols = [c for c in df_trials.columns if c not in trial_cols]
+    df_trials = df_trials[trial_cols + rest_cols]
+    df_trials.to_excel(os.path.splitext(xl_out)[0] + "_trials.xlsx", index=False)
+if per_trial_null_rows:
+    df_trials_null = pd.DataFrame(per_trial_null_rows)
+    null_cols = ['condition', 'file', 'trial', 'trial_input_col_1based', 'status', 'nnls_null_n', 'nnls_null_amps_json']
+    for col in null_cols:
+        if col not in df_trials_null.columns:
+            df_trials_null[col] = np.nan
+    rest_null_cols = [c for c in df_trials_null.columns if c not in null_cols]
+    df_trials_null = df_trials_null[null_cols + rest_null_cols]
+    df_trials_null.to_excel(os.path.splitext(xl_out)[0] + "_trials_nnls_null.xlsx", index=False)
 
 # =============================================================================
 #                              PLOTTING

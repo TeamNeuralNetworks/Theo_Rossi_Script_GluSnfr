@@ -2153,6 +2153,21 @@ def extract_metrics(
         Y = Y[:, None]
     if Y.shape[0] != t.size:
         raise ValueError("trials must have same number of samples as time")
+    original_n_trials = int(Y.shape[1])
+    # Drop empty trial columns (all NaN/non-finite in original input) so they
+    # do not become artificial zero traces in downstream processing.
+    valid_trial_cols = np.isfinite(Y).any(axis=0)
+    kept_trial_cols_0based = np.flatnonzero(valid_trial_cols).astype(int)
+    dropped_trial_cols_0based = np.flatnonzero(~valid_trial_cols).astype(int)
+    if not np.all(valid_trial_cols):
+        n_drop = int(np.size(valid_trial_cols) - np.sum(valid_trial_cols))
+        progress_print(f"[preprocess] Dropping {n_drop} empty trial column(s) (all non-finite).")
+        Y = Y[:, valid_trial_cols]
+    else:
+        kept_trial_cols_0based = np.arange(original_n_trials, dtype=int)
+        dropped_trial_cols_0based = np.array([], dtype=int)
+    if Y.shape[1] == 0:
+        raise ValueError("No valid trial columns remain after dropping all-NaN columns.")
     stim_times = float(train_start) + float(isi) * np.arange(int(n_pulses))
 
     # ---- ISI-aware guards and defaults ----
@@ -5696,6 +5711,20 @@ def extract_metrics(
                 null_amps = windowed_max(t, yj_sg, list(starts), win_ms, n_avg, pre_ms) if starts.size else np.array([])
             else:
                 null_amps = np.array([])
+            # Keep the sliding-NNLS null amplitudes as an additional per-trial
+            # output so downstream analyses can inspect the full baseline-event
+            # distribution independent of the threshold rule.
+            null_amps_nnls = sample_null_amplitudes_consistent(
+                yj, t, baseline_mask, tau_r, tau_d0,
+                train_start=float(train_start), f0_window_s=cfg['f0_window_s'],
+                pre_zoom_s=cfg['pre_zoom_s'], post_zoom_s=cfg['post_zoom_s'],
+                robust=True, huber_delta=cfg['huber_delta'], irls_iters=cfg['irls_iters'],
+                allow_shift=allow_shift, delta_max_s=cfg['delta_max_s'], delta_step_s=cfg['delta_step_s'],
+                null_min_post_zoom_s=cfg['null_min_post_zoom_s'], null_sim_max_points=cfg['null_sim_max_points'],
+                peak_window_ms=cfg['peak_window_ms'], peak_avg_points=cfg['peak_avg_points'], pre_peak_ms=cfg['pre_peak_ms'],
+                shift_min_s=cfg['shift_min_s'], n_samples=1000,
+                seed=cfg.get('seed', 42), event_t0_s=event_t0_s,
+            )
         elif failm == 'RAW' and eff_mode == 'sd':
             # SD rule on RAW baseline windowed maxima
             idx = np.flatnonzero(baseline_mask)
@@ -5713,6 +5742,20 @@ def extract_metrics(
                 null_amps = windowed_max(t, yj, list(starts), win_ms, n_avg, pre_ms) if starts.size else np.array([])
             else:
                 null_amps = np.array([])
+            # Keep the sliding-NNLS null amplitudes as an additional per-trial
+            # output so downstream analyses can inspect the full baseline-event
+            # distribution independent of the threshold rule.
+            null_amps_nnls = sample_null_amplitudes_consistent(
+                yj, t, baseline_mask, tau_r, tau_d0,
+                train_start=float(train_start), f0_window_s=cfg['f0_window_s'],
+                pre_zoom_s=cfg['pre_zoom_s'], post_zoom_s=cfg['post_zoom_s'],
+                robust=True, huber_delta=cfg['huber_delta'], irls_iters=cfg['irls_iters'],
+                allow_shift=allow_shift, delta_max_s=cfg['delta_max_s'], delta_step_s=cfg['delta_step_s'],
+                null_min_post_zoom_s=cfg['null_min_post_zoom_s'], null_sim_max_points=cfg['null_sim_max_points'],
+                peak_window_ms=cfg['peak_window_ms'], peak_avg_points=cfg['peak_avg_points'], pre_peak_ms=cfg['pre_peak_ms'],
+                shift_min_s=cfg['shift_min_s'], n_samples=1000,
+                seed=cfg.get('seed', 42), event_t0_s=event_t0_s,
+            )
         else:
             # NNLS-consistent null on pre-train window using the single-pulse estimator
             null_amps = sample_null_amplitudes_consistent(
@@ -5726,6 +5769,7 @@ def extract_metrics(
                 shift_min_s=cfg['shift_min_s'], n_samples=1000,
                 seed=cfg.get('seed', 42), event_t0_s=event_t0_s,
             )
+            null_amps_nnls = np.asarray(null_amps, float)
 
         thr1, pfun = baseline_threshold_and_pval(null_amps, null_N, mode=eff_mode)
 
@@ -5757,7 +5801,23 @@ def extract_metrics(
         noise_level = np.nan
         null_arr = np.asarray(null_amps, float)
         null_arr = null_arr[np.isfinite(null_arr)]
+        null_nnls_arr = np.asarray(null_amps_nnls, float)
+        null_nnls_arr = null_nnls_arr[np.isfinite(null_nnls_arr)]
+        # Baseline null-amplitude summaries used to derive threshold statistics.
+        # "Including zeros" uses all finite null amplitudes.
+        # "Excluding zeros" removes exact/near-zero entries.
+        baseline_null_mean_including_zero = np.nan
+        baseline_null_median_including_zero = np.nan
+        baseline_null_mean_excluding_zero = np.nan
+        baseline_null_median_excluding_zero = np.nan
         if null_arr.size:
+            baseline_null_mean_including_zero = float(np.nanmean(null_arr))
+            baseline_null_median_including_zero = float(np.nanmedian(null_arr))
+            nz_mask = np.abs(null_arr) > 1e-12
+            if np.any(nz_mask):
+                nz_vals = null_arr[nz_mask]
+                baseline_null_mean_excluding_zero = float(np.nanmean(nz_vals))
+                baseline_null_median_excluding_zero = float(np.nanmedian(nz_vals))
             if eff_mode == 'sd':
                 noise_level = float(np.nanstd(null_arr))
             else:
@@ -5775,6 +5835,9 @@ def extract_metrics(
             amp_nn_corr = np.maximum(amp_nn_corr, thr1)
 
         per_trial.append({
+            'trial_processed_index_1based': int(j + 1),
+            'trial_input_col_0based': int(kept_trial_cols_0based[j]) if j < kept_trial_cols_0based.size else int(j),
+            'trial_input_col_1based': int(kept_trial_cols_0based[j] + 1) if j < kept_trial_cols_0based.size else int(j + 1),
             'amp_raw': amp_raw,
             'amp_raw_corr': amp_raw_corr,
             'amp_savgol': amp_sg,
@@ -5801,6 +5864,11 @@ def extract_metrics(
             'thr_shared': thr1,
             'noise_level': noise_level,
             'noise_mode': eff_mode,
+            'null_amps_nnls': null_nnls_arr,
+            'baseline_null_mean_including_zero': baseline_null_mean_including_zero,
+            'baseline_null_median_including_zero': baseline_null_median_including_zero,
+            'baseline_null_mean_excluding_zero': baseline_null_mean_excluding_zero,
+            'baseline_null_median_excluding_zero': baseline_null_median_excluding_zero,
             'pval_amp1': p1,
             'pval_amp2': p2,
             'pval_amp3': p3,
@@ -6486,6 +6554,10 @@ def extract_metrics(
         'per_event_param_map': per_event_param_map,
         'variant_info': variant_info_avg,  # NNLS variant info with dominant fractions per event
         'per_trial': per_trial,
+        'trial_input_cols_kept_0based': np.asarray(kept_trial_cols_0based, int),
+        'trial_input_cols_kept_1based': np.asarray(kept_trial_cols_0based + 1, int),
+        'trial_input_cols_dropped_0based': np.asarray(dropped_trial_cols_0based, int),
+        'trial_input_cols_dropped_1based': np.asarray(dropped_trial_cols_0based + 1, int),
         'time_s': np.asarray(t, float),
         'threshold_amp1': np.asarray(thr_list, float),
         'pval_amp1': np.asarray(pval_list, float),
