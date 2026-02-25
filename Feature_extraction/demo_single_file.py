@@ -48,9 +48,9 @@ OUT_DIR = os.path.join(DATA_ROOT, "Testout")
 CONDITION = ""  # Leave empty to auto-detect from file location
 #TARGET_FILE = "20191017_linescan3_50Hz_10pulses_2.5mMCa_bouton2_traces_converted.xlsx"
 #TARGET_FILE = "20210722_linescan3_50Hz_10pulses_1.5mMCa_bouton12_traces_converted.xlsx"
-TARGET_FILE = "20210722_linescan3_50Hz_10pulses_1.5mMCa_bouton3_traces_converted.xlsx"
+TARGET_FILE = "20240227_linescan2_20Hz_10pulses_2.5mMCa_bouton8_set1_traces_converted.xlsx"
 
-#TARGET_FILE = "250128_Fibre2_Bouton_5.xlsx"
+TARGET_FILE = "250128_Fibre2_Bouton_7.xlsx"
 
 # --- Select analysis preset ---
 PRESET_NAME = 'iglusnfr_optimized'  # Options: 'iglusnfr_optimized', 'double_exp', 'single_exp_fixed_8ms'
@@ -147,6 +147,8 @@ def _build_options_presets(peak_window_ms, pre_zoom_s, post_zoom_s):
             
             # --- PPR Safety ---
             'amplitude_floor_to_noise': True,                               # Floor all pulse amplitudes to the per-trial A1 threshold (thr1) before PPR; average uses median(thr1)
+            'average_amplitude_floor_to_noise': False,                       # Separate control for average trace floor; None => follow amplitude_floor_to_noise
+            'average_null_N': None,                                          # Separate null_N multiplier for average trace floor; None => follow null_N
             
             # --- NNLS Fitting ---
             'nnls_weight_mode': 'savgol',                                   # 'uniform', 'linear', 'exponential', 'savgol', 'peak' ; weighting scheme for NNLS fitting
@@ -273,10 +275,32 @@ options = options_presets[PRESET_NAME]
 os.makedirs(OUT_DIR, exist_ok=True)
 df = pd.read_excel(xlsx_path, sheet_name=0, engine="openpyxl")
 _time = pd.to_numeric(df.iloc[:, -1], errors='coerce').to_numpy(float)
-_trials = df.iloc[:, :-1].apply(pd.to_numeric, errors='coerce').to_numpy(float)
+_all_before_time = df.iloc[:, :-1].apply(pd.to_numeric, errors='coerce').to_numpy(float)
+
+# Auto-detect and skip the average column (penultimate = mean of preceding columns)
+_has_avg_col = False
+if _all_before_time.shape[1] >= 2:
+    _candidate_avg = _all_before_time[:, -1]
+    _preceding = _all_before_time[:, :-1]
+    _computed_avg = np.nanmean(_preceding, axis=1)
+    _finite = np.isfinite(_candidate_avg) & np.isfinite(_computed_avg)
+    if _finite.sum() > 10:
+        _corr = np.corrcoef(_candidate_avg[_finite], _computed_avg[_finite])[0, 1]
+        if _corr > 0.99:
+            _has_avg_col = True
+
+if _has_avg_col:
+    _trials = _all_before_time[:, :-1]  # drop penultimate (average) column
+    print(f"[info] Detected average column (penultimate) — excluded from trials")
+else:
+    _trials = _all_before_time
+    print(f"[info] No average column detected — using all data columns as trials")
+
 valid = np.isfinite(_time)
 time = _time[valid]
 trials = _trials[valid, :]
+
+print(f"[debug] Excel has {df.shape[1]} total columns → {trials.shape[1]} trial columns{' + 1 avg' if _has_avg_col else ''} + 1 time column")
 
 base = os.path.splitext(os.path.basename(xlsx_path))[0]
 
@@ -297,6 +321,7 @@ res = extract_metrics(
 # =============================================================================
 
 # --- Extract amplitudes and PPR ---
+amp_avg_raw = res['average'].get('amp_nnls')
 amp_avg = res['average'].get('amp_nnls_corr', res['average']['amp_nnls'])
 ppr_avg = res['average'].get('ppr_nnls_corr')
 if ppr_avg is None:
@@ -304,9 +329,11 @@ if ppr_avg is None:
     ppr_avg = (amp_avg / a1) if np.isfinite(a1) and abs(a1) > 1e-12 else amp_avg * np.nan
 
 print("\n--- Results ---")
-print("Amplitudes (NNLS):", amp_avg)
+print("Amplitudes (NNLS raw):", amp_avg_raw)
+print("Amplitudes (NNLS corr):", amp_avg)
 print("PPR (NNLS):", ppr_avg)
 print("A1 thresholds:", res['threshold_amp1'])
+print("PPR floor (median thr):", res.get('median_threshold_floor', 'N/A'))
 print("A1 p-values:", res['pval_amp1'])
 
 # --- Build summary row ---
@@ -315,6 +342,26 @@ for i, v in enumerate(amp_avg, 1):
     row[f'AMP{i}'] = float(v)
 for i in range(2, len(ppr_avg) + 1):
     row[f'PPR{i}/1'] = float(ppr_avg[i - 1])
+
+# --- Per-trial A1 diagnostic table ---
+print(f"\n{'='*60}")
+print(f"  Per-trial A1 diagnostics ({len(res.get('per_trial', []))} trials)")
+print(f"{'='*60}")
+print(f"  {'Trial':>5}  {'A1 (corr)':>12}  {'Threshold':>12}  {'Status':>8}")
+print(f"  {'-'*5}  {'-'*12}  {'-'*12}  {'-'*8}")
+for _it, _rt in enumerate(res.get('per_trial', [])):
+    _a1_uf = np.asarray(_rt.get('amp_nnls_corr_unfloored', _rt.get('amp_nnls_corr', _rt.get('amp_nnls'))), float)
+    _a1v = float(_a1_uf[0]) if _a1_uf.size else np.nan
+    _thrv = float(_rt.get('thr_shared', np.nan))
+    _st = 'PASS' if (np.isfinite(_a1v) and np.isfinite(_thrv) and _a1v > _thrv) else 'FAIL'
+    print(f"  {_it+1:>5}  {_a1v:>12.6f}  {_thrv:>12.6f}  {_st:>8}")
+_n_fail_diag = sum(1 for _rt in res.get('per_trial', [])
+                   if float(np.asarray(_rt.get('amp_nnls_corr_unfloored', _rt.get('amp_nnls_corr', _rt.get('amp_nnls'))), float)[0])
+                   <= float(_rt.get('thr_shared', np.nan))
+                   and np.isfinite(float(_rt.get('thr_shared', np.nan))))
+_n_total_diag = len(res.get('per_trial', []))
+print(f"  → Failures: {_n_fail_diag}/{_n_total_diag} = {100*_n_fail_diag/_n_total_diag:.1f}%" if _n_total_diag else "  → No trials")
+print(f"{'='*60}")
 
 # --- Per-trial failure counts ---
 per_trial_rows, per_trial_null_rows, fail_counts = [], [], {i: [0, 0] for i in range(1, 4)}
@@ -339,7 +386,7 @@ for idx_trial, rtrial in enumerate(res.get('per_trial', [])):
     trial_row = {
         'status': status,
         'file': base,
-        'condition': condition,
+        'condition': CONDITION,
         'trial': idx_trial + 1,
         'trial_input_col_1based': int(rtrial.get('trial_input_col_1based', idx_trial + 1)),
         'thr_shared': thr,
@@ -361,7 +408,7 @@ for idx_trial, rtrial in enumerate(res.get('per_trial', [])):
     trial_row['AMP1'] = trial_row.get('AMP1_CORR', np.nan)
     per_trial_rows.append(trial_row)
     per_trial_null_rows.append({
-        'condition': condition,
+        'condition': CONDITION,
         'file': base,
         'trial': idx_trial + 1,
         'trial_input_col_1based': int(rtrial.get('trial_input_col_1based', idx_trial + 1)),

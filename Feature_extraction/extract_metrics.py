@@ -160,7 +160,9 @@ DEFAULTS.update({
 
 # PPR safety: floor amplitudes to noise threshold to prevent division by near-zero values
 DEFAULTS.update({
-    'amplitude_floor_to_noise': False,  # If True, floor amplitudes < threshold to threshold before PPR calc
+    'amplitude_floor_to_noise': False,  # If True, floor per-trial amplitudes < threshold before PPR calc
+    'average_amplitude_floor_to_noise': None,  # Separate control for average trace; None => follow amplitude_floor_to_noise
+    'average_null_N': None,  # Separate null_N for average trace floor; None => follow null_N
 })
 
 # Tri-exp NNLS variants: sweep slow + superslow fractions (superslow ramps across the train)
@@ -5174,10 +5176,13 @@ def extract_metrics(
             # Choose which series defines the "measurement" trace for peak picking
             if meas == 'SAVGOL' and (y_sg_avg is not None):
                 y_for_peaks = y_sg_avg
+                amp_corr_for_avg_dots = amp_sg_corr_avg
             elif meas == 'RAW':
                 y_for_peaks = y_avg
+                amp_corr_for_avg_dots = amp_raw_corr_avg
             else:
                 y_for_peaks = yhat_avg
+                amp_corr_for_avg_dots = amp_nnls_corr_avg
 
             # Build cumulative baseline from previous pulses only using NNLS components
             # For pulse p, baseline_prev[p, :] = sum_{k < p} comp_avg[k]
@@ -5201,11 +5206,15 @@ def extract_metrics(
                         series_for_peak = y_for_peaks
                 tp, _ = pick_peak_on_series(t, series_for_peak, float(st), win_ms, pre_ms)
                 peak_ts.append(float(tp))
-                try:
-                    i0 = int(np.argmin(np.abs(t - tp)))
-                    peak_vals.append(float(y_for_peaks[i0]))
-                except Exception:
-                    peak_vals.append(float(y_for_peaks[0]) if y_for_peaks is not None else np.nan)
+                # Use the stored corrected amplitude (same value used for measurement)
+                if p < len(amp_corr_for_avg_dots):
+                    peak_vals.append(float(amp_corr_for_avg_dots[p]))
+                else:
+                    try:
+                        i0 = int(np.argmin(np.abs(t - tp)))
+                        peak_vals.append(float(y_for_peaks[i0]))
+                    except Exception:
+                        peak_vals.append(np.nan)
                 # Residual-under-peak = baseline from prior pulses at that time
                 try:
                     i0 = int(np.argmin(np.abs(t - tp)))
@@ -5938,10 +5947,13 @@ def extract_metrics(
             if plot_peaks_details:
                 if meas == 'SAVGOL' and (yj_sg is not None):
                     y_for_peaks_t = yj_sg
+                    amp_corr_for_dots = amp_sg_corr_unfloored
                 elif meas == 'RAW':
                     y_for_peaks_t = yj
+                    amp_corr_for_dots = amp_raw_corr_unfloored
                 else:
                     y_for_peaks_t = yhat_t
+                    amp_corr_for_dots = amp_nn_corr_unfloored
 
                 # Precompute per-pulse cumulative baseline from previous pulses (NNLS comps)
                 baseline_prev_only_t = []
@@ -5962,28 +5974,54 @@ def extract_metrics(
                             series_for_peak_t = y_for_peaks_t
                     tp, _ = pick_peak_on_series(t, series_for_peak_t, float(stp), win_ms, pre_ms)
                     peak_ts_t.append(float(tp))
-                    try:
-                        i0 = int(np.argmin(np.abs(t - tp)))
-                        peak_vals_t.append(float(y_for_peaks_t[i0]))
-                    except Exception:
-                        peak_vals_t.append(float(y_for_peaks_t[0]) if y_for_peaks_t is not None else np.nan)
+                    # Use the stored corrected amplitude (same value used for failure detection)
+                    if pp < len(amp_corr_for_dots):
+                        peak_vals_t.append(float(amp_corr_for_dots[pp]))
+                    else:
+                        try:
+                            i0 = int(np.argmin(np.abs(t - tp)))
+                            peak_vals_t.append(float(y_for_peaks_t[i0]))
+                        except Exception:
+                            peak_vals_t.append(np.nan)
                     try:
                         i0 = int(np.argmin(np.abs(t - tp)))
                         base_prev = baseline_prev_only_t[pp][i0] if baseline_prev_only_t else 0.0
                         resid_vals_t.append(float(base_prev))
                     except Exception:
                         resid_vals_t.append(np.nan)
+                # Color A1 dot by success/failure status
                 try:
-                    ax_train.scatter(peak_ts_t, peak_vals_t, s=60, color='red', edgecolors='white', linewidths=0.9, zorder=6)
+                    a1_val = float(amp_corr_for_dots[0]) if len(amp_corr_for_dots) else np.nan
+                    a1_status = 'success' if (np.isfinite(a1_val) and np.isfinite(thr1) and a1_val > thr1) else 'failure'
+                    a1_color = 'tab:green' if a1_status == 'success' else 'red'
+                    # A1 dot with status color
+                    ax_train.scatter([peak_ts_t[0]], [peak_vals_t[0]], s=80, color=a1_color, edgecolors='white', linewidths=0.9, zorder=7)
+                    # Remaining dots in red
+                    if len(peak_ts_t) > 1:
+                        ax_train.scatter(peak_ts_t[1:], peak_vals_t[1:], s=60, color='red', edgecolors='white', linewidths=0.9, zorder=6)
                 except Exception:
-                    pass
+                    ax_train.scatter(peak_ts_t, peak_vals_t, s=60, color='red', edgecolors='white', linewidths=0.9, zorder=6)
                 try:
                     ax_train.scatter(peak_ts_t, resid_vals_t, s=55, marker='v', facecolors='white', edgecolors='tab:red', linewidths=1.0, zorder=5)
                 except Exception:
                     pass
-            # Failure threshold line (thin red dotted)
+            # Failure threshold line (thin red dotted) + A1 annotation
             if np.isfinite(thr1):
                 ax_train.axhline(thr1, color='red', linestyle=':', linewidth=0.8)
+                try:
+                    a1_v = float(amp_corr_for_dots[0]) if plot_peaks_details and len(amp_corr_for_dots) else np.nan
+                    if np.isfinite(a1_v):
+                        a1_s = 'PASS' if a1_v > thr1 else 'FAIL'
+                        ax_train.text(
+                            0.01, 0.97,
+                            f'A1={a1_v:.4f}  thr={thr1:.4f}  [{a1_s}]',
+                            transform=ax_train.transAxes, fontsize=8,
+                            va='top', ha='left',
+                            color='tab:green' if a1_s == 'PASS' else 'red',
+                            fontfamily='monospace',
+                        )
+                except Exception:
+                    pass
             ax_train.set_xlim(z0, z1)
             ax_train.set_xlabel('Time (s)')
             ax_train.set_ylabel('ΔF/F0' if use_dff else 'ΔF')
@@ -6235,18 +6273,46 @@ def extract_metrics(
             figures_trials.append(fig_t)
 
     # Floor average amplitudes to noise threshold if option enabled (prevents div by near-zero in PPR)
-    if cfg.get('amplitude_floor_to_noise', False) and len(thr_list) > 0:
-        # Use median threshold across all trials as the floor for average data
-        median_threshold = float(np.median(thr_list))
-        amp_raw_avg = np.maximum(amp_raw_avg, median_threshold)
-        amp_raw_corr_avg = np.maximum(amp_raw_corr_avg, median_threshold)
-        amp_sg_avg = np.maximum(amp_sg_avg, median_threshold)
-        amp_sg_corr_avg = np.maximum(amp_sg_corr_avg, median_threshold)
-        amp_nnls_avg = np.maximum(amp_nnls_avg, median_threshold)
-        amp_nnls_corr_avg = np.maximum(amp_nnls_corr_avg, median_threshold)
+    # Keep unfloored copies for amplitude reporting; only use floored values for PPR.
+    amp_raw_avg_unfloored = np.asarray(amp_raw_avg, float).copy()
+    amp_raw_corr_avg_unfloored = np.asarray(amp_raw_corr_avg, float).copy()
+    amp_sg_avg_unfloored = np.asarray(amp_sg_avg, float).copy()
+    amp_sg_corr_avg_unfloored = np.asarray(amp_sg_corr_avg, float).copy()
+    amp_nnls_avg_unfloored = np.asarray(amp_nnls_avg, float).copy()
+    amp_nnls_corr_avg_unfloored = np.asarray(amp_nnls_corr_avg, float).copy()
+    median_threshold = np.nan
+    # Resolve average-specific options (fall back to per-trial settings if not specified)
+    _avg_floor_opt = cfg.get('average_amplitude_floor_to_noise')
+    avg_floor_enabled = bool(_avg_floor_opt) if _avg_floor_opt is not None else bool(cfg.get('amplitude_floor_to_noise', False))
+    _avg_null_N_opt = cfg.get('average_null_N')
+    avg_null_N = float(_avg_null_N_opt) if _avg_null_N_opt is not None else null_N
+    if avg_floor_enabled and len(thr_list) > 0:
+        # Recompute per-trial thresholds with average_null_N if it differs from null_N
+        if avg_null_N != null_N:
+            avg_thr_list = []
+            for rt in per_trial:
+                null_arr_t = np.asarray(rt.get('null_amps_nnls', []), float)
+                null_arr_t = null_arr_t[np.isfinite(null_arr_t)]
+                if null_arr_t.size:
+                    thr_t, _ = baseline_threshold_and_pval(null_arr_t, avg_null_N, mode=rt.get('noise_mode', 'mad'))
+                    avg_thr_list.append(thr_t)
+            if avg_thr_list:
+                median_threshold = float(np.median(avg_thr_list))
+            progress_print(f"[floor-avg] Using average_null_N={avg_null_N:.2f} (per-trial null_N={null_N:.2f})")
+            progress_print(f"[floor-avg] Recomputed per-trial thresholds: {[f'{t:.4f}' for t in avg_thr_list]}")
+        else:
+            median_threshold = float(np.median(thr_list))
+        progress_print(f"[floor-avg] Amplitude floor (median threshold): {median_threshold:.6f}")
+        progress_print(f"[floor-avg] Original per-trial thresholds: {[f'{t:.4f}' for t in thr_list]}")
+        amp_raw_avg_floored = np.maximum(amp_raw_avg, median_threshold)
+        amp_raw_corr_avg_floored = np.maximum(amp_raw_corr_avg, median_threshold)
+        amp_sg_avg_floored = np.maximum(amp_sg_avg, median_threshold)
+        amp_sg_corr_avg_floored = np.maximum(amp_sg_corr_avg, median_threshold)
+        amp_nnls_avg_floored = np.maximum(amp_nnls_avg, median_threshold)
+        amp_nnls_corr_avg_floored = np.maximum(amp_nnls_corr_avg, median_threshold)
         # Recalculate PPR with floored amplitudes
-        ppr_nnls_avg = _norm(amp_nnls_avg)
-        ppr_nnls_corr_avg = _norm(amp_nnls_corr_avg)
+        ppr_nnls_avg = _norm(amp_nnls_avg_floored)
+        ppr_nnls_corr_avg = _norm(amp_nnls_corr_avg_floored)
 
     figure_residual_buildup = None
     if plot_residual_buildup and per_trial:
@@ -6494,6 +6560,9 @@ def extract_metrics(
                          label='NNLS raw', markersize=6, lw=1.5, alpha=0.7)
                 ax3.plot(event_indices, amp_nnls_corr_avg[:n_pulses], 's-', color='tab:red', 
                          label='NNLS corrected', markersize=6, lw=2)
+                if np.isfinite(median_threshold):
+                    ax3.axhline(median_threshold, color='tab:orange', linestyle='--', lw=1.5, alpha=0.8,
+                                label=f'PPR floor ({median_threshold:.3f})')
                 ax3.set_xlabel('Event #')
                 ax3.set_ylabel('Amplitude (ΔF/F₀)')
                 ax3.set_title('NNLS Amplitudes')
@@ -6537,12 +6606,12 @@ def extract_metrics(
         },
         'interpolated_settings': interpolated_settings,
         'average': {
-            'amp_raw': np.asarray(amp_raw_avg, float),
-            'amp_savgol': np.asarray(amp_sg_avg, float),
-            'amp_nnls': np.asarray(amp_nnls_avg, float),
-            'amp_raw_corr': np.asarray(amp_raw_corr_avg, float),
-            'amp_savgol_corr': np.asarray(amp_sg_corr_avg, float),
-            'amp_nnls_corr': np.asarray(amp_nnls_corr_avg, float),
+            'amp_raw': np.asarray(amp_raw_avg_unfloored, float),
+            'amp_savgol': np.asarray(amp_sg_avg_unfloored, float),
+            'amp_nnls': np.asarray(amp_nnls_avg_unfloored, float),
+            'amp_raw_corr': np.asarray(amp_raw_corr_avg_unfloored, float),
+            'amp_savgol_corr': np.asarray(amp_sg_corr_avg_unfloored, float),
+            'amp_nnls_corr': np.asarray(amp_nnls_corr_avg_unfloored, float),
             'ppr_nnls': np.asarray(ppr_nnls_avg, float),
             'ppr_nnls_corr': np.asarray(ppr_nnls_corr_avg, float),
             'y_avg': np.asarray(y_avg, float),
@@ -6560,6 +6629,7 @@ def extract_metrics(
         'trial_input_cols_dropped_1based': np.asarray(dropped_trial_cols_0based + 1, int),
         'time_s': np.asarray(t, float),
         'threshold_amp1': np.asarray(thr_list, float),
+        'median_threshold_floor': float(median_threshold) if np.isfinite(median_threshold) else np.nan,
         'pval_amp1': np.asarray(pval_list, float),
         'figure': figure,
         'figure_fit_diagnostic': fit_diag_figure,
@@ -6627,7 +6697,19 @@ def export_folders_to_excel(paths,
                 try:
                     df = pd.read_excel(fp, sheet_name=0)
                     t_raw = pd.to_numeric(df.iloc[:, -1], errors='coerce').to_numpy(float)
-                    X = df.iloc[:, :-1].apply(pd.to_numeric, errors='coerce').to_numpy(float)
+                    _all_cols = df.iloc[:, :-1].apply(pd.to_numeric, errors='coerce').to_numpy(float)
+                    # Auto-detect and skip the average column (penultimate = mean of preceding)
+                    _skip_avg = False
+                    if _all_cols.shape[1] >= 2:
+                        _cand = _all_cols[:, -1]
+                        _prec = _all_cols[:, :-1]
+                        _cmean = np.nanmean(_prec, axis=1)
+                        _fin = np.isfinite(_cand) & np.isfinite(_cmean)
+                        if _fin.sum() > 10:
+                            _cc = np.corrcoef(_cand[_fin], _cmean[_fin])[0, 1]
+                            if _cc > 0.99:
+                                _skip_avg = True
+                    X = _all_cols[:, :-1] if _skip_avg else _all_cols
                     ok = np.isfinite(t_raw)
                     t = t_raw[ok] ; trials = X[ok, :]
                     

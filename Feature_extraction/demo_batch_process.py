@@ -17,7 +17,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 
 # --- Data paths ---
 DATA_ROOT = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL"
-OUT_DIR = os.path.join(DATA_ROOT, "FINALOUT2")
+OUT_DIR = os.path.join(DATA_ROOT, "FINALOUT3")
 
 # --- Select conditions and files ---
 # If CONDITIONS_TO_RUN is empty/None, the script will process all conditions
@@ -126,6 +126,8 @@ def _build_options_presets(peak_window_ms, pre_zoom_s, post_zoom_s):
             
             # --- PPR Safety ---
             'amplitude_floor_to_noise': True,                               # Floor all pulse amplitudes to the per-trial A1 threshold (thr1) before PPR; average uses median(thr1)
+            'average_amplitude_floor_to_noise': False,                       # Separate control for average trace floor; None => follow amplitude_floor_to_noise
+            'average_null_N': None,                                          # Separate null_N multiplier for average trace floor; None => follow null_N
             
             # --- NNLS Fitting ---
             'nnls_weight_mode': 'savgol',                                     # 'uniform', 'linear', 'exponential', 'savgol', 'peak' ; weighting scheme for NNLS fitting
@@ -250,7 +252,25 @@ def _process_one_file(task: tuple[str, str], *, show_plots: bool) -> dict:
         return {'error': f"[skip] Failed to read Excel: {xlsx_path} -> {e}"}
 
     _time = pd.to_numeric(df.iloc[:, -1], errors='coerce').to_numpy(float)
-    _trials = df.iloc[:, :-1].apply(pd.to_numeric, errors='coerce').to_numpy(float)
+    _all_before_time = df.iloc[:, :-1].apply(pd.to_numeric, errors='coerce').to_numpy(float)
+
+    # Auto-detect and skip the average column (penultimate = mean of preceding columns)
+    _has_avg_col = False
+    if _all_before_time.shape[1] >= 2:
+        _candidate_avg = _all_before_time[:, -1]
+        _preceding = _all_before_time[:, :-1]
+        _computed_avg = np.nanmean(_preceding, axis=1)
+        _finite = np.isfinite(_candidate_avg) & np.isfinite(_computed_avg)
+        if _finite.sum() > 10:
+            _corr = np.corrcoef(_candidate_avg[_finite], _computed_avg[_finite])[0, 1]
+            if _corr > 0.99:
+                _has_avg_col = True
+
+    if _has_avg_col:
+        _trials = _all_before_time[:, :-1]
+    else:
+        _trials = _all_before_time
+
     valid = np.isfinite(_time)
     time = _time[valid]
     trials = _trials[valid, :]
@@ -263,7 +283,7 @@ def _process_one_file(task: tuple[str, str], *, show_plots: bool) -> dict:
     # --- Compute ISI-dependent parameters ---
     isi_ms = isi * 1000.0
     margin_ms = 2.0  # Fixed margin before next event (ms)
-    peak_window_ms = min(isi_ms, 10) # max(5.0, isi_ms - margin_ms)  # Use all data minus 2ms margin
+    peak_window_ms = max(5.0, isi_ms - margin_ms)  # Use all data minus 2ms margin
     post_zoom_s = 0.3  # Show ~5 pulses
     pre_zoom_s = 0.20
 
