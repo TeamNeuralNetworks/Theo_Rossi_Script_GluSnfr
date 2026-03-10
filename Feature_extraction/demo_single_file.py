@@ -405,7 +405,8 @@ for idx_trial, rtrial in enumerate(res.get('per_trial', [])):
         )
         trial_row[f'AMP{p}_CORR'] = vc
         trial_row[f'AMP{p}_UNCORR'] = vu
-    trial_row['AMP1'] = trial_row.get('AMP1_CORR', np.nan)
+    # Backward-compatible legacy column: single-trial AMP1 should remain uncorrected.
+    trial_row['AMP1'] = trial_row.get('AMP1_UNCORR', np.nan)
     per_trial_rows.append(trial_row)
     per_trial_null_rows.append({
         'condition': CONDITION,

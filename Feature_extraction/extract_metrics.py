@@ -6746,27 +6746,42 @@ def export_folders_to_excel(paths,
                         return vals
 
                     if failm == 'SAVGOL':
-                        per_amp = _amp_vec_per_trial('amp_savgol_corr')
+                        per_amp_corr = _amp_vec_per_trial('amp_savgol_corr')
+                        per_amp_uncorr = _amp_vec_per_trial('amp_savgol')
                     elif failm == 'RAW':
-                        per_amp = _amp_vec_per_trial('amp_raw_corr')
+                        per_amp_corr = _amp_vec_per_trial('amp_raw_corr')
+                        per_amp_uncorr = _amp_vec_per_trial('amp_raw')
                     else:
-                        per_amp = _amp_vec_per_trial('amp_nnls_corr')
+                        per_amp_corr = _amp_vec_per_trial('amp_nnls_corr')
+                        per_amp_uncorr = _amp_vec_per_trial('amp_nnls')
 
                     # Use per-trial shared threshold and compare first 3 pulses
                     n_fail = [0, 0, 0]
                     n_valid = [0, 0, 0]
                     for idx_trial, r in enumerate(res['per_trial']):
                         thr = r.get('thr_shared')
-                        amps = per_amp[idx_trial]
-                        if thr is None or not (isinstance(amps, (list, tuple, np.ndarray))):
+                        amps_corr = per_amp_corr[idx_trial]
+                        amps_uncorr = per_amp_uncorr[idx_trial]
+                        if (
+                            thr is None
+                            or not isinstance(amps_corr, (list, tuple, np.ndarray))
+                            or not isinstance(amps_uncorr, (list, tuple, np.ndarray))
+                        ):
                             continue
                         for k in range(3):
-                            if len(amps) > k:
-                                ak = float(amps[k])
-                                if np.isfinite(ak) and np.isfinite(thr):
-                                    n_valid[k] += 1
-                                    if ak <= thr:
-                                        n_fail[k] += 1
+                            vals_k = []
+                            if len(amps_corr) > k:
+                                ak_corr = float(amps_corr[k])
+                                if np.isfinite(ak_corr):
+                                    vals_k.append(ak_corr)
+                            if len(amps_uncorr) > k:
+                                ak_uncorr = float(amps_uncorr[k])
+                                if np.isfinite(ak_uncorr):
+                                    vals_k.append(ak_uncorr)
+                            if vals_k and np.isfinite(thr):
+                                n_valid[k] += 1
+                                if min(vals_k) < float(thr):
+                                    n_fail[k] += 1
                     for k in range(3):
                         row[f"%Fail{k+1}"] = round((n_fail[k] / n_valid[k]) * 100.0, 2) if n_valid[k] else float('nan')
 
