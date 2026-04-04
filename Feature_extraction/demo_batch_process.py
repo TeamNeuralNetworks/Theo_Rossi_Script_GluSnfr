@@ -8,7 +8,7 @@ Quick reference for options (see Model_Calibration/event_models.py for details):
   - nnls_weight_mode: 'uniform', 'linear', 'exponential', 'savgol', 'peak'
 """
 
-import os, sys, glob, json, numpy as np, pandas as pd
+import os, sys, glob, json, math, numpy as np, pandas as pd
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 # =============================================================================
@@ -17,7 +17,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 
 # --- Data paths ---
 DATA_ROOT = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL"
-OUT_DIR = os.path.join(DATA_ROOT, "FINALOUT3")
+OUT_DIR = os.path.join(DATA_ROOT, "FINALOUT_CLEAN")
 
 # --- Select conditions and files ---
 # If CONDITIONS_TO_RUN is empty/None, the script will process all conditions
@@ -130,14 +130,15 @@ def _build_options_presets(peak_window_ms, pre_zoom_s, post_zoom_s):
             'average_null_N': None,                                          # Separate null_N multiplier for average trace floor; None => follow null_N
             
             # --- NNLS Fitting ---
-            'nnls_weight_mode': 'savgol',                                     # 'uniform', 'linear', 'exponential', 'savgol', 'peak' ; weighting scheme for NNLS fitting
+            'nnls_fit_mode': 'sequential',                                  # 'simultaneous' (all events jointly) or 'sequential' (greedy forward pass, resolves fast/superslow degeneracy)
+            'nnls_weight_mode': 'savgol',                                   # 'uniform', 'linear', 'exponential', 'savgol', 'peak' ; weighting scheme for NNLS fitting
             'nnls_weight_tau_s': None,                                      # Time constant for exponential weighting (s) ; only used if nnls_weight_mode is 'exponential'
             'nnls_peak_window_s': 0.010,                                    # Peak-emphasis window after each stimulus (s)
             'nnls_peak_weight': 3.0,                                        # Weight multiplier inside the peak window
-            'nnls_last_event_tail_tau_s': 'best',                           # Last event tail downweight tau (s); None=off, 'auto'=ISI, or float; reduces overshoot
             'fit_diagnostic_plot': False,                                   # Whether to generate fit diagnostic plots
             'huber_delta': 2.5,                                             # Huber loss delta for robust fitting (in std units); set to None to disable robust fitting
             'irls_iters': 20,                                               # Number of IRLS iterations for robust fitting ; only used if huber_delta is set
+            'nnls_last_event_tail_tau_s': 'best',                           # Last event tail downweight tau (s); None=off, 'auto'=ISI, 'best'=search for optimal, or float
             
             # --- Time Windows (ISI-aware) ---
             'pre_zoom_s': pre_zoom_s,                                       # Pre-event snippet duration (s); controls how much data before each event is shown ; does not affect fitting
@@ -188,7 +189,7 @@ def _build_options_presets(peak_window_ms, pre_zoom_s, post_zoom_s):
             'force_tau_slow_override': False,                                # If True, force tau_slow = tau_superslow in tri-exp models ; unlike allow_tau_slow_override, this enforces the equality rather than just allowing it
             
             # --- Jitter Variants ---
-            'jitter_variant_ms': np.linspace(-1.0, 1.0, 5), 
+            'jitter_variant_ms': np.linspace(-1.0, 1.0, 5),                # Jitter variants to try (ms) ; set to None to disable jitter variants ; jitter means we shift event times by +/- jitter to test robustness
         },
     }
 
@@ -217,29 +218,49 @@ from Feature_extraction.extract_metrics import extract_metrics
 
 
 def _safe_sheet_name(name: str) -> str:
-    """Return a workbook-safe Excel sheet name."""
+    """Return a workbook-safe Excel sheet name (max 31 chars, no illegal chars)."""
     cleaned = "".join(c for c in name if c not in ":\\/?*[]")
     return (cleaned or "Sheet")[:31]
 
 
-def _iter_xlsx_files(folder: str, pattern: str) -> list[str]:
-    return sorted(glob.glob(os.path.join(folder, pattern)))
+def _ensure_columns(df, ordered_cols):
+    """Ensure all columns exist (fill missing with NaN) and reorder; extras follow at the end."""
+    for col in ordered_cols:
+        if col not in df.columns:
+            df[col] = np.nan
+    rest = [c for c in df.columns if c not in ordered_cols]
+    return df[ordered_cols + rest]
+
+
+def _accumulate_result(result, failures, summary_rows, per_trial_rows,
+                       per_trial_null_rows, traces_by_condition, max_pulses_seen):
+    """Merge one file result into batch accumulators. Returns updated max_pulses_seen."""
+    if result.get('error'):
+        msg = result['error']
+        print(msg)
+        failures.append(msg)
+        return max_pulses_seen
+    summary_rows.append(result['row'])
+    per_trial_rows.extend(result['per_trial_rows'])
+    per_trial_null_rows.extend(result.get('per_trial_null_rows', []))
+    max_pulses_seen = max(max_pulses_seen, result['max_pulses'])
+    t_vec = result.get('trace_time_s')
+    y_avg = result.get('trace_avg')
+    if t_vec is not None and y_avg is not None:
+        traces_by_condition.setdefault(
+            result['row']['condition'], {}
+        )[result['row']['ID']] = (t_vec, y_avg)
+    return max_pulses_seen
+
 
 def _save_figure(fig, outpath: str, *, dpi=None, label: str = "figure") -> bool:
     try:
         fig.savefig(outpath, dpi=dpi)
+        if os.path.getsize(outpath) <= 0:
+            print(f"[save] Empty file after save ({label}): {outpath}")
+            return False
     except Exception as e:
         print(f"[save] Failed {label}: {outpath} ({e})")
-        return False
-    try:
-        if not os.path.isfile(outpath):
-            print(f"[save] Missing {label}: {outpath}")
-            return False
-        if os.path.getsize(outpath) <= 0:
-            print(f"[save] Empty {label}: {outpath}")
-            return False
-    except Exception as e:
-        print(f"[save] Could not validate {label}: {outpath} ({e})")
         return False
     print(f"[save] {label} -> {outpath}")
     return True
@@ -263,7 +284,7 @@ def _process_one_file(task: tuple[str, str], *, show_plots: bool) -> dict:
         _finite = np.isfinite(_candidate_avg) & np.isfinite(_computed_avg)
         if _finite.sum() > 10:
             _corr = np.corrcoef(_candidate_avg[_finite], _computed_avg[_finite])[0, 1]
-            if _corr > 0.99:
+            if not math.isnan(_corr) and _corr > 0.99:
                 _has_avg_col = True
 
     if _has_avg_col:
@@ -284,7 +305,7 @@ def _process_one_file(task: tuple[str, str], *, show_plots: bool) -> dict:
     isi_ms = isi * 1000.0
     margin_ms = 2.0  # Fixed margin before next event (ms)
     peak_window_ms = max(5.0, isi_ms - margin_ms)  # Use all data minus 2ms margin
-    post_zoom_s = 0.3  # Show ~5 pulses
+    post_zoom_s = 0.3  # Post-train window (s): controls plot zoom AND last-event fit window in sequential NNLS
     pre_zoom_s = 0.20
 
     # --- Print configuration ---
@@ -416,46 +437,31 @@ def _process_one_file(task: tuple[str, str], *, show_plots: bool) -> dict:
     if fig is None:
         if SAVE_PLOTS:
             print(f"[warn] No main figure returned for {base}")
-    else:
-        if SAVE_PLOTS:
-            _save_figure(fig, os.path.join(condition_out_dir, f"{base}_plot.png"), dpi=150, label="plot")
+    elif SAVE_PLOTS:
+        _save_figure(fig, os.path.join(condition_out_dir, f"{base}_plot.png"), dpi=150, label="plot")
 
-        if show_plots:
-            try:
-                plt.show()
-            except Exception:
-                pass
-
-    # Per-trial figures
     figs_trials = res.get('figures_trials') or []
     for i, ftri in enumerate(figs_trials, 1):
         if SAVE_PLOTS:
             try:
-                outp = os.path.join(condition_out_dir, f"{base}_trialfig_{i:02d}.png")
                 ftri.tight_layout()
-                _save_figure(ftri, outp, dpi=120, label=f"trial {i:02d}")
-            except Exception:
-                pass
-    if figs_trials and show_plots:
-        try:
-            plt.show()
-        except Exception:
-            pass
+                _save_figure(ftri, os.path.join(condition_out_dir, f"{base}_trialfig_{i:02d}.png"),
+                             dpi=120, label=f"trial {i:02d}")
+            except Exception as e:
+                print(f"[warn] Failed to save trial figure {i:02d}: {e}")
 
-    # Parameter evolution figure
     fig_param = res.get('figure_param_evolution')
     if fig_param is not None and SAVE_PLOTS:
+        _save_figure(fig_param, os.path.join(condition_out_dir, f"{base}_param_evolution.png"),
+                     dpi=150, label="param evolution")
+
+    if show_plots:
         try:
-            _save_figure(fig_param, os.path.join(condition_out_dir, f"{base}_param_evolution.png"), dpi=150, label="param evolution")
-            if show_plots:
-                plt.show()
+            plt.show()
         except Exception as e:
-            print(f"[demo] Error saving param evolution figure: {e}")
-    if not show_plots:
-        try:
-            plt.close('all')
-        except Exception:
-            pass
+            print(f"[warn] plt.show() failed: {e}")
+    else:
+        plt.close('all')
 
     return {
         'row': row,
@@ -484,7 +490,7 @@ def run_batch():
             print(msg)
             failures.append(msg)
             continue
-        for xlsx_path in _iter_xlsx_files(in_dir, FILE_GLOB):
+        for xlsx_path in sorted(glob.glob(os.path.join(in_dir, FILE_GLOB))):
             tasks.append((condition, xlsx_path))
 
     summary_rows = []
@@ -498,6 +504,7 @@ def run_batch():
         print("[warn] SHOW_PLOTS=True disables parallel file processing. Falling back to sequential.")
         use_parallel = False
 
+    _acc = (failures, summary_rows, per_trial_rows, per_trial_null_rows, traces_by_condition)
     if use_parallel:
         max_workers = min(FILE_WORKERS, len(tasks))
         print(f"[info] Parallel file processing: {max_workers} worker(s) for {len(tasks)} file(s).")
@@ -511,35 +518,11 @@ def run_batch():
                     print(msg)
                     failures.append(msg)
                     continue
-                if result.get('error'):
-                    msg = result['error']
-                    print(msg)
-                    failures.append(msg)
-                    continue
-                summary_rows.append(result['row'])
-                per_trial_rows.extend(result['per_trial_rows'])
-                per_trial_null_rows.extend(result.get('per_trial_null_rows', []))
-                max_pulses_seen = max(max_pulses_seen, result['max_pulses'])
-                t_vec = result.get('trace_time_s')
-                y_avg = result.get('trace_avg')
-                if t_vec is not None and y_avg is not None:
-                    traces_by_condition.setdefault(result['row']['condition'], {})[result['row']['ID']] = (t_vec, y_avg)
+                max_pulses_seen = _accumulate_result(result, *_acc, max_pulses_seen)
     else:
         for task in tasks:
             result = _process_one_file(task, show_plots=SHOW_PLOTS)
-            if result.get('error'):
-                msg = result['error']
-                print(msg)
-                failures.append(msg)
-                continue
-            summary_rows.append(result['row'])
-            per_trial_rows.extend(result['per_trial_rows'])
-            per_trial_null_rows.extend(result.get('per_trial_null_rows', []))
-            max_pulses_seen = max(max_pulses_seen, result['max_pulses'])
-            t_vec = result.get('trace_time_s')
-            y_avg = result.get('trace_avg')
-            if t_vec is not None and y_avg is not None:
-                traces_by_condition.setdefault(result['row']['condition'], {})[result['row']['ID']] = (t_vec, y_avg)
+            max_pulses_seen = _accumulate_result(result, *_acc, max_pulses_seen)
 
     # =============================================================================
     #                              SUMMARY OUTPUT
@@ -561,10 +544,7 @@ def run_batch():
         ordered = [f'AMP{i}' for i in range(1, max_pulses_seen + 1)] \
             + [f'PPR{i}/1' for i in range(2, max_pulses_seen + 1)] \
             + [f'%Fail{i}' for i in range(1, 4)]
-        for col in ['condition', 'measurement', 'ID', *ordered]:
-            if col not in df_rows.columns:
-                df_rows[col] = np.nan
-        df_rows = df_rows[['condition', 'ID', *ordered, 'measurement']]
+        df_rows = _ensure_columns(df_rows, ['condition', 'ID', *ordered, 'measurement'])
 
         csv_out = os.path.join(OUT_DIR, "summary.csv")
         df_rows.to_csv(csv_out, index=False)
@@ -589,11 +569,7 @@ def run_batch():
                 + [f'AMP{i}_UNCORR' for i in range(1, DEFAULT_N_PULSES + 1)]
                 + ['AMP1']
             )
-            for col in trial_cols:
-                if col not in df_trials.columns:
-                    df_trials[col] = np.nan
-            rest_cols = [c for c in df_trials.columns if c not in trial_cols]
-            df_trials = df_trials[trial_cols + rest_cols]
+            df_trials = _ensure_columns(df_trials, trial_cols)
             df_trials.to_excel(os.path.splitext(xl_out)[0] + "_trials.xlsx", index=False)
 
         if per_trial_null_rows:
@@ -602,11 +578,7 @@ def run_batch():
                 'condition', 'file', 'trial', 'trial_input_col_1based', 'status',
                 'nnls_null_n', 'nnls_null_amps_json',
             ]
-            for col in null_cols:
-                if col not in df_trials_null.columns:
-                    df_trials_null[col] = np.nan
-            rest_null_cols = [c for c in df_trials_null.columns if c not in null_cols]
-            df_trials_null = df_trials_null[null_cols + rest_null_cols]
+            df_trials_null = _ensure_columns(df_trials_null, null_cols)
             df_trials_null.to_excel(os.path.splitext(xl_out)[0] + "_trials_nnls_null.xlsx", index=False)
 
         print(f"[export] Saved summary to: {csv_out}")

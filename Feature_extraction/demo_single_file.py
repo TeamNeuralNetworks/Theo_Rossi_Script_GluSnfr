@@ -8,7 +8,7 @@ Quick reference for options (see Model_Calibration/event_models.py for details):
   - nnls_weight_mode: 'uniform', 'linear', 'exponential', 'savgol', 'peak'
 """
 
-import os, sys, json, numpy as np, pandas as pd
+import os, sys, json, math, numpy as np, pandas as pd
 import matplotlib.pyplot as plt
 
 # =============================================================================
@@ -48,9 +48,7 @@ OUT_DIR = os.path.join(DATA_ROOT, "Testout")
 CONDITION = ""  # Leave empty to auto-detect from file location
 #TARGET_FILE = "20191017_linescan3_50Hz_10pulses_2.5mMCa_bouton2_traces_converted.xlsx"
 #TARGET_FILE = "20210722_linescan3_50Hz_10pulses_1.5mMCa_bouton12_traces_converted.xlsx"
-TARGET_FILE = "20240227_linescan2_20Hz_10pulses_2.5mMCa_bouton8_set1_traces_converted.xlsx"
-
-TARGET_FILE = "250128_Fibre2_Bouton_7.xlsx"
+TARGET_FILE = "20210512_linescan2_50Hz_10pulses_2.5mMCa_bouton1_traces_converted.xlsx"
 
 # --- Select analysis preset ---
 PRESET_NAME = 'iglusnfr_optimized'  # Options: 'iglusnfr_optimized', 'double_exp', 'single_exp_fixed_8ms'
@@ -151,6 +149,7 @@ def _build_options_presets(peak_window_ms, pre_zoom_s, post_zoom_s):
             'average_null_N': None,                                          # Separate null_N multiplier for average trace floor; None => follow null_N
             
             # --- NNLS Fitting ---
+            'nnls_fit_mode': 'sequential',                                  # 'simultaneous' (all events jointly) or 'sequential' (greedy forward pass, resolves fast/superslow degeneracy)
             'nnls_weight_mode': 'savgol',                                   # 'uniform', 'linear', 'exponential', 'savgol', 'peak' ; weighting scheme for NNLS fitting
             'nnls_weight_tau_s': None,                                      # Time constant for exponential weighting (s) ; only used if nnls_weight_mode is 'exponential'
             'nnls_peak_window_s': 0.010,                                    # Peak-emphasis window after each stimulus (s)
@@ -229,6 +228,15 @@ if REPO_ROOT not in sys.path:
 
 from Feature_extraction.extract_metrics import extract_metrics
 
+def _ensure_columns(df, ordered_cols):
+    """Ensure all columns exist (fill missing with NaN) and reorder; extras follow at the end."""
+    for col in ordered_cols:
+        if col not in df.columns:
+            df[col] = np.nan
+    rest = [c for c in df.columns if c not in ordered_cols]
+    return df[ordered_cols + rest]
+
+
 # --- Auto-detect condition from filename ---
 def _find_condition(data_root, conditions, filename):
     """Search all condition folders for filename, return condition name or None."""
@@ -253,7 +261,7 @@ xlsx_path = os.path.join(DATA_ROOT, CONDITION, TARGET_FILE)
 ISI_MS = ISI * 1000.0
 MARGIN_MS = 2.0  # Fixed margin before next event (ms)
 PEAK_WINDOW_MS = max(5.0, ISI_MS - MARGIN_MS)  # Use all data minus 2ms margin
-POST_ZOOM_S = 0.3  # Show ~5 pulses
+POST_ZOOM_S = 0.3  # Post-train window (s): controls plot zoom AND last-event fit window in sequential NNLS
 PRE_ZOOM_S = 0.20
 
 # --- Print configuration ---
@@ -269,6 +277,8 @@ print("=" * 60)
 
 # --- Build presets and select ---
 options_presets = _build_options_presets(PEAK_WINDOW_MS, PRE_ZOOM_S, POST_ZOOM_S)
+if PRESET_NAME not in options_presets:
+    raise ValueError(f"Unknown preset '{PRESET_NAME}'. Available: {list(options_presets)}")
 options = options_presets[PRESET_NAME]
 
 # --- Load data ---
@@ -286,7 +296,7 @@ if _all_before_time.shape[1] >= 2:
     _finite = np.isfinite(_candidate_avg) & np.isfinite(_computed_avg)
     if _finite.sum() > 10:
         _corr = np.corrcoef(_candidate_avg[_finite], _computed_avg[_finite])[0, 1]
-        if _corr > 0.99:
+        if not math.isnan(_corr) and _corr > 0.99:
             _has_avg_col = True
 
 if _has_avg_col:
@@ -431,10 +441,7 @@ for p in range(1, 4):
 # --- Save to files ---
 df_rows = pd.DataFrame([row])
 ordered = [f'AMP{i}' for i in range(1, 11)] + [f'PPR{i}/1' for i in range(2, 11)] + [f'%Fail{i}' for i in range(1, 4)]
-for col in ['measurement', 'ID', *ordered]:
-    if col not in df_rows.columns:
-        df_rows[col] = np.nan
-df_rows = df_rows[['ID', *ordered, 'measurement']]
+df_rows = _ensure_columns(df_rows, ['ID', *ordered, 'measurement'])
 
 csv_out = os.path.join(OUT_DIR, f"{base}_summary.csv")
 df_rows.to_csv(csv_out, index=False)
@@ -453,20 +460,12 @@ if per_trial_rows:
         + [f'AMP{i}_UNCORR' for i in range(1, DEFAULT_N_PULSES + 1)]
         + ['AMP1']
     )
-    for col in trial_cols:
-        if col not in df_trials.columns:
-            df_trials[col] = np.nan
-    rest_cols = [c for c in df_trials.columns if c not in trial_cols]
-    df_trials = df_trials[trial_cols + rest_cols]
+    df_trials = _ensure_columns(df_trials, trial_cols)
     df_trials.to_excel(os.path.splitext(xl_out)[0] + "_trials.xlsx", index=False)
 if per_trial_null_rows:
     df_trials_null = pd.DataFrame(per_trial_null_rows)
     null_cols = ['condition', 'file', 'trial', 'trial_input_col_1based', 'status', 'nnls_null_n', 'nnls_null_amps_json']
-    for col in null_cols:
-        if col not in df_trials_null.columns:
-            df_trials_null[col] = np.nan
-    rest_null_cols = [c for c in df_trials_null.columns if c not in null_cols]
-    df_trials_null = df_trials_null[null_cols + rest_null_cols]
+    df_trials_null = _ensure_columns(df_trials_null, null_cols)
     df_trials_null.to_excel(os.path.splitext(xl_out)[0] + "_trials_nnls_null.xlsx", index=False)
 
 # =============================================================================
@@ -477,13 +476,8 @@ fig = res.get('figure')
 if fig is not None:
     try:
         fig.savefig(os.path.join(OUT_DIR, "traces_converted_plot.png"), dpi=150)
-    except Exception:
-        pass
-
-    try:
-        plt.show()
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[warn] Failed to save main figure: {e}")
 
 # Per-trial figures
 figs_trials = res.get('figures_trials') or []
@@ -492,13 +486,8 @@ for i, ftri in enumerate(figs_trials, 1):
         outp = os.path.join(OUT_DIR, f"{base}_trialfig_{i:02d}.png")
         ftri.tight_layout()
         ftri.savefig(outp, dpi=120)
-    except Exception:
-        pass
-if figs_trials:
-    try:
-        plt.show()
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[warn] Failed to save trial figure {i:02d}: {e}")
 
 # Parameter evolution figure
 fig_param = res.get('figure_param_evolution')
@@ -506,6 +495,17 @@ if fig_param is not None:
     try:
         fig_param.savefig(os.path.join(OUT_DIR, f"{base}_param_evolution.png"), dpi=150)
         print(f"[demo] Saved param evolution figure")
-        plt.show()
     except Exception as e:
         print(f"[demo] Error saving param evolution figure: {e}")
+
+try:
+    plt.show()
+except Exception as e:
+    print(f"[warn] plt.show() failed: {e}")
+plt.close('all')
+
+print()
+print("=" * 60)
+print(f"  DONE: {base}")
+print(f"  Output: {OUT_DIR}")
+print("=" * 60)

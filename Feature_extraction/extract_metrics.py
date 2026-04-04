@@ -143,6 +143,11 @@ DEFAULTS = {
     # Bi-exp: slow component fractions per event.
     # Tri-exp: slow fraction grid paired with template_variant_superslow_fracs.
     'template_variant_ratios': np.linspace(0.0, 1.0, 10),
+    # NNLS fitting mode: 'simultaneous' (default, all events jointly) or 'sequential'
+    # (greedy forward pass: each event fitted on residual after subtracting previous event tails;
+    # resolves fast/superslow degeneracy in high-overlap trains; followed by two-pass
+    # smoothing of kinetic parameters across events)
+    'nnls_fit_mode': 'simultaneous',
 }
 
 # Recut options: oversample factor and projection ('mean'|'median'|'std')
@@ -411,7 +416,6 @@ def estimate_tau_superslow_from_last_event_decay(
         decay_end = float(t[-1])
         if baseline is None:
             baseline = float(np.nanmedian(y[max(0, peak_idx - 10):peak_idx + 1]))
-        decay_end = min(decay_end, decay_start + 0.050)
         try:
             if np.isfinite(baseline):
                 amp = peak_y - baseline
@@ -519,7 +523,12 @@ def estimate_tau_superslow_from_last_event_decay(
         if tau_slow is None or not np.isfinite(tau_slow):
             return None, None
 
-        tau_slow = float(np.clip(tau_slow, 0.010, 0.400))
+        # If fit hit the upper ceiling it means the exponential never converged —
+        # treat as a failed estimate so superslow variants stay disabled.
+        _TAU_SUPERSLOW_MAX = 0.350
+        if tau_slow >= _TAU_SUPERSLOW_MAX:
+            return None, None
+        tau_slow = float(np.clip(tau_slow, 0.010, _TAU_SUPERSLOW_MAX))
         if a_slow is None or not np.isfinite(a_slow):
             a_slow = float(peak_decay)
 
@@ -672,7 +681,7 @@ def _calculate_nnls_weights(
         if not np.isfinite(max_ref) or max_ref <= 0:
             return weights
         norm = ref / max_ref
-        weights = 0.1 + 0.9 * norm
+        weights = norm
         return weights
     
     elif weight_mode == 'peak':
@@ -789,28 +798,13 @@ def _compute_residual_whiteness(residual: np.ndarray) -> float:
     if var_r < 1e-12:
         return 1.0  # Zero residual is perfect
 
-    # 1. Lag-1 autocorrelation penalty (ideal = 0)
-    autocorr_1 = np.corrcoef(r[:-1], r[1:])[0, 1] if len(r) > 1 else 0
-    autocorr_score = 1.0 - abs(autocorr_1)  # 1 if no autocorr, 0 if perfect corr
-
-    # 2. Sign-change frequency (ideal = ~50%)
-    signs = np.sign(r)
-    sign_changes = np.sum(signs[:-1] != signs[1:])
-    sign_change_freq = sign_changes / (len(r) - 1) if len(r) > 1 else 0.5
-    # Score peaks at 0.5, drops toward 0 or 1
-    sign_score = 1.0 - 2 * abs(sign_change_freq - 0.5)
-
-    # 3. Running mean envelope (systematic bias)
-    window = max(5, len(r) // 20)
-    cumsum = np.cumsum(np.insert(r, 0, 0))
-    running_mean = (cumsum[window:] - cumsum[:-window]) / window
-    envelope_rms = np.sqrt(np.mean(running_mean ** 2))
-    noise_rms = np.sqrt(var_r)
-    # Envelope should be much smaller than noise RMS
-    envelope_score = 1.0 / (1.0 + (envelope_rms / (noise_rms + 1e-9)) ** 2)
-
-    # Combined score (weighted average)
-    whiteness = 0.5 * autocorr_score + 0.2 * sign_score + 0.3 * envelope_score
+    # Lag-1 autocorrelation: the definitive test for white noise.
+    # For a truly white (iid) residual, lag-1 autocorr ~ 0.
+    # Score = 1 - |r1|, ranging from 1 (white) to 0 (fully correlated).
+    autocorr_1 = np.corrcoef(r[:-1], r[1:])[0, 1] if len(r) > 1 else 0.0
+    if not np.isfinite(autocorr_1):
+        autocorr_1 = 0.0
+    whiteness = 1.0 - abs(float(autocorr_1))
     return float(whiteness)
 
 
@@ -1332,6 +1326,142 @@ def fit_amplitudes_with_template_variants(
         'final_tau_d': current_tau_d,
         'final_t0': current_t0,
         'hard_select': bool(hard_select),
+    }
+
+    return a_events, d_events, X_used, yhat, components, variant_info
+
+
+def fit_amplitudes_sequential(
+    y: np.ndarray,
+    t: np.ndarray,
+    stim_times: np.ndarray,
+    tau_r_s: float,
+    tau_d_vec_s: np.ndarray,
+    *,
+    variant_ratios: List[Any],
+    isi: float,
+    event_t0_s: float = 0.0,
+    jitter_variant_ms: Optional[np.ndarray] = None,
+    peak_window_s: Optional[float] = None,
+    last_event_post_s: float = 0.200,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, List[np.ndarray], Dict]:
+    """Greedy sequential NNLS: fit each event on the residual after subtracting previous event tails.
+
+    Resolves the fast/superslow degeneracy that arises in simultaneous fitting when the
+    accumulated superslow tail from early events looks like a new release at later events.
+
+    For each event i:
+      1. residual_i = y - sum(all previously fitted components)
+      2. For each (frac_slow, jitter) candidate, solve for non-negative amplitude by
+         projection (dot-product least-squares) in a window [t_i, t_i + ISI - margin]
+      3. Pick the candidate minimising RMS in that window
+      4. Subtract the fitted component from the running accumulated signal
+
+    Returns the same tuple format as fit_amplitudes_with_template_variants so that the
+    existing two-pass smoothing logic (which smooths frac_slow / frac_superslow across
+    events and re-fits with fixed kinetics) applies unchanged.
+    """
+    n_events = len(stim_times)
+    jitter_s_arr = (
+        np.asarray(jitter_variant_ms, float) / 1000.0
+        if jitter_variant_ms is not None
+        else np.array([0.0])
+    )
+    pw_s = peak_window_s if peak_window_s is not None else 0.010
+    margin_s = 0.002  # 2 ms clearance before next stimulus
+
+    a_events = np.zeros(n_events)
+    d_events = np.zeros(n_events)
+    dominant_ratios: List[Any] = []
+    dominant_jitter_idx_list: List[int] = []
+    kernels_raw: List[np.ndarray] = []   # best kernel shape per event (unit: kernel units)
+    accumulated = np.zeros_like(y)
+
+    for i_event in range(n_events):
+        st = float(stim_times[i_event])
+        tau_d = float(tau_d_vec_s[i_event])
+        residual = y - accumulated
+
+        t_start = st + event_t0_s
+        if i_event < n_events - 1:
+            t_end = float(stim_times[i_event + 1]) - margin_s
+        else:
+            t_end = min(t[-1], t_start + last_event_post_s)
+        t_end = min(t_end, t[-1])
+        win_mask = (t >= t_start) & (t <= t_end)
+
+        if not np.any(win_mask):
+            kernels_raw.append(np.zeros_like(y))
+            dominant_ratios.append(variant_ratios[0])
+            dominant_jitter_idx_list.append(0)
+            continue
+
+        best_rms = float('inf')
+        best_amp = 0.0
+        best_k_raw = np.zeros_like(y)
+        best_jitter_s = 0.0
+        best_ratio = variant_ratios[0]
+        best_jitter_idx = 0
+
+        r_win = residual[win_mask]
+
+        for i_ratio, frac_slow in enumerate(variant_ratios):
+            for i_jitter, jitter_s in enumerate(jitter_s_arr):
+                anchor = st + event_t0_s + jitter_s
+                k = _build_variant_kernel(
+                    t - anchor, tau_r_s, tau_d, frac_slow,
+                    event_idx=i_event, n_events=n_events,
+                )
+                k_win = k[win_mask]
+                denom = np.dot(k_win, k_win)
+                if denom < 1e-12:
+                    continue
+                amp = max(0.0, float(np.dot(r_win, k_win) / denom))
+                rms = float(np.sqrt(np.mean((r_win - amp * k_win) ** 2)))
+                if rms < best_rms:
+                    best_rms = rms
+                    best_amp = amp
+                    best_k_raw = k
+                    best_jitter_s = jitter_s
+                    best_ratio = frac_slow
+                    best_jitter_idx = i_jitter
+
+        kernels_raw.append(best_k_raw)
+        a_events[i_event] = best_amp
+        d_events[i_event] = best_jitter_s
+        dominant_ratios.append(best_ratio)
+        dominant_jitter_idx_list.append(best_jitter_idx)
+        accumulated += best_amp * best_k_raw
+
+    # Forward-pass amplitudes are the correct solution: each event was fitted on
+    # the residual after subtracting all previous event tails, so overlap is already
+    # accounted for sequentially. A joint NNLS re-fit against the full signal would
+    # reintroduce the fast/superslow degeneracy we are trying to avoid.
+    components = [a_events[i] * kernels_raw[i] for i in range(n_events)]
+
+    yhat = sum(components) if components else np.zeros_like(y)
+
+    # Normalised design matrix (unit-peak per event) for downstream compatibility
+    X_used = np.column_stack([
+        k / max(float(np.max(np.abs(k))), 1e-12) for k in kernels_raw
+    ]) if n_events > 0 else np.zeros((t.size, 0))
+
+    dominant_jitter_ms = np.array(
+        [jitter_s_arr[j] for j in dominant_jitter_idx_list], dtype=float
+    ) * 1000.0
+
+    variant_info: Dict[str, Any] = {
+        'n_template_variants': len(variant_ratios),
+        'n_jitter_variants': len(jitter_s_arr),
+        'variant_ratios': variant_ratios,
+        'dominant_template_ratio': dominant_ratios,
+        'dominant_jitter_ms': dominant_jitter_ms,
+        'dominant_jitter_idx': dominant_jitter_idx_list,
+        'hard_select': True,   # sequential is implicitly hard-select per event
+        'sequential': True,
+        'final_tau_d': tau_d_vec_s.copy(),
+        'final_t0': event_t0_s,
+        'kinetics_adjusted': False,
     }
 
     return a_events, d_events, X_used, yhat, components, variant_info
@@ -2062,71 +2192,41 @@ def extract_metrics(
             the selected measurement model (NNLS or SavGol)
     """
     # Parse options (merge into a single config dict)
+    if options is not None and not isinstance(options, dict):
+        raise TypeError(f"options must be a dict or None, got {type(options).__name__}")
     opts = options.copy() if isinstance(options, dict) else {}
-    plot_opts = opts.get('plot', {}) if isinstance(opts.get('plot', {}), dict) else {}
-    want_plot = bool(plot_opts.get('enabled', False))
-    traces = list(plot_opts.get('traces', ['nnls']))
-    show_decay = bool(plot_opts.get('show_decay', True))
-    plot_trials = bool(plot_opts.get('trials', False))
-    baseline_figs = bool(plot_opts.get('baseline', False))
-    plot_residuals = bool(plot_opts.get('residuals', False))
-    plot_peaks_details = bool(plot_opts.get('plot_peaks_details', False))
-    plot_residual_buildup = bool(plot_opts.get('residual_buildup', False))
-    plot_nnls_residual = bool(plot_opts.get('nnls_residual', False))
-    plot_param_evolution = bool(plot_opts.get('param_evolution', False))
+    _plot_raw = opts.get('plot', {})
+    if _plot_raw and not isinstance(_plot_raw, dict):
+        raise TypeError(f"options['plot'] must be a dict, got {type(_plot_raw).__name__}")
+    plot_opts = _plot_raw if isinstance(_plot_raw, dict) else {}
+    _pbool = lambda key, default=False: bool(plot_opts.get(key, default))  # noqa: E731
+    want_plot         = _pbool('enabled', False)
+    traces            = list(plot_opts.get('traces', ['nnls']))
+    show_decay        = _pbool('show_decay', True)
+    plot_trials       = _pbool('trials')
+    baseline_figs     = _pbool('baseline')
+    plot_residuals    = _pbool('residuals')
+    plot_peaks_details    = _pbool('plot_peaks_details')
+    plot_residual_buildup = _pbool('residual_buildup')
+    plot_nnls_residual    = _pbool('nnls_residual')
+    plot_param_evolution  = _pbool('param_evolution')
     if baseline_figs:
         plot_trials = True  # baseline panel requires per-trial figures
     cfg = {**DEFAULTS, **{k: v for k, v in opts.items() if k != 'plot'}}
     if 'nnls_show_weights' in opts and 'fit_diagnostic_plot' not in opts:
-        try:
-            cfg['fit_diagnostic_plot'] = bool(opts.get('nnls_show_weights', False))
-        except Exception:
-            cfg['fit_diagnostic_plot'] = bool(cfg.get('fit_diagnostic_plot', False))
-    # Auto-build kinetics grids from bounds when grids are not explicitly provided
-    def _grid_from_bounds_ms(bound, n=10):
-        if not isinstance(bound, (tuple, list)) or len(bound) != 2:
-            return None
-        lo, hi = float(bound[0]), float(bound[1])
-        if not np.isfinite(lo) or not np.isfinite(hi):
-            return None
-        if abs(hi - lo) < 1e-12:
-            return [lo * 1000.0]
-        return list(np.linspace(lo, hi, int(n)) * 1000.0)
-
-    param_bounds = cfg.get('parameter_bounds', {}) or {}
-    decay_bound_key = None
-    for _k in ('tau_decay_fast', 'tau_decay', 'tau_decay_slow'):
-        if _k in param_bounds:
-            decay_bound_key = _k
-            break
-
-    if 'kin_taur_grid_ms' not in opts:
-        auto_grid = _grid_from_bounds_ms(param_bounds.get('tau_rise'))
-        if auto_grid is not None:
-            cfg['kin_taur_grid_ms'] = auto_grid
-    else:
-        bound = param_bounds.get('tau_rise')
-        auto_grid = _grid_from_bounds_ms(bound)
-        if auto_grid is not None:
-            lo_ms, hi_ms = min(auto_grid), max(auto_grid)
-            grid = [v for v in cfg.get('kin_taur_grid_ms', []) if lo_ms - 1e-9 <= float(v) <= hi_ms + 1e-9]
-            if not grid:
-                grid = auto_grid
-            cfg['kin_taur_grid_ms'] = grid
-
-    if 'kin_taud0_grid_ms' not in opts:
-        auto_grid = _grid_from_bounds_ms(param_bounds.get(decay_bound_key)) if decay_bound_key else None
-        if auto_grid is not None:
-            cfg['kin_taud0_grid_ms'] = auto_grid
-    else:
-        bound = param_bounds.get(decay_bound_key) if decay_bound_key else None
-        auto_grid = _grid_from_bounds_ms(bound) if bound is not None else None
-        if auto_grid is not None:
-            lo_ms, hi_ms = min(auto_grid), max(auto_grid)
-            grid = [v for v in cfg.get('kin_taud0_grid_ms', []) if lo_ms - 1e-9 <= float(v) <= hi_ms + 1e-9]
-            if not grid:
-                grid = auto_grid
-            cfg['kin_taud0_grid_ms'] = grid
+        cfg['fit_diagnostic_plot'] = bool(opts.get('nnls_show_weights', False))
+    # Detect legacy decay key names used before tau_decay_fast was standardised
+    param_bounds = cfg.get('parameter_bounds', {})
+    if param_bounds is None:
+        param_bounds = {}
+    elif not isinstance(param_bounds, dict):
+        raise TypeError(
+            f"parameter_bounds must be a dict or None, got {type(param_bounds).__name__}: {param_bounds!r}"
+        )
+    decay_bound_key = next(
+        (_k for _k in ('tau_decay_fast', 'tau_decay', 'tau_decay_slow') if _k in param_bounds),
+        None,
+    )
     interpolated_settings: List[Dict[str, Any]] = []
     global_fit_params: Dict[str, float] = {}
     recut_slow_replaced = False
@@ -2139,8 +2239,11 @@ def extract_metrics(
     # Optional auto-calibration of event model from multi-trial data (run after preprocessing)
     do_bleach = bool(cfg.get('bleach', True))
     use_dff = bool(cfg.get('normalize_dff', True))
-    sgW = int(cfg['sg_window']); sgP = int(cfg['sg_poly'])
-    win_ms = float(cfg['peak_window_ms']); n_avg = int(cfg['peak_avg_points']); pre_ms = float(cfg['pre_peak_ms'])
+    sgW = int(cfg['sg_window'])
+    sgP = int(cfg['sg_poly'])
+    win_ms = float(cfg['peak_window_ms'])
+    n_avg = int(cfg['peak_avg_points'])
+    pre_ms = float(cfg['pre_peak_ms'])
     null_N = float(cfg['null_N'])
     meas = str(cfg.get('measurement', 'NNLS')).strip().upper()
     failm = str((cfg.get('fail_method') or meas)).strip().upper()
@@ -2159,62 +2262,85 @@ def extract_metrics(
     # Drop empty trial columns (all NaN/non-finite in original input) so they
     # do not become artificial zero traces in downstream processing.
     valid_trial_cols = np.isfinite(Y).any(axis=0)
-    kept_trial_cols_0based = np.flatnonzero(valid_trial_cols).astype(int)
-    dropped_trial_cols_0based = np.flatnonzero(~valid_trial_cols).astype(int)
     if not np.all(valid_trial_cols):
         n_drop = int(np.size(valid_trial_cols) - np.sum(valid_trial_cols))
         progress_print(f"[preprocess] Dropping {n_drop} empty trial column(s) (all non-finite).")
         Y = Y[:, valid_trial_cols]
+        kept_trial_cols_0based = np.flatnonzero(valid_trial_cols).astype(int)
+        dropped_trial_cols_0based = np.flatnonzero(~valid_trial_cols).astype(int)
     else:
         kept_trial_cols_0based = np.arange(original_n_trials, dtype=int)
         dropped_trial_cols_0based = np.array([], dtype=int)
     if Y.shape[1] == 0:
         raise ValueError("No valid trial columns remain after dropping all-NaN columns.")
-    stim_times = float(train_start) + float(isi) * np.arange(int(n_pulses))
-
     # ---- ISI-aware guards and defaults ----
     isi = float(isi)
     isi_ms = isi * 1000.0
+    stim_times = float(train_start) + isi * np.arange(int(n_pulses))
 
-    # Auto-build grids from parameter bounds when not explicitly provided
-    param_bounds = cfg.get('parameter_bounds', {}) or {}
+    # Enforce kinetics grids are within parameter bounds; generate logspace default if absent or filtered empty
     def _get_bounds(name, fallback):
         bound = param_bounds.get(name)
-        if bound and isinstance(bound, (tuple, list)) and len(bound) == 2:
+        if bound is None:
+            return fallback
+        if not isinstance(bound, (tuple, list)) or len(bound) != 2:
+            raise TypeError(
+                f"parameter_bounds['{name}'] must be a 2-tuple (lo, hi), got {bound!r}"
+            )
+        try:
             lo, hi = float(bound[0]), float(bound[1])
-            if np.isfinite(lo) and np.isfinite(hi) and lo > 0 and hi > lo:
-                return lo, hi
-        return fallback
-
-    lo_rise_s, hi_rise_s = _get_bounds('tau_rise', DEFAULT_PARAM_BOUNDS['tau_rise'])
-    lo_fast_s, hi_fast_s = _get_bounds('tau_decay_fast', DEFAULT_PARAM_BOUNDS['tau_decay_fast'])
+        except (TypeError, ValueError) as e:
+            raise ValueError(
+                f"parameter_bounds['{name}'] = {bound!r}: cannot convert to float: {e}"
+            ) from e
+        if not (np.isfinite(lo) and np.isfinite(hi)):
+            raise ValueError(
+                f"parameter_bounds['{name}'] = ({lo}, {hi}): bounds must be finite"
+            )
+        if lo <= 0 or hi <= 0:
+            raise ValueError(
+                f"parameter_bounds['{name}'] = ({lo}, {hi}): bounds must be > 0"
+            )
+        if lo >= hi:
+            raise ValueError(
+                f"parameter_bounds['{name}'] = ({lo}, {hi}): lower bound must be < upper bound"
+            )
+        return lo, hi
 
     def _filter_grid_ms(grid, lo_s, hi_s):
-        lo_ms = lo_s * 1000.0
-        hi_ms = hi_s * 1000.0
-        vals = []
+        lo_ms, hi_ms = lo_s * 1000.0, hi_s * 1000.0
+        result = []
         for v in grid:
             try:
                 fv = float(v)
-            except Exception:
+            except (TypeError, ValueError):
                 continue
             if np.isfinite(fv) and lo_ms <= fv <= hi_ms:
-                vals.append(fv)
-        return vals
+                result.append(fv)
+        return result
 
-    if ('kin_taur_grid_ms' not in cfg) or (cfg.get('kin_taur_grid_ms') is None):
-        cfg['kin_taur_grid_ms'] = (np.logspace(np.log10(lo_rise_s), np.log10(hi_rise_s), 11) * 1000.0).tolist()
-    else:
-        cfg['kin_taur_grid_ms'] = _filter_grid_ms(cfg.get('kin_taur_grid_ms', []), lo_rise_s, hi_rise_s)
-        if not cfg['kin_taur_grid_ms']:
-            cfg['kin_taur_grid_ms'] = (np.logspace(np.log10(lo_rise_s), np.log10(hi_rise_s), 11) * 1000.0).tolist()
+    def _resolve_grid(cfg_key, lo_s, hi_s):
+        """Filter existing grid to [lo_s, hi_s]; auto-generate logspace only when using the built-in default."""
+        existing = cfg.get(cfg_key)
+        if existing:
+            filtered = _filter_grid_ms(existing, lo_s, hi_s)
+            if filtered:
+                return filtered
+            if cfg_key in opts:
+                raise ValueError(
+                    f"{cfg_key}: all user-provided values are outside "
+                    f"[{lo_s * 1000:.3f}, {hi_s * 1000:.3f}] ms. "
+                    f"Provided: {list(existing)}. Remove the key to auto-generate."
+                )
+        return (np.logspace(np.log10(lo_s), np.log10(hi_s), 11) * 1000.0).tolist()
 
-    if ('kin_taud0_grid_ms' not in cfg) or (cfg.get('kin_taud0_grid_ms') is None):
-        cfg['kin_taud0_grid_ms'] = (np.logspace(np.log10(lo_fast_s), np.log10(hi_fast_s), 11) * 1000.0).tolist()
-    else:
-        cfg['kin_taud0_grid_ms'] = _filter_grid_ms(cfg.get('kin_taud0_grid_ms', []), lo_fast_s, hi_fast_s)
-        if not cfg['kin_taud0_grid_ms']:
-            cfg['kin_taud0_grid_ms'] = (np.logspace(np.log10(lo_fast_s), np.log10(hi_fast_s), 11) * 1000.0).tolist()
+    lo_rise_s, hi_rise_s = _get_bounds('tau_rise', DEFAULT_PARAM_BOUNDS['tau_rise'])
+    # Prefer tau_decay_fast; fall back to legacy key (tau_decay / tau_decay_slow) if only that is present
+    effective_decay_key = 'tau_decay_fast' if ('tau_decay_fast' in param_bounds or not decay_bound_key) else decay_bound_key
+    lo_decay_s, hi_decay_s = _get_bounds(effective_decay_key, DEFAULT_PARAM_BOUNDS['tau_decay_fast'])
+
+    cfg['kin_taur_grid_ms'] = _resolve_grid('kin_taur_grid_ms', lo_rise_s, hi_rise_s)
+    cfg['kin_taud0_grid_ms'] = _resolve_grid('kin_taud0_grid_ms', lo_decay_s, hi_decay_s)
 
     # Peak window: auto if not user-overridden or too wide for ISI
     if ('peak_window_ms' not in cfg) or (float(cfg['peak_window_ms']) >= isi_ms):
@@ -2237,11 +2363,12 @@ def extract_metrics(
 
     # Preprocess trials: interpolate NaNs, optional bleach, then ΔF/F0 baseline
     baseline_mask = (t < float(train_start))
-    # Fallback: if too few baseline points, use earliest 10% of the trace
     if baseline_mask.sum() < 5:
-        n10 = max(1, int(0.1 * len(t)))
-        baseline_mask = np.zeros_like(t, dtype=bool)
-        baseline_mask[:n10] = True
+        raise ValueError(
+            f"Fewer than 5 baseline samples before train_start={float(train_start):.6f} s "
+            f"(found {baseline_mask.sum()}). Time range: {t[0]:.6f}–{t[-1]:.6f} s. "
+            f"Check that train_start and time are in the same units."
+        )
     Yc = np.zeros_like(Y)
     for j in range(Y.shape[1]):
         yj = fill_nans_timewise(Y[:, j], t)
@@ -2252,20 +2379,27 @@ def extract_metrics(
                 huber_delta=cfg['bleach_huber_delta'], tau_range_factor=cfg['bleach_tau_range_factor'], n_tau=cfg['bleach_n_tau']
             )
         Yc[:, j] = yj
-    # F0 per trial over full pre‑train baseline
+    # F0 per trial over full pre-train baseline
     F0 = np.zeros(Yc.shape[1])
     for j in range(Yc.shape[1]):
         b = Yc[baseline_mask, j]
         b = b[np.isfinite(b)]
-        F0[j] = np.nanmedian(b) if b.size else 0.0
+        if not b.size:
+            raise ValueError(
+                f"Trial column {kept_trial_cols_0based[j]}: no finite values in baseline window. "
+                f"Check signal quality around train_start={float(train_start):.6f} s."
+            )
+        F0[j] = np.nanmedian(b)
     if use_dff:
         safe_F0 = np.where(np.abs(F0) < cfg['f0_eps'], np.nan, F0)
-        Yd_norm = (Yc - F0) / safe_F0
-        # If a trial has invalid F0 (nan/zero) and becomes all-NaN, fall back to subtract-only for that trial
-        bad_cols = ~np.isfinite(Yd_norm).any(axis=0)
-        Yd = Yd_norm.copy()
+        Yd = (Yc - F0) / safe_F0
+        bad_cols = ~np.isfinite(Yd).any(axis=0)
         if np.any(bad_cols):
-            Yd[:, bad_cols] = (Yc[:, bad_cols] - F0[bad_cols])
+            raise ValueError(
+                f"ΔF/F₀ failed for {bad_cols.sum()} trial(s) "
+                f"(columns {kept_trial_cols_0based[bad_cols].tolist()}): F₀ is zero or near-zero. "
+                f"Set normalize_dff=False or check baseline quality."
+            )
     else:
         Yd = Yc - F0
 
@@ -2626,10 +2760,8 @@ def extract_metrics(
                         tau_slow_s = tau_fast_s * ratio_slow
                         if tau_slow_override is not None and np.isfinite(tau_slow_override) and tau_slow_override > 0:
                             tau_slow_s = float(tau_slow_override)
-                        if tau_slow_s <= tau_fast_s:
-                            tau_slow_s = tau_fast_s * 1.1
-                        if tau_slow_s > tau_superslow_s:
-                            tau_slow_s = tau_superslow_s * 0.6
+                        if tau_slow_s <= tau_fast_s or tau_slow_s >= tau_superslow_s:
+                            return np.zeros_like(dt)  # hierarchy violated — zero kernel, NNLS assigns zero amplitude
                         params = [
                             1.0,  # amp
                             tau_r,  # tau_rise from global fit
@@ -3633,10 +3765,8 @@ def extract_metrics(
                             tau_slow_s = float(tau_slow_base)
                             if tau_slow_override is not None and np.isfinite(tau_slow_override) and tau_slow_override > 0:
                                 tau_slow_s = float(tau_slow_override)
-                            if tau_slow_s <= tau_fast_s:
-                                tau_slow_s = tau_fast_s * 1.1
-                            if tau_slow_s > tau_superslow_s:
-                                tau_slow_s = tau_superslow_s * 0.6
+                            if tau_slow_s <= tau_fast_s or tau_slow_s >= tau_superslow_s:
+                                return np.zeros_like(dt)  # hierarchy violated — zero kernel, NNLS assigns zero amplitude
                             params = [
                                 1.0,  # amp (will be normalized)
                                 tau_r,  # tau_rise from global fit
@@ -4551,26 +4681,39 @@ def extract_metrics(
 
         # NNLS configuration logging disabled for cleaner output
 
-        # Choose variant selection strategy (soft mix vs hard per-event selection)
-        variant_select = str(cfg.get('template_variant_select', 'soft')).strip().lower()
-        if variant_select in ('hard', 'dominant', 'winner'):
-            hard_select = True
-        else:
-            hard_select = False
+        # Choose fitting mode: sequential greedy pass or standard simultaneous NNLS
+        fit_mode = str(cfg.get('nnls_fit_mode', 'simultaneous')).strip().lower()
+        use_sequential_fit = fit_mode == 'sequential'
 
-        a_avg, d_avg, X_avg, yhat_avg, comp_avg, variant_info_avg = fit_amplitudes_with_template_variants(
-            y_avg, t, stim_times, tau_r, tau_d_vec,
-            variant_ratios=variant_ratios,
-            weight_mode=weight_mode,
-            weight_tau_s=weight_tau_s,
-            isi=isi,
-            event_t0_s=event_t0_s,
-            jitter_variant_ms=jitter_variant_ms,
-            peak_window_s=peak_window_s,
-            peak_weight=peak_weight,
-            last_event_tail_tau_s=cfg.get('nnls_last_event_tail_tau_s'),
-            hard_select=hard_select,
-        )
+        if use_sequential_fit:
+            progress_print("[NNLS] Using sequential greedy fitting mode")
+            a_avg, d_avg, X_avg, yhat_avg, comp_avg, variant_info_avg = fit_amplitudes_sequential(
+                y_avg, t, stim_times, tau_r, tau_d_vec,
+                variant_ratios=variant_ratios,
+                isi=isi,
+                event_t0_s=event_t0_s,
+                jitter_variant_ms=jitter_variant_ms,
+                peak_window_s=peak_window_s,
+                last_event_post_s=float(cfg.get('post_zoom_s', 0.200)),
+            )
+        else:
+            # Choose variant selection strategy (soft mix vs hard per-event selection)
+            variant_select = str(cfg.get('template_variant_select', 'soft')).strip().lower()
+            hard_select = variant_select in ('hard', 'dominant', 'winner')
+
+            a_avg, d_avg, X_avg, yhat_avg, comp_avg, variant_info_avg = fit_amplitudes_with_template_variants(
+                y_avg, t, stim_times, tau_r, tau_d_vec,
+                variant_ratios=variant_ratios,
+                weight_mode=weight_mode,
+                weight_tau_s=weight_tau_s,
+                isi=isi,
+                event_t0_s=event_t0_s,
+                jitter_variant_ms=jitter_variant_ms,
+                peak_window_s=peak_window_s,
+                peak_weight=peak_weight,
+                last_event_tail_tau_s=cfg.get('nnls_last_event_tail_tau_s'),
+                hard_select=hard_select,
+            )
         # Log selected variant summary for tri-exp (shows if bi-exp or tri-exp was preferred)
         if variant_info_avg and event_model == 'iglusnfr_tri':
             dom_ratios = variant_info_avg.get('dominant_template_ratio', [])
@@ -4604,9 +4747,13 @@ def extract_metrics(
     # If decay_progression_mode is not 'none' and template variants were used,
     # do a second pass with smoothed RATIO values (only amplitude + jitter vary)
     # The goal: smooth the slow/fast RATIO evolution across the train, not tau_d itself
+    _is_sequential = (
+        variant_info_avg is not None
+        and variant_info_avg.get('sequential', False)
+    )
     two_pass_enabled = (
         dec_mode not in ('none', 'fixed')
-        and cfg.get('use_template_variants', False)
+        and (cfg.get('use_template_variants', False) or _is_sequential)
         and variant_info_avg is not None
     )
     
@@ -5241,24 +5388,24 @@ def extract_metrics(
             if _LAST_EVENT_DECAY_FIT is not None:
                 le_fit = _LAST_EVENT_DECAY_FIT
                 tau_slow = le_fit.get('tau_slow', np.nan)
-                
-                if np.isfinite(tau_slow) and tau_slow > 0:
-                    # Anchor at the last stimulus time
-                    last_st = float(stim_times[-1])
-                    # Find the peak value near the last stimulus
-                    peak_mask = (t >= last_st) & (t <= last_st + 0.015)
-                    if np.any(peak_mask):
-                        y_at_peak = float(np.max(y_avg[peak_mask]))
-                        t_at_peak = float(t[peak_mask][np.argmax(y_avg[peak_mask])])
-                    else:
-                        y_at_peak = float(np.interp(last_st, t, y_avg))
-                        t_at_peak = last_st
-                    
-                    # Draw decay from peak to end of plot
-                    t_end = min(z1, t_at_peak + 0.300)  # Show 300ms of decay
-                    t_fit = np.linspace(t_at_peak, t_end, 100)
-                    y_fit = y_at_peak * np.exp(-(t_fit - t_at_peak) / tau_slow)
-                    
+
+                if np.isfinite(tau_slow) and 0 < tau_slow < 0.350:
+                    t_decay_start = float(le_fit.get('t_start', float(stim_times[-1]) + 0.005))
+                    baseline_fit = float(le_fit.get('baseline', 0.0))
+
+                    # Always anchor amplitude to the NNLS model at t_decay_start —
+                    # the stored log-fit a_slow can be wrong when baseline is mis-estimated.
+                    ref = yhat_avg if yhat_avg is not None else y_avg
+                    a_slow = float(np.interp(t_decay_start, t, ref)) - baseline_fit
+
+                    # Only draw if the model predicts a real positive signal at that point
+                    if not (np.isfinite(a_slow) and a_slow > 0):
+                        raise ValueError("no positive signal at decay start")
+
+                    t_end = min(z1, t_decay_start + max(5.0 * tau_slow, 0.200))
+                    t_fit = np.linspace(t_decay_start, t_end, 200)
+                    y_fit = baseline_fit + a_slow * np.exp(-(t_fit - t_decay_start) / tau_slow)
+
                     ax.plot(
                         t_fit,
                         y_fit,
