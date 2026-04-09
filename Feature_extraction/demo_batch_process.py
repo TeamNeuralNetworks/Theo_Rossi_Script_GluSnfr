@@ -35,6 +35,7 @@ OVERRIDE_N_PULSES = None  # e.g., 10
 # --- Plot output ---
 SAVE_PLOTS = True
 SHOW_PLOTS = False
+PPR_NOISE_PROTECTION = True
 
 # --- Parallel batch processing ---
 PARALLEL_FILES = True
@@ -189,7 +190,7 @@ def _build_options_presets(peak_window_ms, pre_zoom_s, post_zoom_s):
             'force_tau_slow_override': False,                                # If True, force tau_slow = tau_superslow in tri-exp models ; unlike allow_tau_slow_override, this enforces the equality rather than just allowing it
             
             # --- Jitter Variants ---
-            'jitter_variant_ms': np.linspace(-1.0, 1.0, 5),                # Jitter variants to try (ms) ; set to None to disable jitter variants ; jitter means we shift event times by +/- jitter to test robustness
+            'jitter_variant_ms': np.arange(-2.0, 2.01, 0.5),                # Jitter variants to try (ms) ; set to None to disable jitter variants ; jitter means we shift event times by +/- jitter to test robustness
         },
     }
 
@@ -230,6 +231,65 @@ def _ensure_columns(df, ordered_cols):
             df[col] = np.nan
     rest = [c for c in df.columns if c not in ordered_cols]
     return df[ordered_cols + rest]
+
+
+def _measurement_series_keys(measurement: str) -> dict:
+    """Return result keys for the selected measurement series."""
+    meas = str(measurement).strip().upper()
+    if meas == 'SAVGOL':
+        return {
+            'label': 'SAVGOL',
+            'avg_uncorr': 'amp_savgol',
+            'avg_corr': 'amp_savgol_corr',
+            'trial_uncorr': 'amp_savgol_unfloored',
+            'trial_corr': 'amp_savgol_corr_unfloored',
+        }
+    if meas == 'RAW':
+        return {
+            'label': 'RAW',
+            'avg_uncorr': 'amp_raw',
+            'avg_corr': 'amp_raw_corr',
+            'trial_uncorr': 'amp_raw_unfloored',
+            'trial_corr': 'amp_raw_corr_unfloored',
+        }
+    return {
+        'label': 'NNLS',
+        'avg_uncorr': 'amp_nnls',
+        'avg_corr': 'amp_nnls_corr',
+        'trial_uncorr': 'amp_nnls_unfloored',
+        'trial_corr': 'amp_nnls_corr_unfloored',
+    }
+
+
+def _compute_ppr_from_amplitudes(amps) -> np.ndarray:
+    """Return AMPn / AMP1 using the provided amplitude vector."""
+    arr = np.asarray(amps, float)
+    if arr.size == 0:
+        return arr
+    a1 = float(arr[0])
+    return (arr / a1) if np.isfinite(a1) and abs(a1) > 1e-12 else arr * np.nan
+
+
+def _protected_ppr(amps, thr, enabled: bool) -> np.ndarray:
+    """Recompute PPR from corrected amplitudes, optionally clamped to noise."""
+    arr = np.asarray(amps, float).copy()
+    if enabled and np.isfinite(thr):
+        arr[np.isfinite(arr)] = np.maximum(arr[np.isfinite(arr)], float(thr))
+    return _compute_ppr_from_amplitudes(arr)
+
+
+def _threshold_value(corr_arr, uncorr_arr, idx: int) -> float:
+    """Return the conservative amplitude used for failure calls."""
+    vals = []
+    if idx < len(corr_arr):
+        v = float(corr_arr[idx])
+        if np.isfinite(v):
+            vals.append(v)
+    if idx < len(uncorr_arr):
+        v = float(uncorr_arr[idx])
+        if np.isfinite(v):
+            vals.append(v)
+    return float(min(vals)) if vals else np.nan
 
 
 def _accumulate_result(result, failures, summary_rows, per_trial_rows,
@@ -338,22 +398,38 @@ def _process_one_file(task: tuple[str, str], *, show_plots: bool) -> dict:
     # =============================================================================
 
     # --- Extract amplitudes and PPR ---
-    amp_avg = res['average'].get('amp_nnls_corr', res['average']['amp_nnls'])
-    ppr_avg = res['average'].get('ppr_nnls_corr')
-    if ppr_avg is None:
-        a1 = float(amp_avg[0]) if len(amp_avg) else np.nan
-        ppr_avg = (amp_avg / a1) if np.isfinite(a1) and abs(a1) > 1e-12 else amp_avg * np.nan
+    meas_keys = _measurement_series_keys(options.get('measurement', 'NNLS'))
+    amp_avg_uncorr = np.asarray(
+        res['average'].get(meas_keys['avg_uncorr'], res['average'].get('amp_nnls')),
+        float,
+    )
+    amp_avg = np.asarray(
+        res['average'].get(meas_keys['avg_corr'], amp_avg_uncorr),
+        float,
+    )
+    thr_arr = np.asarray(res.get('threshold_amp1', []), float)
+    thr_arr = thr_arr[np.isfinite(thr_arr)]
+    thr_median = float(np.nanmedian(thr_arr)) if thr_arr.size else np.nan
+    ppr_avg = _protected_ppr(amp_avg, thr_median, PPR_NOISE_PROTECTION)
 
     print("\n--- Results ---")
-    print("Amplitudes (NNLS):", amp_avg)
-    print("PPR (NNLS):", ppr_avg)
+    print(f"Amplitudes ({meas_keys['label']} uncorrected):", amp_avg_uncorr)
+    print(f"Amplitudes ({meas_keys['label']} corrected):", amp_avg)
+    print(f"PPR ({meas_keys['label']} corrected):", ppr_avg)
     print("A1 thresholds:", res['threshold_amp1'])
     print("A1 p-values:", res['pval_amp1'])
 
     # --- Build summary row ---
-    row = {'measurement': 'NNLS', 'ID': base, 'condition': condition}
+    row = {
+        'measurement': meas_keys['label'],
+        'ID': base,
+        'condition': condition,
+        'NOISE_THR_MEDIAN': thr_median,
+    }
     for i, v in enumerate(amp_avg, 1):
         row[f'AMP{i}'] = float(v)
+    for i, v in enumerate(amp_avg_uncorr, 1):
+        row[f'AMP{i}_UNCORR'] = float(v)
     for i in range(2, len(ppr_avg) + 1):
         row[f'PPR{i}/1'] = float(ppr_avg[i - 1])
 
@@ -362,11 +438,8 @@ def _process_one_file(task: tuple[str, str], *, show_plots: bool) -> dict:
     per_trial_null_rows = []
     fail_counts = {i: [0, 0] for i in range(1, 4)}
     for idx_trial, rtrial in enumerate(res.get('per_trial', [])):
-        amp_trial = np.asarray(rtrial.get('amp_nnls_corr', rtrial.get('amp_nnls')), float)
-        amp_trial_unfloored = np.asarray(
-            rtrial.get('amp_nnls_corr_unfloored', rtrial.get('amp_nnls_corr', rtrial.get('amp_nnls'))),
-            float
-        )
+        amp_trial = np.asarray(rtrial.get(meas_keys['trial_corr'], rtrial.get(meas_keys['avg_corr'])), float)
+        amp_trial_uncorr = np.asarray(rtrial.get(meas_keys['trial_uncorr'], rtrial.get(meas_keys['avg_uncorr'])), float)
         thr = float(rtrial.get('thr_shared', np.nan))
         noise_level = float(rtrial.get('noise_level', np.nan))
         baseline_null_mean_including_zero = float(rtrial.get('baseline_null_mean_including_zero', np.nan))
@@ -375,7 +448,7 @@ def _process_one_file(task: tuple[str, str], *, show_plots: bool) -> dict:
         baseline_null_median_excluding_zero = float(rtrial.get('baseline_null_median_excluding_zero', np.nan))
         null_amps_nnls = np.asarray(rtrial.get('null_amps_nnls', []), float)
         null_amps_nnls = null_amps_nnls[np.isfinite(null_amps_nnls)]
-        a1 = amp_trial[0] if amp_trial.size else np.nan
+        a1 = _threshold_value(amp_trial, amp_trial_uncorr, 0)
         status = 'NA'
         if np.isfinite(a1) and np.isfinite(thr):
             status = 'success' if a1 > thr else 'failure'
@@ -396,8 +469,8 @@ def _process_one_file(task: tuple[str, str], *, show_plots: bool) -> dict:
         for p in range(1, int(n_pulses) + 1):
             vc = float(amp_trial[p - 1]) if p <= amp_trial.size and np.isfinite(amp_trial[p - 1]) else np.nan
             vu = (
-                float(amp_trial_unfloored[p - 1])
-                if p <= amp_trial_unfloored.size and np.isfinite(amp_trial_unfloored[p - 1])
+                float(amp_trial_uncorr[p - 1])
+                if p <= amp_trial_uncorr.size and np.isfinite(amp_trial_uncorr[p - 1])
                 else np.nan
             )
             trial_row[f'AMP{p}_CORR'] = vc
@@ -416,7 +489,7 @@ def _process_one_file(task: tuple[str, str], *, show_plots: bool) -> dict:
         })
 
         for p in range(1, min(3, amp_trial.size) + 1):
-            val = amp_trial[p - 1]
+            val = _threshold_value(amp_trial, amp_trial_uncorr, p - 1)
             if np.isfinite(val) and np.isfinite(thr):
                 fail_counts[p][1] += 1
                 if val <= thr:
@@ -542,8 +615,10 @@ def run_batch():
     if summary_rows:
         df_rows = pd.DataFrame(summary_rows)
         ordered = [f'AMP{i}' for i in range(1, max_pulses_seen + 1)] \
+            + [f'AMP{i}_UNCORR' for i in range(1, max_pulses_seen + 1)] \
             + [f'PPR{i}/1' for i in range(2, max_pulses_seen + 1)] \
-            + [f'%Fail{i}' for i in range(1, 4)]
+            + [f'%Fail{i}' for i in range(1, 4)] \
+            + ['NOISE_THR_MEDIAN']
         df_rows = _ensure_columns(df_rows, ['condition', 'ID', *ordered, 'measurement'])
 
         csv_out = os.path.join(OUT_DIR, "summary.csv")

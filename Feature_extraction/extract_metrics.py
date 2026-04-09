@@ -416,6 +416,11 @@ def estimate_tau_superslow_from_last_event_decay(
         decay_end = float(t[-1])
         if baseline is None:
             baseline = float(np.nanmedian(y[max(0, peak_idx - 10):peak_idx + 1]))
+        # Cap decay window to avoid fitting the accumulated slow baseline
+        # which inflates the tau estimate.  Use a short window so the fit
+        # stays dominated by the intermediate/slow component, not by the
+        # very-slow accumulated tail from all preceding events.
+        decay_end = min(decay_end, decay_start + 0.050)
         try:
             if np.isfinite(baseline):
                 amp = peak_y - baseline
@@ -1045,6 +1050,10 @@ def fit_amplitudes_with_template_variants(
         jitter_variant_s = np.array([0.0])
     else:
         jitter_variant_s = np.asarray(jitter_variant_ms, float) / 1000.0
+    # Clamp jitter so anchor never falls before the stimulus (t0+jitter >= 0)
+    # or beyond the next stimulus (t0+jitter < ISI).
+    jitter_variant_s = np.clip(jitter_variant_s, -event_t0_s, isi - event_t0_s - 0.001)
+    jitter_variant_s = np.unique(jitter_variant_s)  # drop duplicates from clipping
     n_jitter_variants = len(jitter_variant_s)
 
     event_t0_s = float(event_t0_s)
@@ -1344,6 +1353,7 @@ def fit_amplitudes_sequential(
     jitter_variant_ms: Optional[np.ndarray] = None,
     peak_window_s: Optional[float] = None,
     last_event_post_s: float = 0.200,
+    last_event_tail_tau_s: Optional[float] = None,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, List[np.ndarray], Dict]:
     """Greedy sequential NNLS: fit each event on the residual after subtracting previous event tails.
 
@@ -1367,6 +1377,10 @@ def fit_amplitudes_sequential(
         if jitter_variant_ms is not None
         else np.array([0.0])
     )
+    # Clamp jitter so anchor never falls before the stimulus (t0+jitter >= 0)
+    # or beyond the next stimulus (t0+jitter < ISI).
+    jitter_s_arr = np.clip(jitter_s_arr, -event_t0_s, isi - event_t0_s - 0.001)
+    jitter_s_arr = np.unique(jitter_s_arr)  # drop duplicates from clipping
     pw_s = peak_window_s if peak_window_s is not None else 0.010
     margin_s = 0.002  # 2 ms clearance before next stimulus
 
@@ -1405,6 +1419,23 @@ def fit_amplitudes_sequential(
 
         r_win = residual[win_mask]
 
+        # For the last event, apply exponential tail weighting so the peak
+        # dominates the fit and the long post-train tail doesn't cause overshoot.
+        w_win = np.ones_like(r_win)
+        is_last = (i_event == n_events - 1)
+        _tail_tau = last_event_tail_tau_s
+        if is_last and _tail_tau is not None:
+            if isinstance(_tail_tau, str):
+                _tail_tau = isi  # 'auto' or 'best' fallback
+            _tail_tau = float(_tail_tau)
+            if np.isfinite(_tail_tau) and _tail_tau > 0:
+                t_win = t[win_mask]
+                tail_onset = t_start + pw_s  # full weight during peak window
+                t_rel = t_win - tail_onset
+                decay = np.where(t_rel > 0, np.exp(-t_rel / _tail_tau), 1.0)
+                decay = np.maximum(decay, 0.01)
+                w_win = decay
+
         for i_ratio, frac_slow in enumerate(variant_ratios):
             for i_jitter, jitter_s in enumerate(jitter_s_arr):
                 anchor = st + event_t0_s + jitter_s
@@ -1413,11 +1444,13 @@ def fit_amplitudes_sequential(
                     event_idx=i_event, n_events=n_events,
                 )
                 k_win = k[win_mask]
-                denom = np.dot(k_win, k_win)
+                wk = w_win * k_win
+                wr = w_win * r_win
+                denom = np.dot(wk, wk)
                 if denom < 1e-12:
                     continue
-                amp = max(0.0, float(np.dot(r_win, k_win) / denom))
-                rms = float(np.sqrt(np.mean((r_win - amp * k_win) ** 2)))
+                amp = max(0.0, float(np.dot(wr, wk) / denom))
+                rms = float(np.sqrt(np.mean((wr - amp * wk) ** 2)))
                 if rms < best_rms:
                     best_rms = rms
                     best_amp = amp
@@ -2739,10 +2772,10 @@ def extract_metrics(
                         if frac_superslow_max is None or not np.isfinite(frac_superslow_max):
                             frac_superslow_max = default_superslow
 
-                        ramp = 0.0
-                        if event_idx is not None and n_events is not None and n_events > 1:
-                            ramp = float(event_idx) / float(n_events - 1)
-                        frac_superslow = max(0.0, min(1.0, frac_superslow_max)) * ramp
+                        # Use the requested superslow fraction directly (no ramp).
+                        # The variant grid already includes ss_frac=0 entries so the
+                        # NNLS / sequential fit can select no superslow where appropriate.
+                        frac_superslow = max(0.0, min(1.0, frac_superslow_max))
                         frac_slow_use = max(0.0, min(1.0, frac_slow_val))
                         if frac_slow_use + frac_superslow > 1.0:
                             frac_slow_use = max(0.0, 1.0 - frac_superslow)
@@ -3747,10 +3780,10 @@ def extract_metrics(
                             if frac_superslow_max is None or not np.isfinite(frac_superslow_max):
                                 frac_superslow_max = default_superslow
 
-                            ramp = 0.0
-                            if event_idx is not None and n_events is not None and n_events > 1:
-                                ramp = float(event_idx) / float(n_events - 1)
-                            frac_superslow = max(0.0, min(1.0, frac_superslow_max)) * ramp
+                            # Use the requested superslow fraction directly (no ramp).
+                            # Spillover-driven superslow progression is handled by the
+                            # variant grid (ss_frac=0 available) + two-pass smoothing.
+                            frac_superslow = max(0.0, min(1.0, frac_superslow_max))
                             frac_slow_use = max(0.0, min(1.0, frac_slow_val))
                             if frac_slow_use + frac_superslow > 1.0:
                                 frac_slow_use = max(0.0, 1.0 - frac_superslow)
@@ -4695,6 +4728,7 @@ def extract_metrics(
                 jitter_variant_ms=jitter_variant_ms,
                 peak_window_s=peak_window_s,
                 last_event_post_s=float(cfg.get('post_zoom_s', 0.200)),
+                last_event_tail_tau_s=cfg.get('nnls_last_event_tail_tau_s'),
             )
         else:
             # Choose variant selection strategy (soft mix vs hard per-event selection)
@@ -4947,21 +4981,26 @@ def extract_metrics(
             
             # Compare RMS error between passes
             zmask_cmp = (t >= float(train_start) - cfg['pre_zoom_s']) & (t < float(train_start) + float(isi) * int(n_pulses) + cfg['post_zoom_s'])
+            _accept_pass2 = True
             if np.any(zmask_cmp):
                 rms_pass1 = np.sqrt(np.nanmean((y_avg[zmask_cmp] - yhat_avg[zmask_cmp])**2))
                 rms_pass2 = np.sqrt(np.nanmean((y_avg[zmask_cmp] - yhat_avg_p2[zmask_cmp])**2))
                 improvement = (rms_pass1 - rms_pass2) / rms_pass1 * 100 if rms_pass1 > 0 else 0
                 # Log two-pass summary
                 progress_print(f"[TWO-PASS] Slow-fraction smoothed ({dec_mode}): RMS change={improvement:+.1f}%")
+                if improvement < 0:
+                    _accept_pass2 = False
+                    progress_print(f"[TWO-PASS] Pass 2 worsened fit — keeping pass 1 result")
             
-            # Use pass 2 results (overwrite pass 1)
-            a_avg, d_avg, X_avg, yhat_avg, comp_avg = a_avg_p2, d_avg_p2, X_avg_p2, yhat_avg_p2, comp_avg_p2
-            
-            # Update variant_info
-            variant_info_avg = variant_info_p2
-            variant_info_avg['two_pass'] = True
-            variant_info_avg['raw_slow_fraction'] = np.asarray(dominant_ratios_pass1, float) if is_scalar_ratios else dominant_ratios_pass1
-            variant_info_avg['smoothed_slow_fraction'] = smoothed_ratios
+            if _accept_pass2:
+                # Use pass 2 results (overwrite pass 1)
+                a_avg, d_avg, X_avg, yhat_avg, comp_avg = a_avg_p2, d_avg_p2, X_avg_p2, yhat_avg_p2, comp_avg_p2
+                
+                # Update variant_info
+                variant_info_avg = variant_info_p2
+                variant_info_avg['two_pass'] = True
+                variant_info_avg['raw_slow_fraction'] = np.asarray(dominant_ratios_pass1, float) if is_scalar_ratios else dominant_ratios_pass1
+                variant_info_avg['smoothed_slow_fraction'] = smoothed_ratios
             
         except Exception as e:
             progress_print(f"[TWO-PASS] Failed: {e}")
@@ -5345,23 +5384,10 @@ def extract_metrics(
             peak_vals: list = []
             resid_vals: list = []
             for p, st in enumerate(stim_times):
-                series_for_peak = y_for_peaks
-                if meas == 'NNLS' and baseline_prev_only:
-                    try:
-                        series_for_peak = y_for_peaks - baseline_prev_only[p]
-                    except Exception:
-                        series_for_peak = y_for_peaks
-                tp, _ = pick_peak_on_series(t, series_for_peak, float(st), win_ms, pre_ms)
+                # Find peak directly on the NNLS model so the red dot sits on the blue line
+                tp, vp = pick_peak_on_series(t, y_for_peaks, float(st), win_ms, pre_ms)
                 peak_ts.append(float(tp))
-                # Use the stored corrected amplitude (same value used for measurement)
-                if p < len(amp_corr_for_avg_dots):
-                    peak_vals.append(float(amp_corr_for_avg_dots[p]))
-                else:
-                    try:
-                        i0 = int(np.argmin(np.abs(t - tp)))
-                        peak_vals.append(float(y_for_peaks[i0]))
-                    except Exception:
-                        peak_vals.append(np.nan)
+                peak_vals.append(float(vp))
                 # Residual-under-peak = baseline from prior pulses at that time
                 try:
                     i0 = int(np.argmin(np.abs(t - tp)))
@@ -5981,14 +6007,16 @@ def extract_metrics(
                 mad0 = float(np.nanmedian(np.abs(null_arr - med0)))
                 noise_level = float(1.4826 * mad0)
 
-        # Floor amplitudes to noise threshold before PPR calculation (prevents div by near-zero)
+        # Floor corrected amplitudes only when the absolute (uncorrected) amplitude
+        # is below the noise threshold.  Uncorrected amplitudes stay raw so the
+        # user can detect floored events later by comparing to thr_shared.
         if cfg.get('amplitude_floor_to_noise', False):
-            amp_raw = np.maximum(amp_raw, thr1)
-            amp_raw_corr = np.maximum(amp_raw_corr, thr1)
-            amp_sg = np.maximum(amp_sg, thr1)
-            amp_sg_corr = np.maximum(amp_sg_corr, thr1)
-            amp_nn = np.maximum(amp_nn, thr1)
-            amp_nn_corr = np.maximum(amp_nn_corr, thr1)
+            raw_below = amp_raw < thr1
+            sg_below  = amp_sg  < thr1
+            nn_below  = amp_nn  < thr1
+            amp_raw_corr[raw_below] = np.maximum(amp_raw_corr[raw_below], thr1)
+            amp_sg_corr[sg_below]   = np.maximum(amp_sg_corr[sg_below],  thr1)
+            amp_nn_corr[nn_below]   = np.maximum(amp_nn_corr[nn_below],  thr1)
 
         per_trial.append({
             'trial_processed_index_1based': int(j + 1),
@@ -6113,23 +6141,10 @@ def extract_metrics(
 
                 peak_ts_t, peak_vals_t, resid_vals_t = [], [], []
                 for pp, stp in enumerate(stim_times):
-                    series_for_peak_t = y_for_peaks_t
-                    if meas == 'NNLS' and baseline_prev_only_t:
-                        try:
-                            series_for_peak_t = y_for_peaks_t - baseline_prev_only_t[pp]
-                        except Exception:
-                            series_for_peak_t = y_for_peaks_t
-                    tp, _ = pick_peak_on_series(t, series_for_peak_t, float(stp), win_ms, pre_ms)
+                    # Find peak directly on the NNLS model so the red dot sits on the blue line
+                    tp, vp = pick_peak_on_series(t, y_for_peaks_t, float(stp), win_ms, pre_ms)
                     peak_ts_t.append(float(tp))
-                    # Use the stored corrected amplitude (same value used for failure detection)
-                    if pp < len(amp_corr_for_dots):
-                        peak_vals_t.append(float(amp_corr_for_dots[pp]))
-                    else:
-                        try:
-                            i0 = int(np.argmin(np.abs(t - tp)))
-                            peak_vals_t.append(float(y_for_peaks_t[i0]))
-                        except Exception:
-                            peak_vals_t.append(np.nan)
+                    peak_vals_t.append(float(vp))
                     try:
                         i0 = int(np.argmin(np.abs(t - tp)))
                         base_prev = baseline_prev_only_t[pp][i0] if baseline_prev_only_t else 0.0
@@ -6451,14 +6466,19 @@ def extract_metrics(
             median_threshold = float(np.median(thr_list))
         progress_print(f"[floor-avg] Amplitude floor (median threshold): {median_threshold:.6f}")
         progress_print(f"[floor-avg] Original per-trial thresholds: {[f'{t:.4f}' for t in thr_list]}")
-        amp_raw_avg_floored = np.maximum(amp_raw_avg, median_threshold)
-        amp_raw_corr_avg_floored = np.maximum(amp_raw_corr_avg, median_threshold)
-        amp_sg_avg_floored = np.maximum(amp_sg_avg, median_threshold)
-        amp_sg_corr_avg_floored = np.maximum(amp_sg_corr_avg, median_threshold)
-        amp_nnls_avg_floored = np.maximum(amp_nnls_avg, median_threshold)
-        amp_nnls_corr_avg_floored = np.maximum(amp_nnls_corr_avg, median_threshold)
-        # Recalculate PPR with floored amplitudes
-        ppr_nnls_avg = _norm(amp_nnls_avg_floored)
+        # Floor corrected amplitudes only when the absolute (uncorrected)
+        # amplitude is below the median noise threshold.
+        raw_avg_below  = amp_raw_avg  < median_threshold
+        sg_avg_below   = amp_sg_avg   < median_threshold
+        nnls_avg_below = amp_nnls_avg < median_threshold
+        amp_raw_corr_avg_floored = amp_raw_corr_avg.copy()
+        amp_raw_corr_avg_floored[raw_avg_below] = np.maximum(amp_raw_corr_avg_floored[raw_avg_below], median_threshold)
+        amp_sg_corr_avg_floored = amp_sg_corr_avg.copy()
+        amp_sg_corr_avg_floored[sg_avg_below] = np.maximum(amp_sg_corr_avg_floored[sg_avg_below], median_threshold)
+        amp_nnls_corr_avg_floored = amp_nnls_corr_avg.copy()
+        amp_nnls_corr_avg_floored[nnls_avg_below] = np.maximum(amp_nnls_corr_avg_floored[nnls_avg_below], median_threshold)
+        # Recalculate PPR with floored corrected amplitudes
+        ppr_nnls_avg = _norm(amp_nnls_avg)
         ppr_nnls_corr_avg = _norm(amp_nnls_corr_avg_floored)
 
     figure_residual_buildup = None

@@ -48,7 +48,8 @@ OUT_DIR = os.path.join(DATA_ROOT, "Testout")
 CONDITION = ""  # Leave empty to auto-detect from file location
 #TARGET_FILE = "20191017_linescan3_50Hz_10pulses_2.5mMCa_bouton2_traces_converted.xlsx"
 #TARGET_FILE = "20210722_linescan3_50Hz_10pulses_1.5mMCa_bouton12_traces_converted.xlsx"
-TARGET_FILE = "20210512_linescan2_50Hz_10pulses_2.5mMCa_bouton1_traces_converted.xlsx"
+#TARGET_FILE = "20210512_linescan2_50Hz_10pulses_2.5mMCa_bouton1_traces_converted.xlsx"
+TARGET_FILE = "20220726_linescan5_50Hz_10pulses_4mMCa_bouton2_traces_converted.xlsx"
 
 # --- Select analysis preset ---
 PRESET_NAME = 'iglusnfr_optimized'  # Options: 'iglusnfr_optimized', 'double_exp', 'single_exp_fixed_8ms'
@@ -57,6 +58,7 @@ PRESET_NAME = 'iglusnfr_optimized'  # Options: 'iglusnfr_optimized', 'double_exp
 OVERRIDE_ISI = None         # e.g., 0.02 for 50Hz, 0.05 for 20Hz
 OVERRIDE_BASELINE = None    # e.g., 0.498 or 0.998
 OVERRIDE_N_PULSES = None    # e.g., 10
+PPR_NOISE_PROTECTION = True
 
 # =============================================================================
 #                         CONDITION LOOKUP TABLES
@@ -145,8 +147,8 @@ def _build_options_presets(peak_window_ms, pre_zoom_s, post_zoom_s):
             
             # --- PPR Safety ---
             'amplitude_floor_to_noise': True,                               # Floor all pulse amplitudes to the per-trial A1 threshold (thr1) before PPR; average uses median(thr1)
-            'average_amplitude_floor_to_noise': False,                       # Separate control for average trace floor; None => follow amplitude_floor_to_noise
-            'average_null_N': None,                                          # Separate null_N multiplier for average trace floor; None => follow null_N
+            'average_amplitude_floor_to_noise': False,                      # Separate control for average trace floor; None => follow amplitude_floor_to_noise
+            'average_null_N': None,                                         # Separate null_N multiplier for average trace floor; None => follow null_N
             
             # --- NNLS Fitting ---
             'nnls_fit_mode': 'sequential',                                  # 'simultaneous' (all events jointly) or 'sequential' (greedy forward pass, resolves fast/superslow degeneracy)
@@ -190,8 +192,8 @@ def _build_options_presets(peak_window_ms, pre_zoom_s, post_zoom_s):
                 'figsize': (10, 6),                                         # Figure size
                 'show_decay': True,                                         # Show decay fits on average plot
                 'show_onsets': True,                                        # Show detected onsets on recut snippets
-                'trials': True,                                            # Whether to generate per-trial figures
-                'baseline': True,                                          # Whether to show baseline F0 levels on traces
+                'trials': False,                                           # Whether to generate per-trial figures
+                'baseline': False,                                         # Whether to show baseline F0 levels on traces
                 'residuals': True,                                          # Whether to show residuals on average plot
                 'nnls_residual': False,                                     # Whether to show NNLS residuals on average plot
                 'nnls_n_minus_1': False,                                    # Whether to show NNLS n-1 fit on average plot
@@ -208,7 +210,7 @@ def _build_options_presets(peak_window_ms, pre_zoom_s, post_zoom_s):
             'force_tau_slow_override': False,                                # If True, force tau_slow = tau_superslow in tri-exp models ; unlike allow_tau_slow_override, this enforces the equality rather than just allowing it
             
             # --- Jitter Variants ---
-            'jitter_variant_ms': np.linspace(-1.0, 1.0, 5),                # Jitter variants to try (ms) ; set to None to disable jitter variants ; jitter means we shift event times by +/- jitter to test robustness
+            'jitter_variant_ms': np.arange(-2.0, 2.01, 0.5),                # Jitter variants to try (ms) ; set to None to disable jitter variants ; jitter means we shift event times by +/- jitter to test robustness
         },
     }
 
@@ -235,6 +237,65 @@ def _ensure_columns(df, ordered_cols):
             df[col] = np.nan
     rest = [c for c in df.columns if c not in ordered_cols]
     return df[ordered_cols + rest]
+
+
+def _measurement_series_keys(measurement: str) -> dict:
+    """Return result keys for the selected measurement series."""
+    meas = str(measurement).strip().upper()
+    if meas == 'SAVGOL':
+        return {
+            'label': 'SAVGOL',
+            'avg_uncorr': 'amp_savgol',
+            'avg_corr': 'amp_savgol_corr',
+            'trial_uncorr': 'amp_savgol_unfloored',
+            'trial_corr': 'amp_savgol_corr_unfloored',
+        }
+    if meas == 'RAW':
+        return {
+            'label': 'RAW',
+            'avg_uncorr': 'amp_raw',
+            'avg_corr': 'amp_raw_corr',
+            'trial_uncorr': 'amp_raw_unfloored',
+            'trial_corr': 'amp_raw_corr_unfloored',
+        }
+    return {
+        'label': 'NNLS',
+        'avg_uncorr': 'amp_nnls',
+        'avg_corr': 'amp_nnls_corr',
+        'trial_uncorr': 'amp_nnls_unfloored',
+        'trial_corr': 'amp_nnls_corr_unfloored',
+    }
+
+
+def _compute_ppr_from_amplitudes(amps) -> np.ndarray:
+    """Return AMPn / AMP1 using the provided amplitude vector."""
+    arr = np.asarray(amps, float)
+    if arr.size == 0:
+        return arr
+    a1 = float(arr[0])
+    return (arr / a1) if np.isfinite(a1) and abs(a1) > 1e-12 else arr * np.nan
+
+
+def _protected_ppr(amps, thr, enabled: bool) -> np.ndarray:
+    """Recompute PPR from corrected amplitudes, optionally clamped to noise."""
+    arr = np.asarray(amps, float).copy()
+    if enabled and np.isfinite(thr):
+        arr[np.isfinite(arr)] = np.maximum(arr[np.isfinite(arr)], float(thr))
+    return _compute_ppr_from_amplitudes(arr)
+
+
+def _threshold_value(corr_arr, uncorr_arr, idx: int) -> float:
+    """Return the conservative amplitude used for failure calls."""
+    vals = []
+    if idx < len(corr_arr):
+        v = float(corr_arr[idx])
+        if np.isfinite(v):
+            vals.append(v)
+    if idx < len(uncorr_arr):
+        v = float(uncorr_arr[idx])
+        if np.isfinite(v):
+            vals.append(v)
+    return float(min(vals)) if vals else np.nan
 
 
 # --- Auto-detect condition from filename ---
@@ -310,7 +371,7 @@ valid = np.isfinite(_time)
 time = _time[valid]
 trials = _trials[valid, :]
 
-print(f"[debug] Excel has {df.shape[1]} total columns → {trials.shape[1]} trial columns{' + 1 avg' if _has_avg_col else ''} + 1 time column")
+print(f"[debug] Excel has {df.shape[1]} total columns -> {trials.shape[1]} trial columns{' + 1 avg' if _has_avg_col else ''} + 1 time column")
 
 base = os.path.splitext(os.path.basename(xlsx_path))[0]
 
@@ -331,25 +392,34 @@ res = extract_metrics(
 # =============================================================================
 
 # --- Extract amplitudes and PPR ---
-amp_avg_raw = res['average'].get('amp_nnls')
-amp_avg = res['average'].get('amp_nnls_corr', res['average']['amp_nnls'])
-ppr_avg = res['average'].get('ppr_nnls_corr')
-if ppr_avg is None:
-    a1 = float(amp_avg[0]) if len(amp_avg) else np.nan
-    ppr_avg = (amp_avg / a1) if np.isfinite(a1) and abs(a1) > 1e-12 else amp_avg * np.nan
+meas_keys = _measurement_series_keys(options.get('measurement', 'NNLS'))
+amp_avg_raw = np.asarray(
+    res['average'].get(meas_keys['avg_uncorr'], res['average'].get('amp_nnls')),
+    float,
+)
+amp_avg = np.asarray(
+    res['average'].get(meas_keys['avg_corr'], amp_avg_raw),
+    float,
+)
+thr_arr = np.asarray(res.get('threshold_amp1', []), float)
+thr_arr = thr_arr[np.isfinite(thr_arr)]
+thr_median = float(np.nanmedian(thr_arr)) if thr_arr.size else np.nan
+ppr_avg = _protected_ppr(amp_avg, thr_median, PPR_NOISE_PROTECTION)
 
 print("\n--- Results ---")
-print("Amplitudes (NNLS raw):", amp_avg_raw)
-print("Amplitudes (NNLS corr):", amp_avg)
-print("PPR (NNLS):", ppr_avg)
+print(f"Amplitudes ({meas_keys['label']} uncorrected):", amp_avg_raw)
+print(f"Amplitudes ({meas_keys['label']} corrected):", amp_avg)
+print(f"PPR ({meas_keys['label']} corrected):", ppr_avg)
 print("A1 thresholds:", res['threshold_amp1'])
 print("PPR floor (median thr):", res.get('median_threshold_floor', 'N/A'))
 print("A1 p-values:", res['pval_amp1'])
 
 # --- Build summary row ---
-row = {'measurement': 'NNLS', 'ID': base}
+row = {'measurement': meas_keys['label'], 'ID': base, 'NOISE_THR_MEDIAN': thr_median}
 for i, v in enumerate(amp_avg, 1):
     row[f'AMP{i}'] = float(v)
+for i, v in enumerate(amp_avg_raw, 1):
+    row[f'AMP{i}_UNCORR'] = float(v)
 for i in range(2, len(ppr_avg) + 1):
     row[f'PPR{i}/1'] = float(ppr_avg[i - 1])
 
@@ -360,27 +430,30 @@ print(f"{'='*60}")
 print(f"  {'Trial':>5}  {'A1 (corr)':>12}  {'Threshold':>12}  {'Status':>8}")
 print(f"  {'-'*5}  {'-'*12}  {'-'*12}  {'-'*8}")
 for _it, _rt in enumerate(res.get('per_trial', [])):
-    _a1_uf = np.asarray(_rt.get('amp_nnls_corr_unfloored', _rt.get('amp_nnls_corr', _rt.get('amp_nnls'))), float)
-    _a1v = float(_a1_uf[0]) if _a1_uf.size else np.nan
+    _a1_corr = np.asarray(_rt.get(meas_keys['trial_corr'], _rt.get(meas_keys['avg_corr'])), float)
+    _a1_uncorr = np.asarray(_rt.get(meas_keys['trial_uncorr'], _rt.get(meas_keys['avg_uncorr'])), float)
+    _a1v = float(_a1_corr[0]) if _a1_corr.size else np.nan
+    _a1_eval = _threshold_value(_a1_corr, _a1_uncorr, 0)
     _thrv = float(_rt.get('thr_shared', np.nan))
-    _st = 'PASS' if (np.isfinite(_a1v) and np.isfinite(_thrv) and _a1v > _thrv) else 'FAIL'
+    _st = 'PASS' if (np.isfinite(_a1_eval) and np.isfinite(_thrv) and _a1_eval > _thrv) else 'FAIL'
     print(f"  {_it+1:>5}  {_a1v:>12.6f}  {_thrv:>12.6f}  {_st:>8}")
 _n_fail_diag = sum(1 for _rt in res.get('per_trial', [])
-                   if float(np.asarray(_rt.get('amp_nnls_corr_unfloored', _rt.get('amp_nnls_corr', _rt.get('amp_nnls'))), float)[0])
+                   if _threshold_value(
+                       np.asarray(_rt.get(meas_keys['trial_corr'], _rt.get(meas_keys['avg_corr'])), float),
+                       np.asarray(_rt.get(meas_keys['trial_uncorr'], _rt.get(meas_keys['avg_uncorr'])), float),
+                       0,
+                   )
                    <= float(_rt.get('thr_shared', np.nan))
                    and np.isfinite(float(_rt.get('thr_shared', np.nan))))
 _n_total_diag = len(res.get('per_trial', []))
-print(f"  → Failures: {_n_fail_diag}/{_n_total_diag} = {100*_n_fail_diag/_n_total_diag:.1f}%" if _n_total_diag else "  → No trials")
+print(f"  -> Failures: {_n_fail_diag}/{_n_total_diag} = {100*_n_fail_diag/_n_total_diag:.1f}%" if _n_total_diag else "  -> No trials")
 print(f"{'='*60}")
 
 # --- Per-trial failure counts ---
 per_trial_rows, per_trial_null_rows, fail_counts = [], [], {i: [0, 0] for i in range(1, 4)}
 for idx_trial, rtrial in enumerate(res.get('per_trial', [])):
-    amp_trial = np.asarray(rtrial.get('amp_nnls_corr', rtrial.get('amp_nnls')), float)
-    amp_trial_unfloored = np.asarray(
-        rtrial.get('amp_nnls_corr_unfloored', rtrial.get('amp_nnls_corr', rtrial.get('amp_nnls'))),
-        float
-    )
+    amp_trial = np.asarray(rtrial.get(meas_keys['trial_corr'], rtrial.get(meas_keys['avg_corr'])), float)
+    amp_trial_uncorr = np.asarray(rtrial.get(meas_keys['trial_uncorr'], rtrial.get(meas_keys['avg_uncorr'])), float)
     thr = float(rtrial.get('thr_shared', np.nan))
     noise_level = float(rtrial.get('noise_level', np.nan))
     baseline_null_mean_including_zero = float(rtrial.get('baseline_null_mean_including_zero', np.nan))
@@ -389,7 +462,7 @@ for idx_trial, rtrial in enumerate(res.get('per_trial', [])):
     baseline_null_median_excluding_zero = float(rtrial.get('baseline_null_median_excluding_zero', np.nan))
     null_amps_nnls = np.asarray(rtrial.get('null_amps_nnls', []), float)
     null_amps_nnls = null_amps_nnls[np.isfinite(null_amps_nnls)]
-    a1 = amp_trial[0] if amp_trial.size else np.nan
+    a1 = _threshold_value(amp_trial, amp_trial_uncorr, 0)
     status = 'NA'
     if np.isfinite(a1) and np.isfinite(thr):
         status = 'success' if a1 > thr else 'failure'
@@ -409,8 +482,8 @@ for idx_trial, rtrial in enumerate(res.get('per_trial', [])):
     for p in range(1, int(DEFAULT_N_PULSES) + 1):
         vc = float(amp_trial[p - 1]) if p <= amp_trial.size and np.isfinite(amp_trial[p - 1]) else np.nan
         vu = (
-            float(amp_trial_unfloored[p - 1])
-            if p <= amp_trial_unfloored.size and np.isfinite(amp_trial_unfloored[p - 1])
+            float(amp_trial_uncorr[p - 1])
+            if p <= amp_trial_uncorr.size and np.isfinite(amp_trial_uncorr[p - 1])
             else np.nan
         )
         trial_row[f'AMP{p}_CORR'] = vc
@@ -428,7 +501,7 @@ for idx_trial, rtrial in enumerate(res.get('per_trial', [])):
         'nnls_null_amps_json': json.dumps([float(v) for v in null_amps_nnls.tolist()]),
     })
     for p in range(1, min(3, amp_trial.size) + 1):
-        val = amp_trial[p - 1]
+        val = _threshold_value(amp_trial, amp_trial_uncorr, p - 1)
         if np.isfinite(val) and np.isfinite(thr):
             fail_counts[p][1] += 1
             if val <= thr:
@@ -440,7 +513,11 @@ for p in range(1, 4):
 
 # --- Save to files ---
 df_rows = pd.DataFrame([row])
-ordered = [f'AMP{i}' for i in range(1, 11)] + [f'PPR{i}/1' for i in range(2, 11)] + [f'%Fail{i}' for i in range(1, 4)]
+ordered = ([f'AMP{i}' for i in range(1, 11)]
+           + [f'AMP{i}_UNCORR' for i in range(1, 11)]
+           + [f'PPR{i}/1' for i in range(2, 11)]
+           + [f'%Fail{i}' for i in range(1, 4)]
+           + ['NOISE_THR_MEDIAN'])
 df_rows = _ensure_columns(df_rows, ['ID', *ordered, 'measurement'])
 
 csv_out = os.path.join(OUT_DIR, f"{base}_summary.csv")
