@@ -19,27 +19,30 @@ import matplotlib.pyplot as plt
 DATA_ROOT = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL"
 OUT_DIR = os.path.join(DATA_ROOT, "Testout")
 
-# files = [
-#     "250128_Fibre2_Bouton_5.xlsx",
-#     "250305_Fibre4_Bouton_4.xlsx",
-#     "20190801_linescan1_20Hz_10pulses_2.5mMCa_bouton3_traces_converted.xlsx",
-#     "20191017_linescan3_50Hz_10pulses_2.5mMCa_bouton1_traces_converted.xlsx",
-#     "20191017_linescan3_50Hz_10pulses_2.5mMCa_bouton2_traces_converted.xlsx",
-#     "20191017_linescan3_50Hz_10pulses_2.5mMCa_bouton4_traces_converted.xlsx",
-#     "20201022_linescan1_50Hz_10pulses_2.5mMCa_bouton1_traces_converted.xlsx",
-#     "20201022_linescan1_50Hz_10pulses_2.5mMCa_bouton2_traces_converted.xlsx",
-#     "20201022_linescan1_50Hz_10pulses_2.5mMCa_bouton4_traces_converted.xlsx",
-#     "20201030_linescan2_50Hz_10pulses_2.5mMCa_bouton3_traces_converted.xlsx",
-#     "20210128_linescan5_20Hz_10pulses_2.5mMCa_bouton2_traces_converted.xlsx",
-#     "20210512_linescan2_50Hz_10pulses_2.5mMCa_bouton6_traces_converted.xlsx",
-#     "20210518_linescan1_50Hz_10pulses_2.5mMCa_bouton1_traces_converted.xlsx",
-#     "20210518_linescan1_50Hz_10pulses_2.5mMCa_bouton2_traces_converted.xlsx",
-#     "20210722_linescan3_50Hz_10pulses_1.5mMCa_bouton3_traces_converted.xlsx",
-#     "20210722_linescan3_50Hz_10pulses_1.5mMCa_bouton12_traces_converted.xlsx",
-#     "20220726_linescan5_50Hz_10pulses_1.5mMCa_bouton2_traces_converted.xlsx",
-#     "20220726_linescan5_50Hz_10pulses_4mMCa_bouton2_traces_converted.xlsx",
-#     "20220726_linescan6_50Hz_10pulses_4mMCa_bouton1_traces_converted.xlsx",
-# ]
+# --- File list: uncomment to process multiple files in one run ---
+# When FILES is set (not None), the script loops over all entries.
+# When FILES is None, it processes the single TARGET_FILE below.
+FILES = [
+    "250128_Fibre2_Bouton_5.xlsx",
+    "250305_Fibre4_Bouton_4.xlsx",
+    "20190801_linescan1_20Hz_10pulses_2.5mMCa_bouton3_traces_converted.xlsx",
+    "20191017_linescan3_50Hz_10pulses_2.5mMCa_bouton1_traces_converted.xlsx",
+    "20191017_linescan3_50Hz_10pulses_2.5mMCa_bouton2_traces_converted.xlsx",
+    "20191017_linescan3_50Hz_10pulses_2.5mMCa_bouton4_traces_converted.xlsx",
+    "20201022_linescan1_50Hz_10pulses_2.5mMCa_bouton1_traces_converted.xlsx",
+    "20201022_linescan1_50Hz_10pulses_2.5mMCa_bouton2_traces_converted.xlsx",
+    "20201022_linescan1_50Hz_10pulses_2.5mMCa_bouton4_traces_converted.xlsx",
+    "20201030_linescan2_50Hz_10pulses_2.5mMCa_bouton3_traces_converted.xlsx",
+    "20210128_linescan5_20Hz_10pulses_2.5mMCa_bouton2_traces_converted.xlsx",
+    "20210512_linescan2_50Hz_10pulses_2.5mMCa_bouton6_traces_converted.xlsx",
+    "20210518_linescan1_50Hz_10pulses_2.5mMCa_bouton1_traces_converted.xlsx",
+    "20210518_linescan1_50Hz_10pulses_2.5mMCa_bouton2_traces_converted.xlsx",
+    "20210722_linescan3_50Hz_10pulses_1.5mMCa_bouton3_traces_converted.xlsx",
+    "20210722_linescan3_50Hz_10pulses_1.5mMCa_bouton12_traces_converted.xlsx",
+    "20220726_linescan5_50Hz_10pulses_1.5mMCa_bouton2_traces_converted.xlsx",
+    "20220726_linescan5_50Hz_10pulses_4mMCa_bouton2_traces_converted.xlsx",
+    "20220726_linescan6_50Hz_10pulses_4mMCa_bouton1_traces_converted.xlsx",
+]
 
 
 
@@ -50,6 +53,8 @@ CONDITION = ""  # Leave empty to auto-detect from file location
 #TARGET_FILE = "20210722_linescan3_50Hz_10pulses_1.5mMCa_bouton12_traces_converted.xlsx"
 #TARGET_FILE = "20210512_linescan2_50Hz_10pulses_2.5mMCa_bouton1_traces_converted.xlsx"
 TARGET_FILE = "20220726_linescan5_50Hz_10pulses_4mMCa_bouton2_traces_converted.xlsx"
+TARGET_FILE = "20220726_linescan5_50Hz_10pulses_1.5mMCa_bouton2_traces_converted.xlsx"
+
 
 # --- Select analysis preset ---
 PRESET_NAME = 'iglusnfr_optimized'  # Options: 'iglusnfr_optimized', 'double_exp', 'single_exp_fixed_8ms'
@@ -160,6 +165,7 @@ def _build_options_presets(peak_window_ms, pre_zoom_s, post_zoom_s):
             'huber_delta': 2.5,                                             # Huber loss delta for robust fitting (in std units); set to None to disable robust fitting
             'irls_iters': 20,                                               # Number of IRLS iterations for robust fitting ; only used if huber_delta is set
             'nnls_last_event_tail_tau_s': 'best',                           # Last event tail downweight tau (s); None=off, 'auto'=ISI, 'best'=search for optimal, or float
+            'nnls_two_pass_guard': False,                                    # If True, reject pass 2 when it worsens RMS; if False, always use pass 2 (smoothed fractions)
 
             # --- Time Windows (ISI-aware) ---
             'pre_zoom_s': pre_zoom_s,                                       # Pre-event snippet duration (s); controls how much data before each event is shown ; does not affect fitting
@@ -306,283 +312,303 @@ def _find_condition(data_root, conditions, filename):
             return cond
     return None
 
-# --- Resolve parameters (use overrides if set, otherwise lookup) ---
-if not CONDITION:
-    CONDITION = _find_condition(DATA_ROOT, ALL_CONDITIONS, TARGET_FILE)
-    if not CONDITION:
-        raise FileNotFoundError(f"'{TARGET_FILE}' not found in any condition folder")
-
-ISI = OVERRIDE_ISI if OVERRIDE_ISI is not None else ISI_BY_CONDITION.get(CONDITION, DEFAULT_ISI)
-START = OVERRIDE_BASELINE if OVERRIDE_BASELINE is not None else BASELINE_BY_CONDITION.get(CONDITION, DEFAULT_BASELINE)
-N_PULSES = OVERRIDE_N_PULSES if OVERRIDE_N_PULSES is not None else DEFAULT_N_PULSES
-
-xlsx_path = os.path.join(DATA_ROOT, CONDITION, TARGET_FILE)
-
-# --- Compute ISI-dependent parameters ---
-ISI_MS = ISI * 1000.0
-MARGIN_MS = 2.0  # Fixed margin before next event (ms)
-PEAK_WINDOW_MS = max(5.0, ISI_MS - MARGIN_MS)  # Use all data minus 2ms margin
-POST_ZOOM_S = 0.3  # Post-train window (s): controls plot zoom AND last-event fit window in sequential NNLS
-PRE_ZOOM_S = 0.20
-
-# --- Print configuration ---
-print("=" * 60)
-print(f"  Condition:  {CONDITION}")
-print(f"  File:       {TARGET_FILE}")
-print(f"  ISI:        {ISI_MS:.0f}ms ({1/ISI:.0f}Hz)")
-print(f"  Baseline:   {START:.3f}s")
-print(f"  N pulses:   {N_PULSES}")
-print(f"  Preset:     {PRESET_NAME}")
-print(f"  Peak win:   {PEAK_WINDOW_MS:.1f}ms | Post zoom: {POST_ZOOM_S:.3f}s")
-print("=" * 60)
-
-# --- Build presets and select ---
-options_presets = _build_options_presets(PEAK_WINDOW_MS, PRE_ZOOM_S, POST_ZOOM_S)
-if PRESET_NAME not in options_presets:
-    raise ValueError(f"Unknown preset '{PRESET_NAME}'. Available: {list(options_presets)}")
-options = options_presets[PRESET_NAME]
-
-# --- Load data ---
-os.makedirs(OUT_DIR, exist_ok=True)
-df = pd.read_excel(xlsx_path, sheet_name=0, engine="openpyxl")
-_time = pd.to_numeric(df.iloc[:, -1], errors='coerce').to_numpy(float)
-_all_before_time = df.iloc[:, :-1].apply(pd.to_numeric, errors='coerce').to_numpy(float)
-
-# Auto-detect and skip the average column (penultimate = mean of preceding columns)
-_has_avg_col = False
-if _all_before_time.shape[1] >= 2:
-    _candidate_avg = _all_before_time[:, -1]
-    _preceding = _all_before_time[:, :-1]
-    _computed_avg = np.nanmean(_preceding, axis=1)
-    _finite = np.isfinite(_candidate_avg) & np.isfinite(_computed_avg)
-    if _finite.sum() > 10:
-        _corr = np.corrcoef(_candidate_avg[_finite], _computed_avg[_finite])[0, 1]
-        if not math.isnan(_corr) and _corr > 0.99:
-            _has_avg_col = True
-
-if _has_avg_col:
-    _trials = _all_before_time[:, :-1]  # drop penultimate (average) column
-    print(f"[info] Detected average column (penultimate) — excluded from trials")
+# --- Build file list to process ---
+if FILES is not None:
+    _file_list = list(FILES)
 else:
-    _trials = _all_before_time
-    print(f"[info] No average column detected — using all data columns as trials")
+    _file_list = [TARGET_FILE]
 
-valid = np.isfinite(_time)
-time = _time[valid]
-trials = _trials[valid, :]
+_errors = []
+for _file_idx, TARGET_FILE in enumerate(_file_list):
+    CONDITION = ""  # reset per file so auto-detect works
 
-print(f"[debug] Excel has {df.shape[1]} total columns -> {trials.shape[1]} trial columns{' + 1 avg' if _has_avg_col else ''} + 1 time column")
+    # --- Resolve parameters (use overrides if set, otherwise lookup) ---
+    if not CONDITION:
+        CONDITION = _find_condition(DATA_ROOT, ALL_CONDITIONS, TARGET_FILE)
+        if not CONDITION:
+            print(f"[SKIP] '{TARGET_FILE}' not found in any condition folder")
+            _errors.append(TARGET_FILE)
+            continue
 
-base = os.path.splitext(os.path.basename(xlsx_path))[0]
+    ISI = OVERRIDE_ISI if OVERRIDE_ISI is not None else ISI_BY_CONDITION.get(CONDITION, DEFAULT_ISI)
+    START = OVERRIDE_BASELINE if OVERRIDE_BASELINE is not None else BASELINE_BY_CONDITION.get(CONDITION, DEFAULT_BASELINE)
+    N_PULSES = OVERRIDE_N_PULSES if OVERRIDE_N_PULSES is not None else DEFAULT_N_PULSES
 
-# =============================================================================
-#                              RUN ANALYSIS
-# =============================================================================
-res = extract_metrics(
-    time, trials,
-    train_start=START,
-    isi=ISI,
-    n_pulses=N_PULSES,
-    options=options,
-    filename=base
-)
+    xlsx_path = os.path.join(DATA_ROOT, CONDITION, TARGET_FILE)
 
-# =============================================================================
-#                              RESULTS OUTPUT
-# =============================================================================
+    # --- Compute ISI-dependent parameters ---
+    ISI_MS = ISI * 1000.0
+    MARGIN_MS = 2.0  # Fixed margin before next event (ms)
+    PEAK_WINDOW_MS = max(5.0, ISI_MS - MARGIN_MS)  # Use all data minus 2ms margin
+    POST_ZOOM_S = 0.3  # Post-train window (s): controls plot zoom AND last-event fit window in sequential NNLS
+    PRE_ZOOM_S = 0.20
 
-# --- Extract amplitudes and PPR ---
-meas_keys = _measurement_series_keys(options.get('measurement', 'NNLS'))
-amp_avg_raw = np.asarray(
-    res['average'].get(meas_keys['avg_uncorr'], res['average'].get('amp_nnls')),
-    float,
-)
-amp_avg = np.asarray(
-    res['average'].get(meas_keys['avg_corr'], amp_avg_raw),
-    float,
-)
-thr_arr = np.asarray(res.get('threshold_amp1', []), float)
-thr_arr = thr_arr[np.isfinite(thr_arr)]
-thr_median = float(np.nanmedian(thr_arr)) if thr_arr.size else np.nan
-ppr_avg = _protected_ppr(amp_avg, thr_median, PPR_NOISE_PROTECTION)
+    # --- Print configuration ---
+    print("=" * 60)
+    if len(_file_list) > 1:
+        print(f"  [{_file_idx+1}/{len(_file_list)}]")
+    print(f"  Condition:  {CONDITION}")
+    print(f"  File:       {TARGET_FILE}")
+    print(f"  ISI:        {ISI_MS:.0f}ms ({1/ISI:.0f}Hz)")
+    print(f"  Baseline:   {START:.3f}s")
+    print(f"  N pulses:   {N_PULSES}")
+    print(f"  Preset:     {PRESET_NAME}")
+    print(f"  Peak win:   {PEAK_WINDOW_MS:.1f}ms | Post zoom: {POST_ZOOM_S:.3f}s")
+    print("=" * 60)
 
-print("\n--- Results ---")
-print(f"Amplitudes ({meas_keys['label']} uncorrected):", amp_avg_raw)
-print(f"Amplitudes ({meas_keys['label']} corrected):", amp_avg)
-print(f"PPR ({meas_keys['label']} corrected):", ppr_avg)
-print("A1 thresholds:", res['threshold_amp1'])
-print("PPR floor (median thr):", res.get('median_threshold_floor', 'N/A'))
-print("A1 p-values:", res['pval_amp1'])
+    # --- Build presets and select ---
+    options_presets = _build_options_presets(PEAK_WINDOW_MS, PRE_ZOOM_S, POST_ZOOM_S)
+    if PRESET_NAME not in options_presets:
+        raise ValueError(f"Unknown preset '{PRESET_NAME}'. Available: {list(options_presets)}")
+    options = options_presets[PRESET_NAME]
 
-# --- Build summary row ---
-row = {'measurement': meas_keys['label'], 'ID': base, 'NOISE_THR_MEDIAN': thr_median}
-for i, v in enumerate(amp_avg, 1):
-    row[f'AMP{i}'] = float(v)
-for i, v in enumerate(amp_avg_raw, 1):
-    row[f'AMP{i}_UNCORR'] = float(v)
-for i in range(2, len(ppr_avg) + 1):
-    row[f'PPR{i}/1'] = float(ppr_avg[i - 1])
+    # --- Load data ---
+    os.makedirs(OUT_DIR, exist_ok=True)
+    df = pd.read_excel(xlsx_path, sheet_name=0, engine="openpyxl")
+    _time = pd.to_numeric(df.iloc[:, -1], errors='coerce').to_numpy(float)
+    _all_before_time = df.iloc[:, :-1].apply(pd.to_numeric, errors='coerce').to_numpy(float)
 
-# --- Per-trial A1 diagnostic table ---
-print(f"\n{'='*60}")
-print(f"  Per-trial A1 diagnostics ({len(res.get('per_trial', []))} trials)")
-print(f"{'='*60}")
-print(f"  {'Trial':>5}  {'A1 (corr)':>12}  {'Threshold':>12}  {'Status':>8}")
-print(f"  {'-'*5}  {'-'*12}  {'-'*12}  {'-'*8}")
-for _it, _rt in enumerate(res.get('per_trial', [])):
-    _a1_corr = np.asarray(_rt.get(meas_keys['trial_corr'], _rt.get(meas_keys['avg_corr'])), float)
-    _a1_uncorr = np.asarray(_rt.get(meas_keys['trial_uncorr'], _rt.get(meas_keys['avg_uncorr'])), float)
-    _a1v = float(_a1_corr[0]) if _a1_corr.size else np.nan
-    _a1_eval = _threshold_value(_a1_corr, _a1_uncorr, 0)
-    _thrv = float(_rt.get('thr_shared', np.nan))
-    _st = 'PASS' if (np.isfinite(_a1_eval) and np.isfinite(_thrv) and _a1_eval > _thrv) else 'FAIL'
-    print(f"  {_it+1:>5}  {_a1v:>12.6f}  {_thrv:>12.6f}  {_st:>8}")
-_n_fail_diag = sum(1 for _rt in res.get('per_trial', [])
-                   if _threshold_value(
-                       np.asarray(_rt.get(meas_keys['trial_corr'], _rt.get(meas_keys['avg_corr'])), float),
-                       np.asarray(_rt.get(meas_keys['trial_uncorr'], _rt.get(meas_keys['avg_uncorr'])), float),
-                       0,
-                   )
-                   <= float(_rt.get('thr_shared', np.nan))
-                   and np.isfinite(float(_rt.get('thr_shared', np.nan))))
-_n_total_diag = len(res.get('per_trial', []))
-print(f"  -> Failures: {_n_fail_diag}/{_n_total_diag} = {100*_n_fail_diag/_n_total_diag:.1f}%" if _n_total_diag else "  -> No trials")
-print(f"{'='*60}")
+    # Auto-detect and skip the average column (penultimate = mean of preceding columns)
+    _has_avg_col = False
+    if _all_before_time.shape[1] >= 2:
+        _candidate_avg = _all_before_time[:, -1]
+        _preceding = _all_before_time[:, :-1]
+        _computed_avg = np.nanmean(_preceding, axis=1)
+        _finite = np.isfinite(_candidate_avg) & np.isfinite(_computed_avg)
+        if _finite.sum() > 10:
+            _corr = np.corrcoef(_candidate_avg[_finite], _computed_avg[_finite])[0, 1]
+            if not math.isnan(_corr) and _corr > 0.99:
+                _has_avg_col = True
 
-# --- Per-trial failure counts ---
-per_trial_rows, per_trial_null_rows, fail_counts = [], [], {i: [0, 0] for i in range(1, 4)}
-for idx_trial, rtrial in enumerate(res.get('per_trial', [])):
-    amp_trial = np.asarray(rtrial.get(meas_keys['trial_corr'], rtrial.get(meas_keys['avg_corr'])), float)
-    amp_trial_uncorr = np.asarray(rtrial.get(meas_keys['trial_uncorr'], rtrial.get(meas_keys['avg_uncorr'])), float)
-    thr = float(rtrial.get('thr_shared', np.nan))
-    noise_level = float(rtrial.get('noise_level', np.nan))
-    baseline_null_mean_including_zero = float(rtrial.get('baseline_null_mean_including_zero', np.nan))
-    baseline_null_median_including_zero = float(rtrial.get('baseline_null_median_including_zero', np.nan))
-    baseline_null_mean_excluding_zero = float(rtrial.get('baseline_null_mean_excluding_zero', np.nan))
-    baseline_null_median_excluding_zero = float(rtrial.get('baseline_null_median_excluding_zero', np.nan))
-    null_amps_nnls = np.asarray(rtrial.get('null_amps_nnls', []), float)
-    null_amps_nnls = null_amps_nnls[np.isfinite(null_amps_nnls)]
-    a1 = _threshold_value(amp_trial, amp_trial_uncorr, 0)
-    status = 'NA'
-    if np.isfinite(a1) and np.isfinite(thr):
-        status = 'success' if a1 > thr else 'failure'
-    trial_row = {
-        'status': status,
-        'file': base,
-        'condition': CONDITION,
-        'trial': idx_trial + 1,
-        'trial_input_col_1based': int(rtrial.get('trial_input_col_1based', idx_trial + 1)),
-        'thr_shared': thr,
-        'noise_level': noise_level,
-        'baseline_null_mean_including_zero': baseline_null_mean_including_zero,
-        'baseline_null_median_including_zero': baseline_null_median_including_zero,
-        'baseline_null_mean_excluding_zero': baseline_null_mean_excluding_zero,
-        'baseline_null_median_excluding_zero': baseline_null_median_excluding_zero,
-    }
-    for p in range(1, int(DEFAULT_N_PULSES) + 1):
-        vc = float(amp_trial[p - 1]) if p <= amp_trial.size and np.isfinite(amp_trial[p - 1]) else np.nan
-        vu = (
-            float(amp_trial_uncorr[p - 1])
-            if p <= amp_trial_uncorr.size and np.isfinite(amp_trial_uncorr[p - 1])
-            else np.nan
-        )
-        trial_row[f'AMP{p}_CORR'] = vc
-        trial_row[f'AMP{p}_UNCORR'] = vu
-    # Backward-compatible legacy column: single-trial AMP1 should remain uncorrected.
-    trial_row['AMP1'] = trial_row.get('AMP1_UNCORR', np.nan)
-    per_trial_rows.append(trial_row)
-    per_trial_null_rows.append({
-        'condition': CONDITION,
-        'file': base,
-        'trial': idx_trial + 1,
-        'trial_input_col_1based': int(rtrial.get('trial_input_col_1based', idx_trial + 1)),
-        'status': status,
-        'nnls_null_n': int(null_amps_nnls.size),
-        'nnls_null_amps_json': json.dumps([float(v) for v in null_amps_nnls.tolist()]),
-    })
-    for p in range(1, min(3, amp_trial.size) + 1):
-        val = _threshold_value(amp_trial, amp_trial_uncorr, p - 1)
-        if np.isfinite(val) and np.isfinite(thr):
-            fail_counts[p][1] += 1
-            if val <= thr:
-                fail_counts[p][0] += 1
-for p in range(1, 4):
-    n_fail, n_valid = fail_counts[p]
-    if n_valid:
-        row[f'%Fail{p}'] = round((n_fail / n_valid) * 100.0, 2)
+    if _has_avg_col:
+        _trials = _all_before_time[:, :-1]  # drop penultimate (average) column
+        print(f"[info] Detected average column (penultimate) — excluded from trials")
+    else:
+        _trials = _all_before_time
+        print(f"[info] No average column detected — using all data columns as trials")
 
-# --- Save to files ---
-df_rows = pd.DataFrame([row])
-ordered = ([f'AMP{i}' for i in range(1, 11)]
-           + [f'AMP{i}_UNCORR' for i in range(1, 11)]
-           + [f'PPR{i}/1' for i in range(2, 11)]
-           + [f'%Fail{i}' for i in range(1, 4)]
-           + ['NOISE_THR_MEDIAN'])
-df_rows = _ensure_columns(df_rows, ['ID', *ordered, 'measurement'])
+    valid = np.isfinite(_time)
+    time = _time[valid]
+    trials = _trials[valid, :]
 
-csv_out = os.path.join(OUT_DIR, f"{base}_summary.csv")
-df_rows.to_csv(csv_out, index=False)
-xl_out = os.path.splitext(csv_out)[0] + ".xlsx"
-df_rows.to_excel(xl_out, index=False)
-if per_trial_rows:
-    df_trials = pd.DataFrame(per_trial_rows)
-    trial_cols = (
-        [
-            'file', 'trial', 'trial_input_col_1based', 'status',
-            'thr_shared', 'noise_level',
-            'baseline_null_mean_including_zero', 'baseline_null_median_including_zero',
-            'baseline_null_mean_excluding_zero', 'baseline_null_median_excluding_zero',
-        ]
-        + [f'AMP{i}_CORR' for i in range(1, DEFAULT_N_PULSES + 1)]
-        + [f'AMP{i}_UNCORR' for i in range(1, DEFAULT_N_PULSES + 1)]
-        + ['AMP1']
+    print(f"[debug] Excel has {df.shape[1]} total columns -> {trials.shape[1]} trial columns{' + 1 avg' if _has_avg_col else ''} + 1 time column")
+
+    base = os.path.splitext(os.path.basename(xlsx_path))[0]
+
+    # =============================================================================
+    #                              RUN ANALYSIS
+    # =============================================================================
+    res = extract_metrics(
+        time, trials,
+        train_start=START,
+        isi=ISI,
+        n_pulses=N_PULSES,
+        options=options,
+        filename=base
     )
-    df_trials = _ensure_columns(df_trials, trial_cols)
-    df_trials.to_excel(os.path.splitext(xl_out)[0] + "_trials.xlsx", index=False)
-if per_trial_null_rows:
-    df_trials_null = pd.DataFrame(per_trial_null_rows)
-    null_cols = ['condition', 'file', 'trial', 'trial_input_col_1based', 'status', 'nnls_null_n', 'nnls_null_amps_json']
-    df_trials_null = _ensure_columns(df_trials_null, null_cols)
-    df_trials_null.to_excel(os.path.splitext(xl_out)[0] + "_trials_nnls_null.xlsx", index=False)
 
-# =============================================================================
-#                              PLOTTING
-# =============================================================================
+    # =============================================================================
+    #                              RESULTS OUTPUT
+    # =============================================================================
 
-fig = res.get('figure')
-if fig is not None:
-    try:
-        fig.savefig(os.path.join(OUT_DIR, "traces_converted_plot.png"), dpi=150)
-    except Exception as e:
-        print(f"[warn] Failed to save main figure: {e}")
+    # --- Extract amplitudes and PPR ---
+    meas_keys = _measurement_series_keys(options.get('measurement', 'NNLS'))
+    amp_avg_raw = np.asarray(
+        res['average'].get(meas_keys['avg_uncorr'], res['average'].get('amp_nnls')),
+        float,
+    )
+    amp_avg = np.asarray(
+        res['average'].get(meas_keys['avg_corr'], amp_avg_raw),
+        float,
+    )
+    thr_arr = np.asarray(res.get('threshold_amp1', []), float)
+    thr_arr = thr_arr[np.isfinite(thr_arr)]
+    thr_median = float(np.nanmedian(thr_arr)) if thr_arr.size else np.nan
+    ppr_avg = _protected_ppr(amp_avg, thr_median, PPR_NOISE_PROTECTION)
 
-# Per-trial figures
-figs_trials = res.get('figures_trials') or []
-for i, ftri in enumerate(figs_trials, 1):
-    try:
-        outp = os.path.join(OUT_DIR, f"{base}_trialfig_{i:02d}.png")
-        ftri.tight_layout()
-        ftri.savefig(outp, dpi=120)
-    except Exception as e:
-        print(f"[warn] Failed to save trial figure {i:02d}: {e}")
+    print("\n--- Results ---")
+    print(f"Amplitudes ({meas_keys['label']} uncorrected):", amp_avg_raw)
+    print(f"Amplitudes ({meas_keys['label']} corrected):", amp_avg)
+    print(f"PPR ({meas_keys['label']} corrected):", ppr_avg)
+    print("A1 thresholds:", res['threshold_amp1'])
+    print("PPR floor (median thr):", res.get('median_threshold_floor', 'N/A'))
+    print("A1 p-values:", res['pval_amp1'])
 
-# Parameter evolution figure
-fig_param = res.get('figure_param_evolution')
-if fig_param is not None:
-    try:
-        fig_param.savefig(os.path.join(OUT_DIR, f"{base}_param_evolution.png"), dpi=150)
-        print(f"[demo] Saved param evolution figure")
-    except Exception as e:
-        print(f"[demo] Error saving param evolution figure: {e}")
+    # --- Build summary row ---
+    row = {'measurement': meas_keys['label'], 'ID': base, 'NOISE_THR_MEDIAN': thr_median}
+    for i, v in enumerate(amp_avg, 1):
+        row[f'AMP{i}'] = float(v)
+    for i, v in enumerate(amp_avg_raw, 1):
+        row[f'AMP{i}_UNCORR'] = float(v)
+    for i in range(2, len(ppr_avg) + 1):
+        row[f'PPR{i}/1'] = float(ppr_avg[i - 1])
 
-try:
-    plt.show()
-except Exception as e:
-    print(f"[warn] plt.show() failed: {e}")
-plt.close('all')
+    # --- Per-trial A1 diagnostic table ---
+    print(f"\n{'='*60}")
+    print(f"  Per-trial A1 diagnostics ({len(res.get('per_trial', []))} trials)")
+    print(f"{'='*60}")
+    print(f"  {'Trial':>5}  {'A1 (corr)':>12}  {'Threshold':>12}  {'Status':>8}")
+    print(f"  {'-'*5}  {'-'*12}  {'-'*12}  {'-'*8}")
+    for _it, _rt in enumerate(res.get('per_trial', [])):
+        _a1_corr = np.asarray(_rt.get(meas_keys['trial_corr'], _rt.get(meas_keys['avg_corr'])), float)
+        _a1_uncorr = np.asarray(_rt.get(meas_keys['trial_uncorr'], _rt.get(meas_keys['avg_uncorr'])), float)
+        _a1v = float(_a1_corr[0]) if _a1_corr.size else np.nan
+        _a1_eval = _threshold_value(_a1_corr, _a1_uncorr, 0)
+        _thrv = float(_rt.get('thr_shared', np.nan))
+        _st = 'PASS' if (np.isfinite(_a1_eval) and np.isfinite(_thrv) and _a1_eval > _thrv) else 'FAIL'
+        print(f"  {_it+1:>5}  {_a1v:>12.6f}  {_thrv:>12.6f}  {_st:>8}")
+    _n_fail_diag = sum(1 for _rt in res.get('per_trial', [])
+                       if _threshold_value(
+                           np.asarray(_rt.get(meas_keys['trial_corr'], _rt.get(meas_keys['avg_corr'])), float),
+                           np.asarray(_rt.get(meas_keys['trial_uncorr'], _rt.get(meas_keys['avg_uncorr'])), float),
+                           0,
+                       )
+                       <= float(_rt.get('thr_shared', np.nan))
+                       and np.isfinite(float(_rt.get('thr_shared', np.nan))))
+    _n_total_diag = len(res.get('per_trial', []))
+    print(f"  -> Failures: {_n_fail_diag}/{_n_total_diag} = {100*_n_fail_diag/_n_total_diag:.1f}%" if _n_total_diag else "  -> No trials")
+    print(f"{'='*60}")
 
-print()
-print("=" * 60)
-print(f"  DONE: {base}")
-print(f"  Output: {OUT_DIR}")
-print("=" * 60)
+    # --- Per-trial failure counts ---
+    per_trial_rows, per_trial_null_rows, fail_counts = [], [], {i: [0, 0] for i in range(1, 4)}
+    for idx_trial, rtrial in enumerate(res.get('per_trial', [])):
+        amp_trial = np.asarray(rtrial.get(meas_keys['trial_corr'], rtrial.get(meas_keys['avg_corr'])), float)
+        amp_trial_uncorr = np.asarray(rtrial.get(meas_keys['trial_uncorr'], rtrial.get(meas_keys['avg_uncorr'])), float)
+        thr = float(rtrial.get('thr_shared', np.nan))
+        noise_level = float(rtrial.get('noise_level', np.nan))
+        baseline_null_mean_including_zero = float(rtrial.get('baseline_null_mean_including_zero', np.nan))
+        baseline_null_median_including_zero = float(rtrial.get('baseline_null_median_including_zero', np.nan))
+        baseline_null_mean_excluding_zero = float(rtrial.get('baseline_null_mean_excluding_zero', np.nan))
+        baseline_null_median_excluding_zero = float(rtrial.get('baseline_null_median_excluding_zero', np.nan))
+        null_amps_nnls = np.asarray(rtrial.get('null_amps_nnls', []), float)
+        null_amps_nnls = null_amps_nnls[np.isfinite(null_amps_nnls)]
+        a1 = _threshold_value(amp_trial, amp_trial_uncorr, 0)
+        status = 'NA'
+        if np.isfinite(a1) and np.isfinite(thr):
+            status = 'success' if a1 > thr else 'failure'
+        trial_row = {
+            'status': status,
+            'file': base,
+            'condition': CONDITION,
+            'trial': idx_trial + 1,
+            'trial_input_col_1based': int(rtrial.get('trial_input_col_1based', idx_trial + 1)),
+            'thr_shared': thr,
+            'noise_level': noise_level,
+            'baseline_null_mean_including_zero': baseline_null_mean_including_zero,
+            'baseline_null_median_including_zero': baseline_null_median_including_zero,
+            'baseline_null_mean_excluding_zero': baseline_null_mean_excluding_zero,
+            'baseline_null_median_excluding_zero': baseline_null_median_excluding_zero,
+        }
+        for p in range(1, int(DEFAULT_N_PULSES) + 1):
+            vc = float(amp_trial[p - 1]) if p <= amp_trial.size and np.isfinite(amp_trial[p - 1]) else np.nan
+            vu = (
+                float(amp_trial_uncorr[p - 1])
+                if p <= amp_trial_uncorr.size and np.isfinite(amp_trial_uncorr[p - 1])
+                else np.nan
+            )
+            trial_row[f'AMP{p}_CORR'] = vc
+            trial_row[f'AMP{p}_UNCORR'] = vu
+        # Backward-compatible legacy column: single-trial AMP1 should remain uncorrected.
+        trial_row['AMP1'] = trial_row.get('AMP1_UNCORR', np.nan)
+        per_trial_rows.append(trial_row)
+        per_trial_null_rows.append({
+            'condition': CONDITION,
+            'file': base,
+            'trial': idx_trial + 1,
+            'trial_input_col_1based': int(rtrial.get('trial_input_col_1based', idx_trial + 1)),
+            'status': status,
+            'nnls_null_n': int(null_amps_nnls.size),
+            'nnls_null_amps_json': json.dumps([float(v) for v in null_amps_nnls.tolist()]),
+        })
+        for p in range(1, min(3, amp_trial.size) + 1):
+            val = _threshold_value(amp_trial, amp_trial_uncorr, p - 1)
+            if np.isfinite(val) and np.isfinite(thr):
+                fail_counts[p][1] += 1
+                if val <= thr:
+                    fail_counts[p][0] += 1
+    for p in range(1, 4):
+        n_fail, n_valid = fail_counts[p]
+        if n_valid:
+            row[f'%Fail{p}'] = round((n_fail / n_valid) * 100.0, 2)
+
+    # --- Save to files ---
+    df_rows = pd.DataFrame([row])
+    ordered = ([f'AMP{i}' for i in range(1, 11)]
+               + [f'AMP{i}_UNCORR' for i in range(1, 11)]
+               + [f'PPR{i}/1' for i in range(2, 11)]
+               + [f'%Fail{i}' for i in range(1, 4)]
+               + ['NOISE_THR_MEDIAN'])
+    df_rows = _ensure_columns(df_rows, ['ID', *ordered, 'measurement'])
+
+    csv_out = os.path.join(OUT_DIR, f"{base}_summary.csv")
+    df_rows.to_csv(csv_out, index=False)
+    xl_out = os.path.splitext(csv_out)[0] + ".xlsx"
+    df_rows.to_excel(xl_out, index=False)
+    if per_trial_rows:
+        df_trials = pd.DataFrame(per_trial_rows)
+        trial_cols = (
+            [
+                'file', 'trial', 'trial_input_col_1based', 'status',
+                'thr_shared', 'noise_level',
+                'baseline_null_mean_including_zero', 'baseline_null_median_including_zero',
+                'baseline_null_mean_excluding_zero', 'baseline_null_median_excluding_zero',
+            ]
+            + [f'AMP{i}_CORR' for i in range(1, DEFAULT_N_PULSES + 1)]
+            + [f'AMP{i}_UNCORR' for i in range(1, DEFAULT_N_PULSES + 1)]
+            + ['AMP1']
+        )
+        df_trials = _ensure_columns(df_trials, trial_cols)
+        df_trials.to_excel(os.path.splitext(xl_out)[0] + "_trials.xlsx", index=False)
+    if per_trial_null_rows:
+        df_trials_null = pd.DataFrame(per_trial_null_rows)
+        null_cols = ['condition', 'file', 'trial', 'trial_input_col_1based', 'status', 'nnls_null_n', 'nnls_null_amps_json']
+        df_trials_null = _ensure_columns(df_trials_null, null_cols)
+        df_trials_null.to_excel(os.path.splitext(xl_out)[0] + "_trials_nnls_null.xlsx", index=False)
+
+    # =============================================================================
+    #                              PLOTTING
+    # =============================================================================
+
+    fig = res.get('figure')
+    if fig is not None:
+        try:
+            fig.savefig(os.path.join(OUT_DIR, f"{base}_plot.png"), dpi=150)
+        except Exception as e:
+            print(f"[warn] Failed to save main figure: {e}")
+
+    # Per-trial figures
+    figs_trials = res.get('figures_trials') or []
+    for i, ftri in enumerate(figs_trials, 1):
+        try:
+            outp = os.path.join(OUT_DIR, f"{base}_trialfig_{i:02d}.png")
+            ftri.tight_layout()
+            ftri.savefig(outp, dpi=120)
+        except Exception as e:
+            print(f"[warn] Failed to save trial figure {i:02d}: {e}")
+
+    # Parameter evolution figure
+    fig_param = res.get('figure_param_evolution')
+    if fig_param is not None:
+        try:
+            fig_param.savefig(os.path.join(OUT_DIR, f"{base}_param_evolution.png"), dpi=150)
+            print(f"[demo] Saved param evolution figure")
+        except Exception as e:
+            print(f"[demo] Error saving param evolution figure: {e}")
+
+    plt.close('all')
+
+    print()
+    print("=" * 60)
+    print(f"  DONE: {base}")
+    print(f"  Output: {OUT_DIR}")
+    print("=" * 60)
+
+# --- Final summary ---
+if len(_file_list) > 1:
+    print(f"\n{'='*60}")
+    print(f"  Processed {len(_file_list) - len(_errors)}/{len(_file_list)} files")
+    if _errors:
+        print(f"  Skipped ({len(_errors)}):")
+        for e in _errors:
+            print(f"    - {e}")
+    print(f"{'='*60}")

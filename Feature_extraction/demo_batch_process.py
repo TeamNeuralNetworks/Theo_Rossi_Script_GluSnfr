@@ -140,6 +140,7 @@ def _build_options_presets(peak_window_ms, pre_zoom_s, post_zoom_s):
             'huber_delta': 2.5,                                             # Huber loss delta for robust fitting (in std units); set to None to disable robust fitting
             'irls_iters': 20,                                               # Number of IRLS iterations for robust fitting ; only used if huber_delta is set
             'nnls_last_event_tail_tau_s': 'best',                           # Last event tail downweight tau (s); None=off, 'auto'=ISI, 'best'=search for optimal, or float
+            'nnls_two_pass_guard': False,                                    # If True, reject pass 2 when it worsens RMS; if False, always use pass 2 (smoothed fractions)
             
             # --- Time Windows (ISI-aware) ---
             'pre_zoom_s': pre_zoom_s,                                       # Pre-event snippet duration (s); controls how much data before each event is shown ; does not affect fitting

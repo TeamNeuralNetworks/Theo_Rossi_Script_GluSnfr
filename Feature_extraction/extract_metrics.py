@@ -1352,6 +1352,9 @@ def fit_amplitudes_sequential(
     event_t0_s: float = 0.0,
     jitter_variant_ms: Optional[np.ndarray] = None,
     peak_window_s: Optional[float] = None,
+    peak_weight: float = 1.0,
+    weight_mode: str = 'uniform',
+    weight_tau_s: Optional[float] = None,
     last_event_post_s: float = 0.200,
     last_event_tail_tau_s: Optional[float] = None,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, List[np.ndarray], Dict]:
@@ -1383,6 +1386,18 @@ def fit_amplitudes_sequential(
     jitter_s_arr = np.unique(jitter_s_arr)  # drop duplicates from clipping
     pw_s = peak_window_s if peak_window_s is not None else 0.010
     margin_s = 0.002  # 2 ms clearance before next stimulus
+
+    # Compute base weights using the same scheme as the simultaneous fit
+    base_weights = _calculate_nnls_weights(
+        t, stim_times, isi, weight_mode, weight_tau_s,
+        y_ref=y,
+        peak_window_s=peak_window_s,
+        peak_weight=peak_weight,
+    )
+    # Apply last-event tail downweighting to base weights
+    base_weights = _apply_last_event_tail_weights(
+        base_weights, t, stim_times, isi, last_event_tail_tau_s, pw_s
+    )
 
     a_events = np.zeros(n_events)
     d_events = np.zeros(n_events)
@@ -1419,22 +1434,8 @@ def fit_amplitudes_sequential(
 
         r_win = residual[win_mask]
 
-        # For the last event, apply exponential tail weighting so the peak
-        # dominates the fit and the long post-train tail doesn't cause overshoot.
-        w_win = np.ones_like(r_win)
-        is_last = (i_event == n_events - 1)
-        _tail_tau = last_event_tail_tau_s
-        if is_last and _tail_tau is not None:
-            if isinstance(_tail_tau, str):
-                _tail_tau = isi  # 'auto' or 'best' fallback
-            _tail_tau = float(_tail_tau)
-            if np.isfinite(_tail_tau) and _tail_tau > 0:
-                t_win = t[win_mask]
-                tail_onset = t_start + pw_s  # full weight during peak window
-                t_rel = t_win - tail_onset
-                decay = np.where(t_rel > 0, np.exp(-t_rel / _tail_tau), 1.0)
-                decay = np.maximum(decay, 0.01)
-                w_win = decay
+        # Use the pre-computed base weights (savgol / exponential / peak etc.)
+        w_win = base_weights[win_mask].copy()
 
         for i_ratio, frac_slow in enumerate(variant_ratios):
             for i_jitter, jitter_s in enumerate(jitter_s_arr):
@@ -4727,6 +4728,9 @@ def extract_metrics(
                 event_t0_s=event_t0_s,
                 jitter_variant_ms=jitter_variant_ms,
                 peak_window_s=peak_window_s,
+                peak_weight=peak_weight,
+                weight_mode=weight_mode,
+                weight_tau_s=weight_tau_s,
                 last_event_post_s=float(cfg.get('post_zoom_s', 0.200)),
                 last_event_tail_tau_s=cfg.get('nnls_last_event_tail_tau_s'),
             )
@@ -4986,17 +4990,13 @@ def extract_metrics(
                 rms_pass1 = np.sqrt(np.nanmean((y_avg[zmask_cmp] - yhat_avg[zmask_cmp])**2))
                 rms_pass2 = np.sqrt(np.nanmean((y_avg[zmask_cmp] - yhat_avg_p2[zmask_cmp])**2))
                 improvement = (rms_pass1 - rms_pass2) / rms_pass1 * 100 if rms_pass1 > 0 else 0
-                # Log two-pass summary
                 progress_print(f"[TWO-PASS] Slow-fraction smoothed ({dec_mode}): RMS change={improvement:+.1f}%")
-                if improvement < 0:
+                if bool(cfg.get('nnls_two_pass_guard', False)) and improvement < 0:
                     _accept_pass2 = False
                     progress_print(f"[TWO-PASS] Pass 2 worsened fit — keeping pass 1 result")
-            
+
             if _accept_pass2:
-                # Use pass 2 results (overwrite pass 1)
                 a_avg, d_avg, X_avg, yhat_avg, comp_avg = a_avg_p2, d_avg_p2, X_avg_p2, yhat_avg_p2, comp_avg_p2
-                
-                # Update variant_info
                 variant_info_avg = variant_info_p2
                 variant_info_avg['two_pass'] = True
                 variant_info_avg['raw_slow_fraction'] = np.asarray(dominant_ratios_pass1, float) if is_scalar_ratios else dominant_ratios_pass1
@@ -5246,9 +5246,31 @@ def extract_metrics(
                     # Omit 't_onset' and stack vertically; include amp at top for context
                     pairs = [(n, v) for n, v in zip(spec['params'], popt)]
                     pairs = [(n, v) for n, v in pairs if n != 't_onset']
-                    txt = "\n".join(f"{n}={v:.3g}" for n, v in pairs) + fit_suffix
-                    axL.text(0.98, 0.98, txt, transform=axL.transAxes, fontsize=8,
-                             va='top', ha='right', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+                    _pb = cfg.get('parameter_bounds', {}) or {}
+                    _lines = [f"{n}={v:.3g}" for n, v in pairs]
+                    _colors = []
+                    for n, v in pairs:
+                        _b = _pb.get(n)
+                        if _b and isinstance(_b, (tuple, list)) and len(_b) == 2:
+                            _lo, _hi = float(_b[0]), float(_b[1])
+                            if np.isfinite(_lo) and abs(v - _lo) < 1e-12 * max(1, abs(_lo)):
+                                _colors.append('blue')
+                            elif np.isfinite(_hi) and abs(v - _hi) < 1e-12 * max(1, abs(_hi)):
+                                _colors.append('red')
+                            else:
+                                _colors.append('black')
+                        else:
+                            _colors.append('black')
+                    if fit_suffix:
+                        _lines.append(fit_suffix.strip())
+                        _colors.append('black')
+                    _y0 = 0.98
+                    _dy = 0.065
+                    for _li, (_ltxt, _lcol) in enumerate(zip(_lines, _colors)):
+                        axL.text(0.98, _y0 - _li * _dy, _ltxt,
+                                 transform=axL.transAxes, fontsize=8, color=_lcol,
+                                 va='top', ha='right',
+                                 bbox=dict(boxstyle='round,pad=0.1', facecolor='white', alpha=0.8, lw=0))
                 except Exception:
                     pass
             except Exception:
