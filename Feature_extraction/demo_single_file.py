@@ -63,7 +63,6 @@ PRESET_NAME = 'iglusnfr_optimized'  # Options: 'iglusnfr_optimized', 'double_exp
 OVERRIDE_ISI = None         # e.g., 0.02 for 50Hz, 0.05 for 20Hz
 OVERRIDE_BASELINE = None    # e.g., 0.498 or 0.998
 OVERRIDE_N_PULSES = None    # e.g., 10
-PPR_NOISE_PROTECTION = True
 
 # =============================================================================
 #                         CONDITION LOOKUP TABLES
@@ -282,14 +281,6 @@ def _compute_ppr_from_amplitudes(amps) -> np.ndarray:
     return (arr / a1) if np.isfinite(a1) and abs(a1) > 1e-12 else arr * np.nan
 
 
-def _protected_ppr(amps, thr, enabled: bool) -> np.ndarray:
-    """Recompute PPR from corrected amplitudes, optionally clamped to noise."""
-    arr = np.asarray(amps, float).copy()
-    if enabled and np.isfinite(thr):
-        arr[np.isfinite(arr)] = np.maximum(arr[np.isfinite(arr)], float(thr))
-    return _compute_ppr_from_amplitudes(arr)
-
-
 def _threshold_value(corr_arr, uncorr_arr, idx: int) -> float:
     """Return the conservative amplitude used for failure calls."""
     vals = []
@@ -424,7 +415,7 @@ for _file_idx, TARGET_FILE in enumerate(_file_list):
     thr_arr = np.asarray(res.get('threshold_amp1', []), float)
     thr_arr = thr_arr[np.isfinite(thr_arr)]
     thr_median = float(np.nanmedian(thr_arr)) if thr_arr.size else np.nan
-    ppr_avg = _protected_ppr(amp_avg, thr_median, PPR_NOISE_PROTECTION)
+    ppr_avg = _compute_ppr_from_amplitudes(amp_avg)
 
     print("\n--- Results ---")
     print(f"Amplitudes ({meas_keys['label']} uncorrected):", amp_avg_raw)

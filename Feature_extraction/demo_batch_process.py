@@ -17,7 +17,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 
 # --- Data paths ---
 DATA_ROOT = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL"
-OUT_DIR = os.path.join(DATA_ROOT, "FINALOUT_CLEAN")
+OUT_DIR = os.path.join(DATA_ROOT, "FINALOUT_CLEAN_NNLS_FAILS")
 
 # --- Select conditions and files ---
 # If CONDITIONS_TO_RUN is empty/None, the script will process all conditions
@@ -35,7 +35,6 @@ OVERRIDE_N_PULSES = None  # e.g., 10
 # --- Plot output ---
 SAVE_PLOTS = True
 SHOW_PLOTS = False
-PPR_NOISE_PROTECTION = True
 
 # --- Parallel batch processing ---
 PARALLEL_FILES = True
@@ -126,9 +125,9 @@ def _build_options_presets(peak_window_ms, pre_zoom_s, post_zoom_s):
             'onset_baseline_threshold': 0.10,                               # Threshold (fraction of peak) for baseline_threshold onset detection
             
             # --- PPR Safety ---
-            'amplitude_floor_to_noise': True,                               # Floor all pulse amplitudes to the per-trial A1 threshold (thr1) before PPR; average uses median(thr1)
-            'average_amplitude_floor_to_noise': False,                       # Separate control for average trace floor; None => follow amplitude_floor_to_noise
-            'average_null_N': None,                                          # Separate null_N multiplier for average trace floor; None => follow null_N
+            'amplitude_floor_to_noise': False,                               # Floor all pulse amplitudes to the per-trial A1 threshold (thr1) before PPR; average uses median(thr1)
+            'average_amplitude_floor_to_noise': False,                      # Separate control for average trace floor; None => follow amplitude_floor_to_noise
+            'average_null_N': None,                                         # Separate null_N multiplier for average trace floor; None => follow null_N
             
             # --- NNLS Fitting ---
             'nnls_fit_mode': 'sequential',                                  # 'simultaneous' (all events jointly) or 'sequential' (greedy forward pass, resolves fast/superslow degeneracy)
@@ -154,7 +153,7 @@ def _build_options_presets(peak_window_ms, pre_zoom_s, post_zoom_s):
             
             # --- Thresholding ---
             'measurement': 'NNLS',                                          # 'NNLS', 'SAVGOL', 'RAW' ; amplitude series used for p-values/classification
-            'fail_method': 'SAVGOL',                                        # 'NNLS', 'SAVGOL', 'RAW' ; method used to build null/noise amplitudes for thresholding
+            'fail_method': 'NNLS',                                          # 'NNLS', 'SAVGOL', 'RAW' ; method used to build null/noise amplitudes for thresholding
             'threshold_mode': 'auto',                                       # 'auto', 'mad', 'sd' ; auto => mad for NNLS null, sd for SAVGOL/RAW null
             'null_N': 1.0,                                                  # Multiplier for null distribution to set threshold ; only used if threshold_mode is 'auto'
             'null_sim_max_points': 1000,                                    # Max points for null distribution simulation
@@ -269,14 +268,6 @@ def _compute_ppr_from_amplitudes(amps) -> np.ndarray:
         return arr
     a1 = float(arr[0])
     return (arr / a1) if np.isfinite(a1) and abs(a1) > 1e-12 else arr * np.nan
-
-
-def _protected_ppr(amps, thr, enabled: bool) -> np.ndarray:
-    """Recompute PPR from corrected amplitudes, optionally clamped to noise."""
-    arr = np.asarray(amps, float).copy()
-    if enabled and np.isfinite(thr):
-        arr[np.isfinite(arr)] = np.maximum(arr[np.isfinite(arr)], float(thr))
-    return _compute_ppr_from_amplitudes(arr)
 
 
 def _threshold_value(corr_arr, uncorr_arr, idx: int) -> float:
@@ -411,7 +402,7 @@ def _process_one_file(task: tuple[str, str], *, show_plots: bool) -> dict:
     thr_arr = np.asarray(res.get('threshold_amp1', []), float)
     thr_arr = thr_arr[np.isfinite(thr_arr)]
     thr_median = float(np.nanmedian(thr_arr)) if thr_arr.size else np.nan
-    ppr_avg = _protected_ppr(amp_avg, thr_median, PPR_NOISE_PROTECTION)
+    ppr_avg = _compute_ppr_from_amplitudes(amp_avg)
 
     print("\n--- Results ---")
     print(f"Amplitudes ({meas_keys['label']} uncorrected):", amp_avg_uncorr)
