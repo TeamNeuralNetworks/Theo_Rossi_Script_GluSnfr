@@ -35,12 +35,15 @@ DEFAULT_PARAM_GRID = {
     "estimator__min_samples_split": [2, 5, 10],
     "estimator__min_samples_leaf": [2, 5, 10]
 }
+DEFAULT_GRIDSEARCH_N_JOBS = -1
+DEFAULT_ESTIMATOR_N_JOBS = 1
 
 
 # -----------------------------------------------------------------------------
 # Internal helper functions
 # -----------------------------------------------------------------------------
-def _create_model(n_estimators=20, max_leaf_nodes=3, random_state=42):
+def _create_model(n_estimators=20, max_leaf_nodes=3, random_state=42,
+                  estimator_n_jobs=DEFAULT_ESTIMATOR_N_JOBS):
     """Create a OneVsRestClassifier wrapping RandomForestClassifier.
     
     Uses class_weight='balanced' to handle imbalanced classes by adjusting
@@ -50,17 +53,27 @@ def _create_model(n_estimators=20, max_leaf_nodes=3, random_state=42):
         n_estimators=n_estimators,
         max_leaf_nodes=max_leaf_nodes,
         random_state=random_state,
-        class_weight='balanced'  # Handle class imbalance
+        class_weight='balanced',  # Handle class imbalance
+        n_jobs=estimator_n_jobs
     )
-    return OneVsRestClassifier(base_rf)
+    return OneVsRestClassifier(base_rf, n_jobs=estimator_n_jobs)
 
 
-def _find_best_hyperparameters(model, param_grid, X_train, y_train, cv, verbose=True):
+def _find_best_hyperparameters(model, param_grid, X_train, y_train, cv,
+                               verbose=True, n_jobs=DEFAULT_GRIDSEARCH_N_JOBS):
     """Use GridSearchCV to find the best hyperparameters.
     
     Uses balanced_accuracy as scoring metric to handle class imbalance.
     """
-    grid = GridSearchCV(model, param_grid, n_jobs=1, cv=cv, scoring='balanced_accuracy')
+    grid = GridSearchCV(
+        model,
+        param_grid,
+        n_jobs=n_jobs,
+        cv=cv,
+        scoring='balanced_accuracy',
+        return_train_score=False,
+        pre_dispatch='2*n_jobs'
+    )
     grid.fit(X_train, y_train)
     
     if verbose:
@@ -72,7 +85,9 @@ def _find_best_hyperparameters(model, param_grid, X_train, y_train, cv, verbose=
 
 
 def _run_classification(X, y, n_splits, n_iter, param_grid, shuffle_labels=False, 
-                        random_state=42, verbose=True):
+                        random_state=42, verbose=True,
+                        gridsearch_n_jobs=DEFAULT_GRIDSEARCH_N_JOBS,
+                        estimator_n_jobs=DEFAULT_ESTIMATOR_N_JOBS):
     """Run classification with StratifiedKFold cross-validation.
     
     Uses balanced_accuracy_score to handle class imbalance (average of recall
@@ -92,11 +107,17 @@ def _run_classification(X, y, n_splits, n_iter, param_grid, shuffle_labels=False
             X_train, X_test = X.iloc[train], X.iloc[test]
             y_train, y_test = y.iloc[train], y.iloc[test]
             
-            model = _create_model(random_state=random_state)
-            modell, _ = _find_best_hyperparameters(model, param_grid, X_train, y_train, cv, verbose=verbose)
-            
+            model = _create_model(
+                random_state=random_state,
+                estimator_n_jobs=estimator_n_jobs
+            )
+            model_best, _ = _find_best_hyperparameters(
+                model, param_grid, X_train, y_train, cv,
+                verbose=verbose, n_jobs=gridsearch_n_jobs
+            )
+
             # Use balanced accuracy: average recall per class (handles imbalance)
-            y_pred = modell.predict(X_test)
+            y_pred = model_best.predict(X_test)
             test_score = balanced_accuracy_score(y_test, y_pred)
             test_score_all.append(test_score)
             
@@ -208,6 +229,8 @@ def random_forest_classification(df,
                                   param_grid=None,
                                   random_state=42,
                                   verbose=True,
+                                  gridsearch_n_jobs=DEFAULT_GRIDSEARCH_N_JOBS,
+                                  estimator_n_jobs=DEFAULT_ESTIMATOR_N_JOBS,
                                   save_path=None):
     """
     Train a Random Forest classifier on PCA-clustered data and generate confusion matrices.
@@ -245,6 +268,14 @@ def random_forest_classification(df,
     
     verbose : bool, optional
         If True, print progress information. Default: True
+
+    gridsearch_n_jobs : int, optional
+        Number of parallel jobs for GridSearchCV. Default: -1 (all cores).
+        This is the main speed-up control.
+
+    estimator_n_jobs : int, optional
+        Number of parallel jobs inside each RandomForest fit. Default: 1 to
+        avoid nested oversubscription when GridSearchCV already runs in parallel.
     
     save_path : str, optional
         If provided, save the figure to this path.
@@ -302,7 +333,9 @@ def random_forest_classification(df,
     
     cm_actual, scores_actual = _run_classification(
         X, y, n_splits, n_iter, param_grid, 
-        shuffle_labels=False, random_state=random_state, verbose=verbose
+        shuffle_labels=False, random_state=random_state, verbose=verbose,
+        gridsearch_n_jobs=gridsearch_n_jobs,
+        estimator_n_jobs=estimator_n_jobs
     )
     
     # Run classification with shuffled labels
@@ -313,7 +346,9 @@ def random_forest_classification(df,
     
     cm_shuffled, scores_shuffled = _run_classification(
         X, y, n_splits, n_iter, param_grid, 
-        shuffle_labels=True, random_state=random_state, verbose=verbose
+        shuffle_labels=True, random_state=random_state, verbose=verbose,
+        gridsearch_n_jobs=gridsearch_n_jobs,
+        estimator_n_jobs=estimator_n_jobs
     )
     
     # Compute summary statistics

@@ -1,0 +1,26 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python demo_single_file.py:*)",
+      "Bash(timeout 20 python:*)",
+      "Bash(timeout 25 python:*)",
+      "Bash(timeout 30 python:*)",
+      "Bash(python -c:*)",
+      "Bash(timeout 40 python:*)",
+      "Bash(timeout 45 python:*)",
+      "Bash(timeout 5 sleep:*)",
+      "Bash(python:*)",
+      "Bash(timeout 60 python:*)",
+      "Bash(ls -la \"c:\\\\Users\\\\Antoine.Valera\\\\Documents\\\\PYTHON\\\\Theo_Rossi_Script_GluSnfr\\\\docs\\\\figures\"\" 2>/dev/null || echo \"Directory not found or empty \")",
+      "Bash(python3:*)",
+      "Bash(ls -lah Demo_post_processing*)",
+      "Bash(grep -E \"\\\\.py$|util|helper|common\")",
+      "Read(//tmp/**)",
+      "Bash(rm _fix2_notebook.py)",
+      "Bash(rm _cell12.txt)",
+      "Bash(echo \"EXIT:$?\")"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
