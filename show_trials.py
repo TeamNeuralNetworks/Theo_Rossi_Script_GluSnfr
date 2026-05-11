@@ -22,6 +22,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from scipy.signal import savgol_filter
 
 from Feature_extraction.extract_metrics import apply_bleach_correction, fill_nans_timewise
 
@@ -154,6 +155,29 @@ def get_condition_isi(condition: str) -> float:
     return float(ISI_BY_CONDITION.get(condition, DEFAULT_ISI))
 
 
+def _apply_optional_savgol(trace_vals: np.ndarray, enabled: bool, window: int, poly: int) -> np.ndarray:
+    y = np.asarray(trace_vals, float).copy()
+    if not enabled:
+        return y
+    finite = np.isfinite(y)
+    if finite.sum() < max(3, poly + 2):
+        return y
+    win = int(window)
+    if win % 2 == 0:
+        win += 1
+    win = min(win, int(finite.sum()))
+    if win % 2 == 0:
+        win -= 1
+    if win <= poly:
+        win = poly + 1
+        if win % 2 == 0:
+            win += 1
+    if win > int(finite.sum()) or win < 3:
+        return y
+    y[finite] = savgol_filter(y[finite], window_length=win, polyorder=int(poly), mode="interp")
+    return y
+
+
 def preprocess_trials(
     time_s: np.ndarray,
     trials: np.ndarray,
@@ -210,6 +234,9 @@ def load_raw_trials_for_file(
     *,
     bleach: bool,
     normalize_dff: bool,
+    savgol: bool,
+    sg_window: int,
+    sg_poly: int,
 ) -> tuple[np.ndarray, dict[int, np.ndarray]]:
     xlsx_path = resolve_raw_recording_path(data_root, condition, file_stem)
     time_s, trials = load_trials_table(xlsx_path)
@@ -223,6 +250,9 @@ def load_raw_trials_for_file(
         bleach=bleach,
         normalize_dff=normalize_dff,
     )
+    if savgol:
+        for idx in range(processed_trials.shape[1]):
+            processed_trials[:, idx] = _apply_optional_savgol(processed_trials[:, idx], True, sg_window, sg_poly)
     aligned_time = np.asarray(time_s, float) - train_start + 1.0
     traces_by_trial = {
         int(idx + 1): np.asarray(processed_trials[:, idx], float)
@@ -245,6 +275,9 @@ def gather_classified_traces(
     *,
     bleach: bool,
     normalize_dff: bool,
+    savgol: bool,
+    sg_window: int,
+    sg_poly: int,
 ) -> dict[str, dict[str, object]]:
     per_class = defaultdict(list)
     cache: dict[tuple[str, str], tuple[np.ndarray, dict[int, np.ndarray]]] = {}
@@ -258,6 +291,9 @@ def gather_classified_traces(
                 key[1],
                 bleach=bleach,
                 normalize_dff=normalize_dff,
+                savgol=savgol,
+                sg_window=sg_window,
+                sg_poly=sg_poly,
             )
         aligned_time, traces_by_trial = cache[key]
 
@@ -310,6 +346,7 @@ def plot_class_overlay(
     class_payload: dict[str, object],
     *,
     xlim: tuple[float, float],
+    ylim: tuple[float, float] | None,
     alpha: float,
     line_width: float,
     mean_line_width: float,
@@ -332,6 +369,8 @@ def plot_class_overlay(
 
     ax.axhline(0, color="0.75", lw=0.8, ls=":")
     ax.set_xlim(xlim)
+    if ylim is not None:
+        ax.set_ylim(ylim)
     ax.set_xlabel("Aligned time (s)")
     ax.set_ylabel("dF/F")
     ax.set_title(f"A1 class: {label} (n={matrix.shape[0]} trials)")
@@ -357,6 +396,7 @@ def show_trial_overlays(
     conditions: list[str] | None = None,
     classes: list[str] | None = None,
     xlim: tuple[float, float] = (0.9, 1.2),
+    ylim: tuple[float, float] | None = None,
     q_mode: str = "median",
     q_value: float | None = None,
     max_quanta: int | None = None,
@@ -367,6 +407,10 @@ def show_trial_overlays(
     mean_line_width: float = 1.7,
     bleach: bool = True,
     normalize_dff: bool = True,
+    savgol: bool = False,
+    sg_window: int = 9,
+    sg_poly: int = 2,
+    plot_figures: bool = True,
 ) -> dict[str, dict[str, object]]:
     data_root = Path(data_root)
     summary_trials_path = Path(summary_trials_path)
@@ -388,31 +432,39 @@ def show_trial_overlays(
         xlim=xlim,
         bleach=bleach,
         normalize_dff=normalize_dff,
+        savgol=savgol,
+        sg_window=sg_window,
+        sg_poly=sg_poly,
     )
     ordered_labels = []
     if "failure" in payloads:
         ordered_labels.append("failure")
     ordered_labels.extend(sorted([label for label in payloads if label != "failure"], key=lambda s: (999 if not s.endswith("Q") else int(s[:-1]), s)))
 
-    for label in ordered_labels:
-        save_path = None
-        if save_dir is not None:
-            cond_tag = "_".join(list(conditions)) if len(conditions) <= 3 else "multi_condition"
-            save_name = f"show_trials__{cond_tag}__{label}.png"
-            save_path = save_dir / save_name
-        plot_class_overlay(
-            label,
-            payloads[label],
-            xlim=xlim,
-            alpha=alpha,
-            line_width=line_width,
-            mean_line_width=mean_line_width,
-            save_path=save_path,
-            show=show,
-        )
+    if plot_figures:
+        for label in ordered_labels:
+            save_path = None
+            if save_dir is not None:
+                cond_tag = "_".join(list(conditions)) if len(conditions) <= 3 else "multi_condition"
+                save_name = f"show_trials__{cond_tag}__{label}.png"
+                save_path = save_dir / save_name
+            plot_class_overlay(
+                label,
+                payloads[label],
+                xlim=xlim,
+                ylim=ylim,
+                alpha=alpha,
+                line_width=line_width,
+                mean_line_width=mean_line_width,
+                save_path=save_path,
+                show=show,
+            )
 
     print(f"Global_Q={global_q:.4f} ({'override' if q_value is not None else q_mode})")
-    print(f"preprocessing: bleach={bool(bleach)} normalize_dff={bool(normalize_dff)}")
+    print(
+        f"preprocessing: bleach={bool(bleach)} normalize_dff={bool(normalize_dff)} "
+        f"savgol={bool(savgol)}"
+    )
     for label in ordered_labels:
         print(f"{label}: {len(payloads[label]['items'])} trials")
     return payloads
@@ -425,6 +477,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--conditions", nargs="*", default=list(WT_2_5_20HZ_CONDITIONS))
     parser.add_argument("--classes", nargs="*", default=None, help="Subset of labels to plot, e.g. failure 1Q 2Q")
     parser.add_argument("--xlim", nargs=2, type=float, default=(0.9, 1.2))
+    parser.add_argument("--ylim", nargs=2, type=float, default=None)
     parser.add_argument("--q-mode", choices=("median", "mean"), default="median")
     parser.add_argument("--q-value", type=float, default=None)
     parser.add_argument("--max-quanta", type=int, default=None)
@@ -432,6 +485,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-show", action="store_true")
     parser.add_argument("--no-bleach", action="store_true")
     parser.add_argument("--no-dff", action="store_true")
+    parser.add_argument("--savgol", action="store_true")
+    parser.add_argument("--sg-window", type=int, default=9)
+    parser.add_argument("--sg-poly", type=int, default=2)
+    parser.add_argument("--no-plot-figures", action="store_true")
     return parser.parse_args()
 
 
@@ -443,6 +500,7 @@ def main() -> None:
         conditions=list(args.conditions),
         classes=args.classes,
         xlim=(float(args.xlim[0]), float(args.xlim[1])),
+        ylim=None if args.ylim is None else (float(args.ylim[0]), float(args.ylim[1])),
         q_mode=args.q_mode,
         q_value=args.q_value,
         max_quanta=args.max_quanta,
@@ -450,6 +508,10 @@ def main() -> None:
         show=not args.no_show,
         bleach=not args.no_bleach,
         normalize_dff=not args.no_dff,
+        savgol=bool(args.savgol),
+        sg_window=int(args.sg_window),
+        sg_poly=int(args.sg_poly),
+        plot_figures=not args.no_plot_figures,
     )
 
 
