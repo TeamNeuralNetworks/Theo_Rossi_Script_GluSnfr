@@ -1789,6 +1789,7 @@ def compute_localmax_corrected_amps(
     tau_d_vec_s: np.ndarray,
     *,
     event_t0_s: float = 0.0,
+    guide_y: Optional[np.ndarray] = None,
 ):
     """Local averaged max around each stimulus, removing earlier events.
 
@@ -1800,12 +1801,23 @@ def compute_localmax_corrected_amps(
     if y is None or t.size == 0 or np.size(y) == 0:
         return np.zeros(len(stim_times), float)
     y_resid = y.copy()
+    guide = None if guide_y is None or np.size(guide_y) == 0 else np.asarray(guide_y, float)
     amps = []
     event_t0_s = float(event_t0_s)
     for p, st in enumerate(stim_times):
         center = float(st) + event_t0_s
-        v = windowed_max(t, y_resid, [center], win_ms, int(n_avg), pre_ms)
-        amp_p = float(v[0]) if np.size(v) else 0.0
+        if guide is None:
+            v = windowed_max(t, y_resid, [center], win_ms, int(n_avg), pre_ms)
+            amp_p = float(v[0]) if np.size(v) else 0.0
+        else:
+            tp, _ = pick_peak_on_series(t, guide, float(st), win_ms, pre_ms)
+            idx = int(np.argmin(np.abs(t - tp))) if t.size else 0
+            n_use = max(1, int(n_avg))
+            half = n_use // 2
+            i0 = max(0, idx - half)
+            i1 = min(t.size, i0 + n_use)
+            i0 = max(0, i1 - n_use)
+            amp_p = float(np.nanmean(y_resid[i0:i1])) if i1 > i0 else 0.0
         amps.append(amp_p)
         if (
             d_vec is not None
@@ -5050,6 +5062,7 @@ def extract_metrics(
         tau_r,
         tau_d_vec,
         event_t0_s=event_t0_s,
+        guide_y=yhat_avg,
     )
     amp_sg_corr_avg = compute_peak_corrected_from_components(
         t, (y_sg_avg if y_sg_avg is not None else y_avg), stim_times, comp_avg, win_ms=win_ms, pre_ms=pre_ms
@@ -5878,7 +5891,7 @@ def extract_metrics(
         )
         amp_sg = compute_localmax_corrected_amps(
             t, yj_sg, stim_times, win_ms, n_avg, pre_ms, d_t, tau_r, tau_d_vec,
-            event_t0_s=event_t0_s,
+            event_t0_s=event_t0_s, guide_y=yhat_t,
         )
         amp_sg_corr = compute_peak_corrected_from_components(
             t, yj_sg, stim_times, comp_t, win_ms=win_ms, pre_ms=pre_ms
@@ -6044,6 +6057,7 @@ def extract_metrics(
             'trial_processed_index_1based': int(j + 1),
             'trial_input_col_0based': int(kept_trial_cols_0based[j]) if j < kept_trial_cols_0based.size else int(j),
             'trial_input_col_1based': int(kept_trial_cols_0based[j] + 1) if j < kept_trial_cols_0based.size else int(j + 1),
+            'F0': float(F0[j]) if j < F0.size and np.isfinite(F0[j]) else np.nan,
             'amp_raw': amp_raw,
             'amp_raw_corr': amp_raw_corr,
             'amp_savgol': amp_sg,

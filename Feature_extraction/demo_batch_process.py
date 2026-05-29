@@ -17,7 +17,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 
 # --- Data paths ---
 DATA_ROOT = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL"
-OUT_DIR = os.path.join(DATA_ROOT, "FINALOUT_CLEAN_NNLS_FAILS")
+OUT_DIR = os.path.join(DATA_ROOT, "FINALOUT_CLEAN_SAVGOL_FAILS_NEW_5")
 
 # --- Select conditions and files ---
 # If CONDITIONS_TO_RUN is empty/None, the script will process all conditions
@@ -148,12 +148,12 @@ def _build_options_presets(peak_window_ms, pre_zoom_s, post_zoom_s):
             
             # --- Peak Detection (ISI-aware) ---
             'peak_window_ms': peak_window_ms,                               # Peak detection window duration (ms) ; controls how peaks are identified within each event
-            'peak_avg_points': 1,                                           # Number of points to average around peak for amplitude measurement
+            'peak_avg_points': 5,                                           # Number of points to average around peak for amplitude measurement
             'pre_peak_ms': 1.0,                                             # Pre-peak baseline window (ms) ; controls how local baseline before each peak is computed ;
             
             # --- Thresholding ---
-            'measurement': 'NNLS',                                          # 'NNLS', 'SAVGOL', 'RAW' ; amplitude series used for p-values/classification
-            'fail_method': 'NNLS',                                          # 'NNLS', 'SAVGOL', 'RAW' ; method used to build null/noise amplitudes for thresholding
+            'measurement': 'SAVGOL',                                          # 'NNLS', 'SAVGOL', 'RAW' ; amplitude series used for p-values/classification
+            'fail_method': 'SAVGOL',                                          # 'NNLS', 'SAVGOL', 'RAW' ; method used to build null/noise amplitudes for thresholding
             'threshold_mode': 'auto',                                       # 'auto', 'mad', 'sd' ; auto => mad for NNLS null, sd for SAVGOL/RAW null
             'null_N': 1.0,                                                  # Multiplier for null distribution to set threshold ; only used if threshold_mode is 'auto'
             'null_sim_max_points': 1000,                                    # Max points for null distribution simulation
@@ -438,6 +438,7 @@ def _process_one_file(task: tuple[str, str], *, show_plots: bool) -> dict:
         baseline_null_median_including_zero = float(rtrial.get('baseline_null_median_including_zero', np.nan))
         baseline_null_mean_excluding_zero = float(rtrial.get('baseline_null_mean_excluding_zero', np.nan))
         baseline_null_median_excluding_zero = float(rtrial.get('baseline_null_median_excluding_zero', np.nan))
+        f0_value = float(rtrial.get('F0', np.nan))
         null_amps_nnls = np.asarray(rtrial.get('null_amps_nnls', []), float)
         null_amps_nnls = null_amps_nnls[np.isfinite(null_amps_nnls)]
         a1 = _threshold_value(amp_trial, amp_trial_uncorr, 0)
@@ -451,6 +452,7 @@ def _process_one_file(task: tuple[str, str], *, show_plots: bool) -> dict:
             'condition': condition,
             'trial': idx_trial + 1,
             'trial_input_col_1based': int(rtrial.get('trial_input_col_1based', idx_trial + 1)),
+            'F0': f0_value,
             'thr_shared': thr,
             'noise_level': noise_level,
             'baseline_null_mean_including_zero': baseline_null_mean_including_zero,
@@ -628,6 +630,7 @@ def run_batch():
             trial_cols = (
                 [
                     'condition', 'file', 'trial', 'trial_input_col_1based', 'status',
+                    'F0',
                     'thr_shared', 'noise_level',
                     'baseline_null_mean_including_zero', 'baseline_null_median_including_zero',
                     'baseline_null_mean_excluding_zero', 'baseline_null_median_excluding_zero',

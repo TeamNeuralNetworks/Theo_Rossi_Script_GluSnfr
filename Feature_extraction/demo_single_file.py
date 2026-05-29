@@ -471,6 +471,7 @@ for _file_idx, TARGET_FILE in enumerate(_file_list):
         baseline_null_median_including_zero = float(rtrial.get('baseline_null_median_including_zero', np.nan))
         baseline_null_mean_excluding_zero = float(rtrial.get('baseline_null_mean_excluding_zero', np.nan))
         baseline_null_median_excluding_zero = float(rtrial.get('baseline_null_median_excluding_zero', np.nan))
+        f0_value = float(rtrial.get('F0', np.nan))
         null_amps_nnls = np.asarray(rtrial.get('null_amps_nnls', []), float)
         null_amps_nnls = null_amps_nnls[np.isfinite(null_amps_nnls)]
         a1 = _threshold_value(amp_trial, amp_trial_uncorr, 0)
@@ -483,6 +484,7 @@ for _file_idx, TARGET_FILE in enumerate(_file_list):
             'condition': CONDITION,
             'trial': idx_trial + 1,
             'trial_input_col_1based': int(rtrial.get('trial_input_col_1based', idx_trial + 1)),
+            'F0': f0_value,
             'thr_shared': thr,
             'noise_level': noise_level,
             'baseline_null_mean_including_zero': baseline_null_mean_including_zero,
@@ -539,7 +541,7 @@ for _file_idx, TARGET_FILE in enumerate(_file_list):
         df_trials = pd.DataFrame(per_trial_rows)
         trial_cols = (
             [
-                'file', 'trial', 'trial_input_col_1based', 'status',
+                'file', 'trial', 'trial_input_col_1based', 'status', 'F0',
                 'thr_shared', 'noise_level',
                 'baseline_null_mean_including_zero', 'baseline_null_median_including_zero',
                 'baseline_null_mean_excluding_zero', 'baseline_null_median_excluding_zero',
