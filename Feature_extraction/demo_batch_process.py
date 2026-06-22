@@ -17,7 +17,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 
 # --- Data paths ---
 DATA_ROOT = r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL"
-OUT_DIR = os.path.join(DATA_ROOT, "FINALOUT_CLEAN_SAVGOL_FAILS_NEW_5")
+OUT_DIR = os.path.join(DATA_ROOT, "FINALOUT_CLEAN_SAVGOL_FAILS_W_FORSKOLIN")
 
 # --- Select conditions and files ---
 # If CONDITIONS_TO_RUN is empty/None, the script will process all conditions
@@ -57,6 +57,8 @@ ALL_CONDITIONS = [
     "WT_Theo_1scd",          # baseline 0.998
     "WT_Anthime",            # baseline 0.998
     "SynII",                 # baseline 0.998
+    "Forskolin_Before",      # baseline 0.498
+    "Forskolin_After",       # baseline 0.498
     # --- 50Hz conditions (ISI=0.02s) ---
     "Theo_1_5_50Hz",         # baseline 0.498
     "Theo_2_5_50Hz",         # baseline 0.498
@@ -79,6 +81,8 @@ BASELINE_BY_CONDITION = {
     "Theo_4Ca": 0.498,
     "Theo_1_5Ca": 0.498,
     "WT_Theo": 0.498,
+    "Forskolin_Before": 0.498,
+    "Forskolin_After": 0.498,
     "Theo_1_5_50Hz": 0.498,
     "Theo_2_5_50Hz": 0.498,
     "Theo_4_50Hz": 0.498,
@@ -148,7 +152,7 @@ def _build_options_presets(peak_window_ms, pre_zoom_s, post_zoom_s):
             
             # --- Peak Detection (ISI-aware) ---
             'peak_window_ms': peak_window_ms,                               # Peak detection window duration (ms) ; controls how peaks are identified within each event
-            'peak_avg_points': 5,                                           # Number of points to average around peak for amplitude measurement
+            'peak_avg_points': 1,                                           # Number of points to average around peak for amplitude measurement
             'pre_peak_ms': 1.0,                                             # Pre-peak baseline window (ms) ; controls how local baseline before each peak is computed ;
             
             # --- Thresholding ---
