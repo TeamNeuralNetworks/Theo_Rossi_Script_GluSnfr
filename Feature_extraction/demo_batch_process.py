@@ -17,7 +17,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 
 # --- Data paths ---
 DATA_ROOT = r"C:\Users\Antoine.Valera\Desktop\New folder\PPR_DATA_FINAL"
-OUT_DIR = os.path.join(DATA_ROOT, "FINALOUT_CLEAN_SAVGOL_FAILS_NEW_5")
+OUT_DIR = os.path.join(DATA_ROOT, "FINALOUT_CLEAN_SAVGOL_FAILS_NEW_3")
 
 # --- Select conditions and files ---
 # If CONDITIONS_TO_RUN is empty/None, the script will process all conditions
@@ -148,7 +148,7 @@ def _build_options_presets(peak_window_ms, pre_zoom_s, post_zoom_s):
             
             # --- Peak Detection (ISI-aware) ---
             'peak_window_ms': peak_window_ms,                               # Peak detection window duration (ms) ; controls how peaks are identified within each event
-            'peak_avg_points': 5,                                           # Number of points to average around peak for amplitude measurement
+            'peak_avg_points': 3,                                           # Number of points to average around peak for amplitude measurement
             'pre_peak_ms': 1.0,                                             # Pre-peak baseline window (ms) ; controls how local baseline before each peak is computed ;
             
             # --- Thresholding ---
@@ -544,6 +544,110 @@ def _process_one_file(task: tuple[str, str], *, show_plots: bool) -> dict:
 #                              RUN ANALYSIS
 # =============================================================================
 
+def _json_safe(obj):
+    """Recursively convert numpy/tuple/nan values into JSON-friendly forms."""
+    if isinstance(obj, dict):
+        return {str(k): _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_json_safe(v) for v in obj]
+    if isinstance(obj, np.ndarray):
+        return [_json_safe(v) for v in obj.tolist()]
+    if isinstance(obj, np.generic):
+        return _json_safe(obj.item())
+    if isinstance(obj, float):
+        if math.isnan(obj):
+            return "NaN"
+        if math.isinf(obj):
+            return "Infinity" if obj > 0 else "-Infinity"
+        return obj
+    if isinstance(obj, (int, str, bool)) or obj is None:
+        return obj
+    return str(obj)
+
+
+def _resolved_options_for_condition(condition):
+    """Reconstruct the exact options dict used for a condition (ISI-aware)."""
+    isi = OVERRIDE_ISI if OVERRIDE_ISI is not None else ISI_BY_CONDITION.get(condition, DEFAULT_ISI)
+    start = OVERRIDE_BASELINE if OVERRIDE_BASELINE is not None else BASELINE_BY_CONDITION.get(condition, DEFAULT_BASELINE)
+    n_pulses = OVERRIDE_N_PULSES if OVERRIDE_N_PULSES is not None else DEFAULT_N_PULSES
+    isi_ms = isi * 1000.0
+    margin_ms = 2.0
+    peak_window_ms = max(5.0, isi_ms - margin_ms)
+    post_zoom_s = 0.3
+    pre_zoom_s = 0.20
+    options = _build_options_presets(peak_window_ms, pre_zoom_s, post_zoom_s)[PRESET_NAME]
+    return {
+        'isi_s': isi, 'baseline_s': start, 'n_pulses': n_pulses,
+        'peak_window_ms': peak_window_ms, 'pre_zoom_s': pre_zoom_s, 'post_zoom_s': post_zoom_s,
+        'options': options,
+    }
+
+
+def _write_run_log(out_dir, conditions_run, tasks, failures):
+    """Write a reproducibility log (settings + environment + date) to out_dir."""
+    import datetime, platform, subprocess
+    try:
+        import importlib.metadata as _md
+    except Exception:
+        _md = None
+
+    git = {}
+    try:
+        repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        git['commit'] = subprocess.check_output(
+            ['git', '-C', repo, 'rev-parse', 'HEAD'], stderr=subprocess.DEVNULL).decode().strip()
+        dirty = subprocess.check_output(
+            ['git', '-C', repo, 'status', '--porcelain'], stderr=subprocess.DEVNULL).decode().strip()
+        git['dirty'] = bool(dirty)
+    except Exception as e:
+        git['error'] = str(e)
+
+    pkgs = {}
+    if _md is not None:
+        for p in ['numpy', 'scipy', 'pandas', 'matplotlib', 'seaborn',
+                  'scikit-learn', 'statsmodels', 'openpyxl']:
+            try:
+                pkgs[p] = _md.version(p)
+            except Exception:
+                pkgs[p] = None
+
+    log = {
+        'export_datetime': datetime.datetime.now().astimezone().isoformat(),
+        'script': os.path.basename(__file__),
+        'preset_name': PRESET_NAME,
+        'data_root': DATA_ROOT,
+        'out_dir': out_dir,
+        'conditions_run': list(conditions_run),
+        'file_glob': FILE_GLOB,
+        'n_files': len(tasks),
+        'files': [os.path.basename(p) for _, p in tasks],
+        'n_failures': len(failures),
+        'overrides': {
+            'OVERRIDE_ISI': OVERRIDE_ISI,
+            'OVERRIDE_BASELINE': OVERRIDE_BASELINE,
+            'OVERRIDE_N_PULSES': OVERRIDE_N_PULSES,
+        },
+        'condition_lookup': {
+            'DEFAULT_ISI': DEFAULT_ISI, 'DEFAULT_BASELINE': DEFAULT_BASELINE,
+            'DEFAULT_N_PULSES': DEFAULT_N_PULSES,
+            'ISI_BY_CONDITION': ISI_BY_CONDITION, 'BASELINE_BY_CONDITION': BASELINE_BY_CONDITION,
+        },
+        'resolved_options_by_condition': {
+            c: _resolved_options_for_condition(c) for c in conditions_run
+        },
+        'environment': {
+            'python': sys.version.split()[0],
+            'platform': platform.platform(),
+            'packages': pkgs,
+        },
+        'git': git,
+    }
+    path = os.path.join(out_dir, 'run_settings.json')
+    with open(path, 'w', encoding='utf-8') as f:
+        json.dump(_json_safe(log), f, indent=2, allow_nan=True)
+    print(f"[export] Saved run settings log to: {path}")
+
+
 def run_batch():
     conditions = CONDITIONS_TO_RUN or ALL_CONDITIONS
     os.makedirs(OUT_DIR, exist_ok=True)
@@ -679,6 +783,13 @@ def run_batch():
                     print(f"[export] Saved summary times to: {times_file}")
     else:
         print("[export] No files processed; no summary written.")
+
+    # --- Reproducibility log (settings + environment + export date) ---
+    try:
+        conditions_with_files = sorted(set(c for c, _ in tasks))
+        _write_run_log(OUT_DIR, conditions_with_files, tasks, failures)
+    except Exception as e:
+        print(f"[export] Failed to write run settings log: {e}")
 
 
 if __name__ == "__main__":

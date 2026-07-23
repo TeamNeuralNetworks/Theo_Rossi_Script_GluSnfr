@@ -173,7 +173,7 @@ def _build_options_presets(peak_window_ms, pre_zoom_s, post_zoom_s):
             
             # --- Peak Detection (ISI-aware) ---
             'peak_window_ms': peak_window_ms,                               # Peak detection window duration (ms) ; controls how peaks are identified within each event
-            'peak_avg_points': 1,                                           # Number of points to average around peak for amplitude measurement
+            'peak_avg_points': 3,                                           # Number of points to average around peak for amplitude measurement
             'pre_peak_ms': 1.0,                                             # Pre-peak baseline window (ms) ; controls how local baseline before each peak is computed ;
             
             # --- Thresholding ---
