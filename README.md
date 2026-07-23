@@ -2,6 +2,18 @@
 
 We describe a quantitative analysis pipeline for synaptic glutamate imaging with iGluSnFR, designed to recover the amplitudes of individual release events from fluorescence traces in which responses strongly overlap. The core of the approach is a non‑negative least squares (NNLS) fit of a bi‑exponential iGluSnFR template to short trains of stimuli delivered at 20–50 Hz, and the following sections present the processing stages and their associated figures in a methods‑style narrative.
 
+### Requirements and installation
+
+The pipeline requires **Python 3.11** and the packages listed in [`requirements.txt`](requirements.txt) (numpy, scipy, pandas, matplotlib, seaborn, scikit‑learn, statsmodels, statannotations, alphashape, shapely, openpyxl). It was tested in a clean conda environment:
+
+```bash
+conda create -n glusnfr python=3.11
+conda activate glusnfr
+pip install -r requirements.txt
+```
+
+Note that `numpy` is pinned to `<2`, as the code relies on `np.trapz` (removed in numpy 2.0).
+
 ### Experimental context and analysis goal
 
 In line‑scan or frame‑scan experiments, trains of 10 stimuli are delivered at frequencies up to 50 Hz. At these frequencies, individual iGluSnFR S72A responses do not return to baseline before the next stimulus, leading to severe temporal overlap between events. The aim of the pipeline is to estimate, for each pulse in the train, a physically meaningful event amplitude (ΔF/F0) and paired‑pulse ratios, while accounting for variable kinetics, photobleaching and measurement noise. Rather than independently fitting rise and decay parameters for every event—which is ill‑posed when responses overlap—the method constrains the temporal shape of events to a family of templates and uses NNLS to estimate a non‑negative contribution of each template to the observed trace.
