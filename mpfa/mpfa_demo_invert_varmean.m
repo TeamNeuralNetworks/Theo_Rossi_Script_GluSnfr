@@ -93,6 +93,12 @@ function out = mpfa_demo_invert_varmean(doPlot)
         out(c) = struct('label',labels{c},'P',P,'N',N,'PPR',PPR);
     end
 
+    % Six-condition figure layout: 20 Hz across the top row and 50 Hz across
+    % the bottom row, with calcium increasing left to right in both rows.
+    conditionOrder = [1 3 5 2 4 6];
+    D = D(conditionOrder);
+    out = out(conditionOrder);
+
     printScores(D);
 
     if doPlot
