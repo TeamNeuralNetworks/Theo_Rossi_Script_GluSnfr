@@ -14,7 +14,7 @@ if str(REPO_ROOT) not in sys.path:
 from Feature_extraction.extract_metrics import extract_metrics
 
 
-DATA_ROOT = Path(r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL")
+DATA_ROOT = Path(r"C:\Users\Antoine.Valera\Desktop\New folder\PPR_DATA_FINAL")
 PRESET_NAME = "iglusnfr_optimized"
 DEFAULT_CONDITION = "Theo_1_5Ca"
 DEFAULT_TARGET_FILE = "20200909_linescan1_20Hz_10pulses_1.5mMCa_bouton4_traces_converted.xlsx"

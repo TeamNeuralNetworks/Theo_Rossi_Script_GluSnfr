@@ -31,8 +31,8 @@ OUTPUT_DIR = os.path.join(REPO_ROOT, "docs", "figures")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # Example datasets
-EXAMPLE_20HZ = r"C:\Users\Antoine.Valera\Desktop\Testout\Stability_After\241212_Fibre2_PortionA_Bouton_6_bis.png"
-EXAMPLE_50HZ = r"C:\Users\Antoine.Valera\Desktop\Testout\Theo_2_5_50Hz\20201022_linescan1_50Hz_10pulses_2.5mMCa_bouton4_traces_converted.png"
+EXAMPLE_20HZ = r"C:\Users\Antoine.Valera\Desktop\New folder\PPR_DATA_FINAL\Stability_After\241212_Fibre2_PortionA_Bouton_6_bis.png"
+EXAMPLE_50HZ = r"C:\Users\Antoine.Valera\Desktop\New folder\PPR_DATA_FINAL\Theo_2_5_50Hz\20201022_linescan1_50Hz_10pulses_2.5mMCa_bouton4_traces_converted.png"
 
 
 def find_xlsx_file(png_path):
