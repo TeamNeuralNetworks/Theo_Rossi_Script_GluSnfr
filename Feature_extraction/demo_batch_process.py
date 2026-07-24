@@ -19,6 +19,19 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 DATA_ROOT = r"C:\Users\Antoine.Valera\Desktop\New folder\PPR_DATA_FINAL"
 OUT_DIR = os.path.join(DATA_ROOT, "FINALOUT_CLEAN_SAVGOL_FAILS_NEW_3")
 
+# Per-bouton manifest (metadata/boutons.csv). When present it is the authoritative
+# source of frequency / baseline / n_pulses; the lookup dicts below are a fallback.
+# Generate it with: python dataset_tools/build_manifest.py --data-root <DATA_ROOT>
+MANIFEST_PATH = os.path.join(DATA_ROOT, "metadata", "boutons.csv")
+
+# Clean, flat, Zenodo-ready output (the consolidated tidy tables land here).
+RELEASE_DIR = os.path.join(DATA_ROOT, "release")
+
+# The pipeline runs from the release layout: recordings in release/raw/<uid>.csv,
+# driven by the manifest release/boutons.csv (uid, condition, legacy_id, params).
+RAW_DIR = os.path.join(RELEASE_DIR, "raw")
+RELEASE_MANIFEST = os.path.join(RELEASE_DIR, "boutons.csv")
+
 # --- Select conditions and files ---
 # If CONDITIONS_TO_RUN is empty/None, the script will process all conditions
 CONDITIONS_TO_RUN = []  # e.g., ["Theo_4_50Hz"]
@@ -36,53 +49,59 @@ OVERRIDE_N_PULSES = None  # e.g., 10
 SAVE_PLOTS = True
 SHOW_PLOTS = False
 
+# --- Consolidated tidy output ---
+# When True, also write <OUT_DIR>/derived/{boutons,trials,null_amps,traces}.csv
+# (the Zenodo-ready tidy tables, merged with metadata/boutons.csv). The legacy
+# summary_* files are still written so an output-folder diff stays value-only.
+WRITE_TIDY = True
+
 # --- Parallel batch processing ---
 PARALLEL_FILES = True
 FILE_WORKERS = max(1, (os.cpu_count() or 1))
 
 # =============================================================================
-#                         CONDITION LOOKUP TABLES
+#                    MANIFEST (single source of truth)
 # =============================================================================
-# These define default ISI and baseline for each folder. Override above if needed.
-
-ALL_CONDITIONS = [
-    # --- 20Hz conditions (ISI=0.05s) ---
-    "Stability_Before",      # baseline 0.998
-    "Stability_After",       # baseline 0.998
-    "Stability_Before_05",   # baseline 0.498
-    "Stability_After_05",    # baseline 0.498
-    "Theo_4Ca",              # baseline 0.498
-    "Theo_1_5Ca",            # baseline 0.498
-    "WT_Theo",               # baseline 0.498
-    "WT_Theo_1scd",          # baseline 0.998
-    "WT_Anthime",            # baseline 0.998
-    "SynII",                 # baseline 0.998
-    # --- 50Hz conditions (ISI=0.02s) ---
-    "Theo_1_5_50Hz",         # baseline 0.498
-    "Theo_2_5_50Hz",         # baseline 0.498
-    "Theo_4_50Hz",           # baseline 0.498
-]
+# All experimental parameters come from the manifest (release/boutons.csv). These
+# defaults are only an ultimate fallback if a manifest row is missing a value.
 
 DEFAULT_ISI = 0.05       # 20Hz
 DEFAULT_BASELINE = 0.998
 DEFAULT_N_PULSES = 10
 
-ISI_BY_CONDITION = {
-    "Theo_1_5_50Hz": 0.02,
-    "Theo_2_5_50Hz": 0.02,
-    "Theo_4_50Hz": 0.02,
-}
 
-BASELINE_BY_CONDITION = {
-    "Stability_Before_05": 0.498,
-    "Stability_After_05": 0.498,
-    "Theo_4Ca": 0.498,
-    "Theo_1_5Ca": 0.498,
-    "WT_Theo": 0.498,
-    "Theo_1_5_50Hz": 0.498,
-    "Theo_2_5_50Hz": 0.498,
-    "Theo_4_50Hz": 0.498,
-}
+def _manifest_path():
+    return MANIFEST_PATH if os.path.exists(MANIFEST_PATH) else RELEASE_MANIFEST
+
+
+def _load_manifest_df():
+    """Load the manifest DataFrame (release/boutons.csv), or None if absent."""
+    path = _manifest_path()
+    if not os.path.exists(path):
+        return None
+    return pd.read_csv(path)
+
+
+# Cached (condition, legacy_id) -> (freq_hz, baseline_s, n_pulses) for per-file
+# parameter resolution (lazy, per-process so it survives the ProcessPoolExecutor).
+_MANIFEST = {"loaded": False, "map": {}}
+
+
+def _manifest_lookup():
+    if not _MANIFEST["loaded"]:
+        _MANIFEST["loaded"] = True
+        path = _manifest_path()
+        if os.path.exists(path):
+            try:
+                m = pd.read_csv(path)
+                _MANIFEST["map"] = {
+                    (str(r.condition), str(r.legacy_id)):
+                        (float(r.frequency_hz), float(r.baseline_s), int(r.n_pulses))
+                    for r in m.itertuples(index=False)
+                }
+            except Exception as e:
+                print(f"[warn] manifest load failed ({MANIFEST_PATH}): {e}")
+    return _MANIFEST["map"]
 
 # =============================================================================
 #                         ANALYSIS OPTIONS PRESETS
@@ -317,17 +336,30 @@ def _save_figure(fig, outpath: str, *, dpi=None, label: str = "figure") -> bool:
     print(f"[save] {label} -> {outpath}")
     return True
 
-def _process_one_file(task: tuple[str, str], *, show_plots: bool) -> dict:
-    condition, xlsx_path = task
+def _process_one_file(task: tuple, *, show_plots: bool) -> dict:
+    condition, xlsx_path, base = task
     try:
-        df = pd.read_excel(xlsx_path, sheet_name=0, engine="openpyxl")
+        if str(xlsx_path).lower().endswith(".csv"):
+            # Release layout: raw/<uid>.csv (time_s, then trial_*/average in order).
+            # float_precision='round_trip' is REQUIRED: the default C parser loses
+            # ~1 ULP, which flips discrete template-variant choices in the sequential
+            # NNLS for boundary boutons and perturbs amplitudes.
+            df = pd.read_csv(xlsx_path, float_precision="round_trip")
+            time_col = "time_s" if "time_s" in df.columns else df.columns[-1]
+            other_cols = [c for c in df.columns if c != time_col]
+            _time = pd.to_numeric(df[time_col], errors='coerce').to_numpy(float)
+            _all_before_time = df[other_cols].apply(pd.to_numeric, errors='coerce').to_numpy(float)
+        else:
+            df = pd.read_excel(xlsx_path, sheet_name=0, engine="openpyxl")
+            _time = pd.to_numeric(df.iloc[:, -1], errors='coerce').to_numpy(float)
+            _all_before_time = df.iloc[:, :-1].apply(pd.to_numeric, errors='coerce').to_numpy(float)
     except Exception as e:
-        return {'error': f"[skip] Failed to read Excel: {xlsx_path} -> {e}"}
+        return {'error': f"[skip] Failed to read {xlsx_path} -> {e}"}
 
-    _time = pd.to_numeric(df.iloc[:, -1], errors='coerce').to_numpy(float)
-    _all_before_time = df.iloc[:, :-1].apply(pd.to_numeric, errors='coerce').to_numpy(float)
-
-    # Auto-detect and skip the average column (penultimate = mean of preceding columns)
+    # Auto-detect and skip the average column (penultimate = mean of preceding columns).
+    # Applied identically to xlsx and csv so both paths select exactly the same trials,
+    # including quirky files where the correlation stays below 0.99 and the average
+    # column is (deliberately) kept as a trial.
     _has_avg_col = False
     if _all_before_time.shape[1] >= 2:
         _candidate_avg = _all_before_time[:, -1]
@@ -338,20 +370,36 @@ def _process_one_file(task: tuple[str, str], *, show_plots: bool) -> dict:
             _corr = np.corrcoef(_candidate_avg[_finite], _computed_avg[_finite])[0, 1]
             if not math.isnan(_corr) and _corr > 0.99:
                 _has_avg_col = True
-
-    if _has_avg_col:
-        _trials = _all_before_time[:, :-1]
-    else:
-        _trials = _all_before_time
+    _trials = _all_before_time[:, :-1] if _has_avg_col else _all_before_time
 
     valid = np.isfinite(_time)
     time = _time[valid]
     trials = _trials[valid, :]
 
-    # --- Resolve parameters (use overrides if set, otherwise lookup) ---
-    isi = OVERRIDE_ISI if OVERRIDE_ISI is not None else ISI_BY_CONDITION.get(condition, DEFAULT_ISI)
-    start = OVERRIDE_BASELINE if OVERRIDE_BASELINE is not None else BASELINE_BY_CONDITION.get(condition, DEFAULT_BASELINE)
-    n_pulses = OVERRIDE_N_PULSES if OVERRIDE_N_PULSES is not None else DEFAULT_N_PULSES
+    # --- Resolve parameters: manual override > manifest > condition lookup dict ---
+    man = _manifest_lookup().get((condition, base))
+    man_freq, man_baseline, man_npulses = man if man is not None else (None, None, None)
+
+    if OVERRIDE_ISI is not None:
+        isi = OVERRIDE_ISI
+    elif man_freq is not None:
+        isi = 1.0 / man_freq
+    else:
+        isi = DEFAULT_ISI
+
+    if OVERRIDE_BASELINE is not None:
+        start = OVERRIDE_BASELINE
+    elif man_baseline is not None:
+        start = man_baseline
+    else:
+        start = DEFAULT_BASELINE
+
+    if OVERRIDE_N_PULSES is not None:
+        n_pulses = OVERRIDE_N_PULSES
+    elif man_npulses is not None:
+        n_pulses = man_npulses
+    else:
+        n_pulses = DEFAULT_N_PULSES
 
     # --- Compute ISI-dependent parameters ---
     isi_ms = isi * 1000.0
@@ -375,7 +423,8 @@ def _process_one_file(task: tuple[str, str], *, show_plots: bool) -> dict:
     options_presets = _build_options_presets(peak_window_ms, pre_zoom_s, post_zoom_s)
     options = options_presets[PRESET_NAME]
 
-    base = os.path.splitext(os.path.basename(xlsx_path))[0]
+    # `base` (the legacy_id) is provided by the task so summary rows stay keyed by
+    # the original recording id even though raw files are named <uid>.csv.
     res = extract_metrics(
         time, trials,
         train_start=start,
@@ -566,10 +615,20 @@ def _json_safe(obj):
 
 
 def _resolved_options_for_condition(condition):
-    """Reconstruct the exact options dict used for a condition (ISI-aware)."""
-    isi = OVERRIDE_ISI if OVERRIDE_ISI is not None else ISI_BY_CONDITION.get(condition, DEFAULT_ISI)
-    start = OVERRIDE_BASELINE if OVERRIDE_BASELINE is not None else BASELINE_BY_CONDITION.get(condition, DEFAULT_BASELINE)
-    n_pulses = OVERRIDE_N_PULSES if OVERRIDE_N_PULSES is not None else DEFAULT_N_PULSES
+    """Reconstruct the exact options dict used for a condition (ISI-aware).
+
+    Parameters come from the manifest (any row of this condition shares the same
+    frequency / baseline / n_pulses), falling back to the defaults / overrides.
+    """
+    freq = base = npul = None
+    for (c, _legacy), (f, b, n) in _manifest_lookup().items():
+        if c == condition:
+            freq, base_val, npul = f, b, n
+            base = base_val
+            break
+    isi = OVERRIDE_ISI if OVERRIDE_ISI is not None else (1.0 / freq if freq else DEFAULT_ISI)
+    start = OVERRIDE_BASELINE if OVERRIDE_BASELINE is not None else (base if base is not None else DEFAULT_BASELINE)
+    n_pulses = OVERRIDE_N_PULSES if OVERRIDE_N_PULSES is not None else (npul if npul is not None else DEFAULT_N_PULSES)
     isi_ms = isi * 1000.0
     margin_ms = 2.0
     peak_window_ms = max(5.0, isi_ms - margin_ms)
@@ -620,7 +679,7 @@ def _write_run_log(out_dir, conditions_run, tasks, failures):
         'conditions_run': list(conditions_run),
         'file_glob': FILE_GLOB,
         'n_files': len(tasks),
-        'files': [os.path.basename(p) for _, p in tasks],
+        'files': [os.path.basename(t[1]) for t in tasks],
         'n_failures': len(failures),
         'overrides': {
             'OVERRIDE_ISI': OVERRIDE_ISI,
@@ -649,20 +708,28 @@ def _write_run_log(out_dir, conditions_run, tasks, failures):
 
 
 def run_batch():
-    conditions = CONDITIONS_TO_RUN or ALL_CONDITIONS
     os.makedirs(OUT_DIR, exist_ok=True)
+
+    man = _load_manifest_df()
+    if man is None:
+        print(f"[error] Manifest not found ({_manifest_path()}). "
+              f"Run dataset_tools/build_manifest.py or point to a release/ folder.")
+        return
+
+    rows = man
+    if CONDITIONS_TO_RUN:
+        rows = rows[rows["condition"].isin(CONDITIONS_TO_RUN)]
 
     tasks = []
     failures = []
-    for condition in conditions:
-        in_dir = os.path.join(DATA_ROOT, condition)
-        if not os.path.isdir(in_dir):
-            msg = f"[skip] Missing folder: {in_dir}"
+    for r in rows.itertuples(index=False):
+        raw_path = os.path.join(RAW_DIR, f"{r.uid}.csv")
+        if os.path.exists(raw_path):
+            tasks.append((str(r.condition), raw_path, str(r.legacy_id)))
+        else:
+            msg = f"[skip] Missing raw file: {raw_path}"
             print(msg)
             failures.append(msg)
-            continue
-        for xlsx_path in sorted(glob.glob(os.path.join(in_dir, FILE_GLOB))):
-            tasks.append((condition, xlsx_path))
 
     summary_rows = []
     per_trial_rows = []
@@ -786,10 +853,26 @@ def run_batch():
 
     # --- Reproducibility log (settings + environment + export date) ---
     try:
-        conditions_with_files = sorted(set(c for c, _ in tasks))
+        conditions_with_files = sorted(set(t[0] for t in tasks))
         _write_run_log(OUT_DIR, conditions_with_files, tasks, failures)
     except Exception as e:
         print(f"[export] Failed to write run settings log: {e}")
+
+    # --- Consolidated tidy tables (Zenodo-ready, flat) into RELEASE_DIR ---
+    if WRITE_TIDY:
+        try:
+            _tools = os.path.join(REPO_ROOT, "dataset_tools")
+            if _tools not in sys.path:
+                sys.path.insert(0, _tools)
+            from consolidate import consolidate
+            consolidate(OUT_DIR, _manifest_path(), RELEASE_DIR)
+            # keep the provenance log alongside the release tables
+            import shutil
+            _rs = os.path.join(OUT_DIR, "run_settings.json")
+            if os.path.exists(_rs):
+                shutil.copyfile(_rs, os.path.join(RELEASE_DIR, "run_settings.json"))
+        except Exception as e:
+            print(f"[export] Failed to write tidy tables: {e}")
 
 
 if __name__ == "__main__":

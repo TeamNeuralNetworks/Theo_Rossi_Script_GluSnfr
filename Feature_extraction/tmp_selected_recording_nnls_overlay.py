@@ -15,6 +15,8 @@ from Feature_extraction.extract_metrics import extract_metrics
 
 
 DATA_ROOT = Path(r"C:\Users\Antoine.Valera\Desktop\New folder\PPR_DATA_FINAL")
+RELEASE_DIR = DATA_ROOT / "release"
+MANIFEST = RELEASE_DIR / "boutons.csv"
 PRESET_NAME = "iglusnfr_optimized"
 DEFAULT_CONDITION = "Theo_1_5Ca"
 DEFAULT_TARGET_FILE = "20200909_linescan1_20Hz_10pulses_1.5mMCa_bouton4_traces_converted.xlsx"
@@ -82,7 +84,7 @@ def build_options_presets(peak_window_ms, pre_zoom_s, post_zoom_s):
             "post_zoom_s": post_zoom_s,
             "f0_window_s": 1.0,
             "peak_window_ms": peak_window_ms,
-            "peak_avg_points": 1,
+            "peak_avg_points": 3,
             "pre_peak_ms": 1.0,
             "measurement": "NNLS",
             "fail_method": "SAVGOL",
@@ -119,10 +121,43 @@ def build_options_presets(peak_window_ms, pre_zoom_s, post_zoom_s):
     }
 
 
-def load_trials_table(xlsx_path):
-    df = pd.read_excel(xlsx_path, sheet_name=0, engine="openpyxl")
-    time_raw = pd.to_numeric(df.iloc[:, -1], errors="coerce").to_numpy(float)
-    all_before_time = df.iloc[:, :-1].apply(pd.to_numeric, errors="coerce").to_numpy(float)
+def _strip_xlsx(name):
+    """Drop a trailing .xlsx only (NOT Path.stem, which mangles dotted ids like 2.5mMCa)."""
+    name = str(name)
+    return name[:-5] if name.lower().endswith(".xlsx") else name
+
+
+def resolve_raw(condition, target_file):
+    """Resolve a bouton to its release raw csv + params via the manifest.
+    Returns (raw_csv_path, freq_hz, baseline_s, n_pulses) or None."""
+    stem = _strip_xlsx(target_file)
+    try:
+        m = pd.read_csv(MANIFEST)
+    except Exception:
+        return None
+    norm = stem.replace("_traces_converted", "")
+    key = m["legacy_id"].astype(str).str.replace("_traces_converted", "", regex=False)
+    row = m[(m["condition"].astype(str) == str(condition)) & (key == norm)]
+    if not len(row):
+        return None
+    r = row.iloc[0]
+    return (RELEASE_DIR / "raw" / f"{r['uid']}.csv",
+            float(r["frequency_hz"]), float(r["baseline_s"]), int(r["n_pulses"]))
+
+
+def load_trials_table(path):
+    path = Path(path)
+    if path.suffix.lower() == ".csv":
+        # release layout: time_s, trial_*, average. round_trip avoids ULP drift.
+        df = pd.read_csv(path, float_precision="round_trip")
+        time_col = "time_s" if "time_s" in df.columns else df.columns[-1]
+        other_cols = [c for c in df.columns if c != time_col]
+        time_raw = pd.to_numeric(df[time_col], errors="coerce").to_numpy(float)
+        all_before_time = df[other_cols].apply(pd.to_numeric, errors="coerce").to_numpy(float)
+    else:
+        df = pd.read_excel(path, sheet_name=0, engine="openpyxl")
+        time_raw = pd.to_numeric(df.iloc[:, -1], errors="coerce").to_numpy(float)
+        all_before_time = df.iloc[:, :-1].apply(pd.to_numeric, errors="coerce").to_numpy(float)
 
     has_avg_col = False
     if all_before_time.shape[1] >= 2:
@@ -169,9 +204,15 @@ def main():
     trial_input_col_1based = int(args.trial_input_col_1based)
     out_file = Path(args.out_file) if args.out_file else default_out_file(condition, target_file, trial_input_col_1based)
 
-    isi = ISI_BY_CONDITION.get(condition, DEFAULT_ISI)
-    train_start = BASELINE_BY_CONDITION.get(condition, DEFAULT_BASELINE)
-    n_pulses = DEFAULT_N_PULSES
+    _rel = resolve_raw(condition, target_file)
+    if _rel is not None:
+        raw_path, _freq, train_start, n_pulses = _rel
+        isi = 1.0 / _freq
+    else:
+        raw_path = DATA_ROOT / condition / target_file
+        isi = ISI_BY_CONDITION.get(condition, DEFAULT_ISI)
+        train_start = BASELINE_BY_CONDITION.get(condition, DEFAULT_BASELINE)
+        n_pulses = DEFAULT_N_PULSES
 
     isi_ms = isi * 1000.0
     margin_ms = 2.0
@@ -181,9 +222,8 @@ def main():
 
     options = build_options_presets(peak_window_ms, pre_zoom_s, post_zoom_s)[PRESET_NAME]
 
-    xlsx_path = DATA_ROOT / condition / target_file
-    time_s, trials = load_trials_table(xlsx_path)
-    base = xlsx_path.stem
+    time_s, trials = load_trials_table(raw_path)
+    base = _strip_xlsx(target_file)
 
     res = extract_metrics(
         time_s,
