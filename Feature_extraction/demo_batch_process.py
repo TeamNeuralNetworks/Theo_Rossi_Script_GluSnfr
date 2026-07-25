@@ -8,7 +8,7 @@ Quick reference for options (see Model_Calibration/event_models.py for details):
   - nnls_weight_mode: 'uniform', 'linear', 'exponential', 'savgol', 'peak'
 """
 
-import os, sys, glob, json, math, numpy as np, pandas as pd
+import os, sys, glob, json, math, traceback, numpy as np, pandas as pd
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
@@ -132,8 +132,17 @@ def _build_options_presets(peak_window_ms, pre_zoom_s, post_zoom_s):
             'parameter_bounds': {
                 'tau_decay_fast': (0.003, 0.008),                           # fast decay bounds (s)
                 'tau_decay_slow': (0.008, 0.035),                           # slow decay bounds (s)
-                'tau_superslow': (0.035, 0.090),                            # superslow decay bounds (s) - only for tri-exponential
-                'amplitude_ratio': (0.0, 1.0),                              # amplitude ratio bounds (0 to 1) ; 0 means all fast, 1 means all slow
+                # NOTE: two entries were removed here because neither was ever read.
+                #  - 'tau_superslow' (0.035, 0.090): the parameter is called
+                #    'tau_decay_superslow', so this bound has never been in force.
+                #    Enabling it under the correct name DOES change results (on the
+                #    bundled validation trace AMP10 shifts by 5.6% of AMP1 and the
+                #    train R2 drops 0.998 -> 0.993), so it is left off to keep runs
+                #    comparable with the published dataset. Uncomment to apply it.
+                #  - 'amplitude_ratio' (0.0, 1.0): no registered model has a parameter
+                #    of that name. The tri-exponential mixing weights are 'frac_fast'
+                #    and 'frac_slow', and (0, 1) is their full range anyway.
+                # 'tau_decay_superslow': (0.035, 0.090),
             },
             'early_events_only': 0,                                         # Use only first N events for kinetics fitting (0 = all events)
             
@@ -618,6 +627,19 @@ def _json_safe(obj):
     return str(obj)
 
 
+def _relative_to_data_root(path):
+    """Express a path relative to DATA_ROOT, else fall back to its basename.
+
+    Keeps the run log portable: an absolute path would pin it to one machine
+    and leak the local directory layout.
+    """
+    try:
+        rel = os.path.relpath(path, DATA_ROOT)
+    except ValueError:  # different drive on Windows
+        return os.path.basename(path)
+    return os.path.basename(path) if rel.startswith(os.pardir) else rel
+
+
 def _resolved_options_for_condition(condition):
     """Reconstruct the exact options dict used for a condition (ISI-aware).
 
@@ -679,7 +701,7 @@ def _write_run_log(out_dir, conditions_run, tasks, failures):
         'script': os.path.basename(__file__),
         'preset_name': PRESET_NAME,
         'data_root': os.path.basename(os.path.normpath(DATA_ROOT)),
-        'out_dir': os.path.relpath(out_dir, DATA_ROOT),
+        'out_dir': _relative_to_data_root(out_dir),
         'conditions_run': list(conditions_run),
         'file_glob': FILE_GLOB,
         'n_files': len(tasks),
@@ -693,7 +715,11 @@ def _write_run_log(out_dir, conditions_run, tasks, failures):
         'condition_lookup': {
             'DEFAULT_ISI': DEFAULT_ISI, 'DEFAULT_BASELINE': DEFAULT_BASELINE,
             'DEFAULT_N_PULSES': DEFAULT_N_PULSES,
-            'ISI_BY_CONDITION': ISI_BY_CONDITION, 'BASELINE_BY_CONDITION': BASELINE_BY_CONDITION,
+            # Per-condition frequency/baseline/n_pulses come from the manifest,
+            # and the values actually used are in resolved_options_by_condition.
+            # Recorded relative to DATA_ROOT so the log stays portable and does
+            # not embed a local absolute path.
+            'manifest_path': _relative_to_data_root(MANIFEST_PATH),
         },
         'resolved_options_by_condition': {
             c: _resolved_options_for_condition(c) for c in conditions_run
@@ -860,7 +886,8 @@ def run_batch():
         conditions_with_files = sorted(set(t[0] for t in tasks))
         _write_run_log(OUT_DIR, conditions_with_files, tasks, failures)
     except Exception as e:
-        print(f"[export] Failed to write run settings log: {e}")
+        print(f"[export] Failed to write run settings log: {type(e).__name__}: {e}")
+        traceback.print_exc()
 
     # --- Consolidated tidy tables (Zenodo-ready, flat) into RELEASE_DIR ---
     if WRITE_TIDY:
