@@ -27,7 +27,10 @@ except Exception:  # pragma: no cover - allow running as script
 # =============================================================================
 
 # Data input settings
-DATA_ROOT = r"C:\Users\Antoine.Valera\Desktop\New folder\PPR_DATA_FINAL"
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+DATA_ROOT = os.path.abspath(os.environ.get(
+    "GLUSNFR_DATA_ROOT", os.path.join(REPO_ROOT, "PPR_DATA_FINAL")
+))
 DEFAULT_INPUT_DIR = os.path.join(DATA_ROOT, "WT_Anthime")  # Default data directory
 
 # Time windows and fitting parameters

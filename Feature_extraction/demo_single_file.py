@@ -11,12 +11,16 @@ Quick reference for options (see Model_Calibration/event_models.py for details):
 import os, sys, json, math, numpy as np, pandas as pd
 import matplotlib.pyplot as plt
 
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+
 # =============================================================================
 #                         USER CONFIGURATION - EDIT HERE
 # =============================================================================
 
 # --- Data paths ---
-DATA_ROOT = r"C:\Users\Antoine.Valera\Desktop\New folder\PPR_DATA_FINAL"
+DATA_ROOT = os.path.abspath(os.environ.get(
+    "GLUSNFR_DATA_ROOT", os.path.join(REPO_ROOT, "PPR_DATA_FINAL")
+))
 OUT_DIR = os.path.join(DATA_ROOT, "Testout")
 
 # --- File list: uncomment to process multiple files in one run ---

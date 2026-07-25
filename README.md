@@ -118,6 +118,23 @@ conda activate glusnfr
 pip install -r requirements.txt
 ```
 
+## Data location
+
+The analysis demos locate the dataset through the `GLUSNFR_DATA_ROOT`
+environment variable. Set it to the directory containing the extracted data:
+
+```powershell
+$env:GLUSNFR_DATA_ROOT = "C:\path\to\PPR_DATA_FINAL"
+```
+
+```bash
+export GLUSNFR_DATA_ROOT="/path/to/PPR_DATA_FINAL"
+```
+
+Alternatively, extract or copy the dataset to `PPR_DATA_FINAL/` at the
+repository root. Output and manifest paths are derived from that root, so the
+code does not require machine-specific path edits.
+
 To inspect the registered models:
 
 ```python

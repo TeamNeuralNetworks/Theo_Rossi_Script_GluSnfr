@@ -11,12 +11,16 @@ Quick reference for options (see Model_Calibration/event_models.py for details):
 import os, sys, glob, json, math, numpy as np, pandas as pd
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+
 # =============================================================================
 #                         USER CONFIGURATION - EDIT HERE
 # =============================================================================
 
 # --- Data paths ---
-DATA_ROOT = r"C:\Users\Antoine.Valera\Desktop\New folder\PPR_DATA_FINAL"
+DATA_ROOT = os.path.abspath(os.environ.get(
+    "GLUSNFR_DATA_ROOT", os.path.join(REPO_ROOT, "PPR_DATA_FINAL")
+))
 OUT_DIR = os.path.join(DATA_ROOT, "FINALOUT_CLEAN_SAVGOL_FAILS_NEW_3")
 
 # Per-bouton manifest (metadata/boutons.csv). When present it is the authoritative
@@ -674,8 +678,8 @@ def _write_run_log(out_dir, conditions_run, tasks, failures):
         'export_datetime': datetime.datetime.now().astimezone().isoformat(),
         'script': os.path.basename(__file__),
         'preset_name': PRESET_NAME,
-        'data_root': DATA_ROOT,
-        'out_dir': out_dir,
+        'data_root': os.path.basename(os.path.normpath(DATA_ROOT)),
+        'out_dir': os.path.relpath(out_dir, DATA_ROOT),
         'conditions_run': list(conditions_run),
         'file_glob': FILE_GLOB,
         'n_files': len(tasks),

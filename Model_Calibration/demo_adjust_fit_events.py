@@ -33,8 +33,10 @@ EVENT_INDEX = None  # Set to 0 for event 1, 2 for event 3, etc. Use None for all
 #        python demo_adjust_fit_events.py "C:\\path\\to\\folder"
 #  2. Set environment variable GLUSNFR_IN_DIR
 #        (Windows) set GLUSNFR_IN_DIR=C:\\path\\to\\folder
-#  3. Rely on the hard‑coded DEFAULT_IN_DIR below
-DATA_ROOT = r"C:\Users\Antoine.Valera\Desktop\New folder\PPR_DATA_FINAL"
+#  3. Set GLUSNFR_DATA_ROOT, or place PPR_DATA_FINAL in the repository root
+DATA_ROOT = os.path.abspath(os.environ.get(
+    "GLUSNFR_DATA_ROOT", os.path.join(REPO_ROOT, "PPR_DATA_FINAL")
+))
 DEFAULT_IN_DIR = os.path.join(DATA_ROOT, "Theo_1_5Ca")
 
 def _resolve_input_dir_from_argv(argv) -> str | None:
