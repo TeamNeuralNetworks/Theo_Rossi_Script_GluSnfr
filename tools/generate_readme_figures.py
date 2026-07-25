@@ -9,7 +9,7 @@ This script processes example datasets and creates visual examples of:
 5. Final amplitude extraction
 
 Usage:
-    python generate_readme_figures.py
+    python tools/generate_readme_figures.py
 """
 
 import os
@@ -19,8 +19,8 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
 
-# Ensure repo root is on sys.path
-REPO_ROOT = os.path.abspath(os.path.dirname(__file__))
+# Ensure repo root is on sys.path (this script lives in tools/)
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 

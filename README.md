@@ -99,11 +99,14 @@ docs/
   model_fitting/         Fitting-model gallery
   nnls_lecture/          NNLS/sequential-decomposition lecture
 Support_figure.ipynb     Paper-support analysis notebook
+paper_support/           Helper modules for Support_figure.ipynb (random-forest, PCA plotting)
+smoothing.py             Shared signal-processing helpers used across the packages
 dataset_tools/           Dataset organization and conversion utilities
 extract_metrics_gui/     CSV-based interface to extract_metrics
+tools/                   Maintenance scripts (e.g. README figure generation)
 ```
 
-The last two directories contain supporting utilities and are not required for direct programmatic use of the model library or `extract_metrics`.
+The `dataset_tools/`, `extract_metrics_gui/`, `paper_support/`, and `tools/` directories contain supporting utilities and are not required for direct programmatic use of the model library or `extract_metrics`.
 
 ## Installation
 

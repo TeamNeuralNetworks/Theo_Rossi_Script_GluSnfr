@@ -25,7 +25,7 @@ Guidelines for agents working in this repository. The goal is to produce focused
 ## Documentation & Demos
 
 - Reuse existing code snippets from demo scripts and docs when authoring guides.
-- Point users to `PROCESSING_README.md`, `USAGE_GUIDE.md`, and demo files for end‑to‑end workflows.
+- Point users to `README.md`, `Feature_extraction/README_extract_metrics.md`, and the demo files in `Feature_extraction/` for end‑to‑end workflows.
 
 ## Communication
 
