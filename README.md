@@ -22,6 +22,8 @@ Théo Rossi¹, Anthime Perrot¹, Aline Huber¹, Bernard Poulain¹, Frédéric Do
 
 The repository contains analysis code and supporting material used to study bouton-to-bouton diversity in glutamate release and short-term plasticity along individual cerebellar parallel fibers.
 
+The associated dataset is available through the [Zenodo preview record](https://zenodo.org/records/21554049?preview=1&token=eyJhbGciOiJIUzUxMiIsImlhdCI6MTc4NDk3OTIzMywiZXhwIjoxNzk4NzYxNTk5fQ.eyJpZCI6IjE1YjQxOTkxLWNjYWItNGYxYi1iMWJkLWM3YWY3NGVhYTAwOSIsImRhdGEiOnt9LCJyYW5kb20iOiJmZWNjZGU3ODAxMTRkZGE2YzQ5YTViYTExYzllNGE1NCJ9.i04CNJeKI5esuCIyY0Xg3bk-u2W-f_sWcAxJZno5oIICfJKwi2KY2ZIfmKCOhSKKGUGvk8QoXaN-kwyueDRwGA).
+
 ## What is in the repository?
 
 ### 1. Event-fitting model library
