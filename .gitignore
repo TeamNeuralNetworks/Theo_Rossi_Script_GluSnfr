@@ -2,3 +2,4 @@
 *.png
 __pycache__/
 _tmp_*.npz
+extract_metrics_gui/validation_output/
