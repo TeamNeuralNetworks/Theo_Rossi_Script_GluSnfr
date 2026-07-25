@@ -6799,6 +6799,42 @@ def extract_metrics(
             progress_print(f"[warning] Failed to create param evolution figure: {e}")
             figure_param_evolution = None
 
+    model_time_s = np.asarray(t, float)
+    model_yhat_avg = np.asarray(yhat_avg, float)
+    model_oversample = max(1, int(cfg.get('recut_oversample', 1)))
+    if (
+        model_oversample > 1
+        and t.size > 1
+        and variant_info_avg is None
+        and np.asarray(X_avg).ndim == 2
+        and np.asarray(X_avg).shape[1] == len(stim_times)
+    ):
+        model_time_s = np.linspace(
+            float(t[0]),
+            float(t[-1]),
+            (t.size - 1) * model_oversample + 1,
+        )
+        model_yhat_avg = np.zeros_like(model_time_s)
+        for pulse_idx, stim_time in enumerate(stim_times):
+            anchor = float(stim_time) + float(event_t0_s) + float(d_avg[pulse_idx])
+            kernel_dense = _KERNEL_FUN(
+                model_time_s - anchor,
+                float(tau_r),
+                float(tau_d_vec[pulse_idx]),
+            )
+            # Some kernels normalize on their evaluation grid. Match each dense
+            # kernel to the original NNLS design column so oversampling changes
+            # display resolution, not the fitted amplitude.
+            kernel_at_samples = np.interp(t, model_time_s, kernel_dense)
+            design_column = np.asarray(X_avg[:, pulse_idx], float)
+            denom = float(np.dot(kernel_at_samples, kernel_at_samples))
+            scale = (
+                float(np.dot(design_column, kernel_at_samples)) / denom
+                if denom > 0.0
+                else 1.0
+            )
+            model_yhat_avg += float(a_avg[pulse_idx]) * scale * kernel_dense
+
     return {
         'tau_r_s': float(tau_r),
         'tau_d_s': np.asarray(tau_d_vec, float),
@@ -6819,6 +6855,8 @@ def extract_metrics(
             'ppr_nnls_corr': np.asarray(ppr_nnls_corr_avg, float),
             'y_avg': np.asarray(y_avg, float),
             'yhat_avg': np.asarray(yhat_avg, float),
+            'model_time_s': model_time_s,
+            'yhat_avg_oversampled': model_yhat_avg,
         },
         'recut_snippets': recut_snippets,
         'recut_t_rel': np.asarray(recut_t_rel, float) if recut_t_rel is not None else None,
