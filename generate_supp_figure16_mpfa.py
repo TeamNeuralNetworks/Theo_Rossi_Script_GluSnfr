@@ -6,18 +6,35 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from matplotlib.lines import Line2D
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 
 
-BASE_DIR = Path(r"C:\Users\Antoine.Valera\Desktop\PPR_DATA_FINAL")
-OUTPUT_DIR = BASE_DIR / "output"
+# When called through ``%run`` from Support_figure.ipynb, inherit the
+# notebook's current archive paths rather than restoring an obsolete location.
+BASE_DIR = Path(globals().get(
+    "BASE_DIR",
+    r"C:\Users\Antoine.Valera\Desktop\SORTED\11_Data_Archives\Analysis_Legacy\PPR_DATA_FINAL",
+))
+OUTPUT_DIR = Path(globals().get("OUTPUT_DIR", BASE_DIR / "output"))
 MIN_TRIALS = 5
 N_BOOT = 1200
 MLE_CAP = 20
 QUANTAL_Q = 0.48
 SEED = 16016
 CALCIUM_COLORS = {"1.5 mM": "#3690d8", "2.5 mM": "#555555", "4 mM": "#d83a3a"}
+# MATLAB ``lines`` defaults, assigned in the legend order Q, N, then P.
+MPFA_REFERENCE_COLORS = {"Q": "#0072BD", "N": "#D95319", "P": "#EDB120"}
+# Shared reference for the common-scale six-panel and pooled figures.  Change
+# these two values together to select a different reference condition.
+COMMON_REFERENCE_FREQUENCY = 20
+COMMON_REFERENCE_CALCIUM = "2.5 mM"
+COMMON_REFERENCE_LABEL = f"{COMMON_REFERENCE_CALCIUM}, {COMMON_REFERENCE_FREQUENCY} Hz A1"
+COMMON_REFERENCE_FILE_TAG = (
+    f"{COMMON_REFERENCE_CALCIUM.split()[0].replace('.', 'p')}mM_"
+    f"{COMMON_REFERENCE_FREQUENCY}Hz_A1"
+)
 CONDITIONS = {
     (20, "1.5 mM"): ["Theo_1_5Ca"],
     (20, "2.5 mM"): ["WT_Theo", "WT_Theo_1scd", "WT_Anthime", "Stability_Before", "Stability_Before_05"],
@@ -480,9 +497,12 @@ def run():
 
     summary = pd.DataFrame(summary_rows)
     mle_all = pd.concat(mle_tables, ignore_index=True)
-    y_max = max(220.0, float(summary["Fano_percent_CI_high"].max()) * 1.08)
+    # Shared limits are defined by the largest visible mean + SEM error bar,
+    # rather than by the wider bootstrap confidence intervals.
+    x_max = float((summary["Mean_percent_A1"] + summary["Mean_percent_SEM"]).max())
+    y_max = float((summary["Fano_percent_A1"] + summary["Fano_percent_SEM"]).max())
 
-    figure, axes = plt.subplots(2, 3, figsize=(13.2, 8.4), sharey=True, facecolor="white")
+    figure, axes = plt.subplots(2, 3, figsize=(13.2, 8.4), sharex=True, sharey=True, facecolor="white")
     figure.patch.set_facecolor("white")
     event_colors = plt.cm.viridis(np.linspace(0.05, 0.92, 10))
     for row_index, frequency in enumerate((20, 50)):
@@ -492,17 +512,16 @@ def run():
                 (summary["Frequency_Hz"] == frequency) & (summary["Calcium"] == calcium)
             ].sort_values("Event")
             p1 = float(condition_rows["Median_MLE_P_A1_excluding_cap20"].iloc[0])
-            panel_x_max = max(160.0, float(condition_rows["Mean_percent_CI_high"].max()) * 1.05)
-            line_x, q_line, n_line, p_line = expected_lines(p1, panel_x_max)
-            ax.plot(line_x, q_line, color="0.72", lw=1.35, ls="-", label="Q change")
-            ax.plot(line_x, n_line, color="0.48", lw=1.35, ls="-", label="N change")
-            ax.plot(line_x, p_line, color="0.15", lw=1.45, ls="-", label="P change")
+            line_x, q_line, n_line, p_line = expected_lines(p1, x_max)
+            ax.plot(line_x, q_line, color=MPFA_REFERENCE_COLORS["Q"], lw=1.35, ls="-", label="Q change")
+            ax.plot(line_x, n_line, color=MPFA_REFERENCE_COLORS["N"], lw=1.35, ls="-", label="N change")
+            ax.plot(line_x, p_line, color=MPFA_REFERENCE_COLORS["P"], lw=1.45, ls="-", label="P change")
 
             x = condition_rows["Mean_percent_A1"].to_numpy(dtype=float)
             y = condition_rows["Fano_percent_A1"].to_numpy(dtype=float)
             x_sem = condition_rows["Mean_percent_SEM"].to_numpy(dtype=float)
             y_sem = condition_rows["Fano_percent_SEM"].to_numpy(dtype=float)
-            ax.plot(x, y, color=CALCIUM_COLORS[calcium], lw=1.25, alpha=0.75, zorder=3)
+            ax.plot(x, y, color="#404040", lw=1.25, alpha=0.75, zorder=3)
             for event in range(1, 11):
                 index = event - 1
                 marker = "D" if event == 1 else ("s" if event == 2 else "o")
@@ -519,7 +538,7 @@ def run():
             n_boutons = int(condition_rows["Boutons"].iloc[0])
             n_fibers = int(condition_rows["Fibers"].iloc[0])
             ax.set_title(f"{frequency} Hz — {calcium} Ca²⁺\n{n_boutons} boutons, {n_fibers} fibers; A1 P̂={p1:.2f}", fontsize=9.5)
-            ax.set_xlim(0, panel_x_max)
+            ax.set_xlim(0, x_max)
             ax.set_ylim(0, y_max)
             ax.spines["top"].set_visible(False)
             ax.spines["right"].set_visible(False)
@@ -530,6 +549,7 @@ def run():
                 ax.set_ylabel("Variance / mean (% of A1)")
             if row_index == 0 and column_index == 0:
                 ax.legend(frameon=False, fontsize=7, loc="upper right")
+
 
     figure.suptitle(
         "Fig. S16 — A1-normalized Fano–mean trajectories from A1 to A10",
@@ -542,6 +562,301 @@ def run():
     png = OUTPUT_DIR / "FigS16_paired_calcium_MPFA.png"
     figure.savefig(pdf, dpi=300, bbox_inches="tight", facecolor="white", transparent=False)
     figure.savefig(png, dpi=220, bbox_inches="tight", facecolor="white", transparent=False)
+    plt.show()
+
+    # Companion figure: use the same low-variance A1 reference for every
+    # condition, so positions can be compared directly across all panels.
+    reference_rows = summary[
+        (summary["Frequency_Hz"] == COMMON_REFERENCE_FREQUENCY)
+        & (summary["Calcium"] == COMMON_REFERENCE_CALCIUM)
+        & (summary["Event"] == 1)
+    ]
+    if len(reference_rows) != 1:
+        raise ValueError(f"Expected exactly one {COMMON_REFERENCE_LABEL} normalization reference.")
+    reference_row = reference_rows.iloc[0]
+    reference_mean_a1 = float(reference_row["Bouton_mean_average"])
+    reference_fano_a1 = float(reference_row["Fano_of_bouton_averages"])
+    if reference_mean_a1 <= 0 or reference_fano_a1 <= 0:
+        raise ValueError(f"The {COMMON_REFERENCE_LABEL} reference must have positive mean and Fano values.")
+
+    reference_normalized = {}
+    reference_x_max = 0.0
+    reference_y_max = 0.0
+    for frequency in (20, 50):
+        for calcium in calcium_order:
+            condition_rows = summary[
+                (summary["Frequency_Hz"] == frequency) & (summary["Calcium"] == calcium)
+            ].sort_values("Event")
+            own_mean_a1 = float(condition_rows["Bouton_mean_average"].iloc[0])
+            own_fano_a1 = float(condition_rows["Fano_of_bouton_averages"].iloc[0])
+            x = 100.0 * condition_rows["Bouton_mean_average"].to_numpy(dtype=float) / reference_mean_a1
+            y = 100.0 * condition_rows["Fano_of_bouton_averages"].to_numpy(dtype=float) / reference_fano_a1
+            x_sem = (condition_rows["Mean_percent_SEM"].to_numpy(dtype=float)
+                     * own_mean_a1 / reference_mean_a1)
+            y_sem = (condition_rows["Fano_percent_SEM"].to_numpy(dtype=float)
+                     * own_fano_a1 / reference_fano_a1)
+            reference_normalized[(frequency, calcium)] = (condition_rows, x, y, x_sem, y_sem)
+            reference_x_max = max(reference_x_max, float(np.nanmax(x + x_sem)))
+            reference_y_max = max(reference_y_max, float(np.nanmax(y + y_sem)))
+
+    reference_figure, reference_axes = plt.subplots(
+        2, 3, figsize=(13.2, 8.4), sharex=True, sharey=True, facecolor="white"
+    )
+    reference_figure.patch.set_facecolor("white")
+    for row_index, frequency in enumerate((20, 50)):
+        for column_index, calcium in enumerate(calcium_order):
+            ax = reference_axes[row_index, column_index]
+            condition_rows, x, y, x_sem, y_sem = reference_normalized[(frequency, calcium)]
+            p1 = float(condition_rows["Median_MLE_P_A1_excluding_cap20"].iloc[0])
+            # The mechanism guides are transformed from each condition's A1
+            # origin into the selected common-reference coordinate system.
+            line_x = np.linspace(0, reference_x_max, 400)
+            q_line = y[0] * line_x / x[0]
+            n_line = np.full_like(line_x, y[0])
+            if np.isfinite(p1) and 0 < p1 < 1:
+                p_line = y[0] * (1.0 - p1 * line_x / x[0]) / (1.0 - p1)
+                p_line[p_line < 0] = np.nan
+            else:
+                p_line = np.full_like(line_x, np.nan)
+            ax.plot(line_x, q_line, color=MPFA_REFERENCE_COLORS["Q"], lw=1.35, label="Q change")
+            ax.plot(line_x, n_line, color=MPFA_REFERENCE_COLORS["N"], lw=1.35, label="N change")
+            ax.plot(line_x, p_line, color=MPFA_REFERENCE_COLORS["P"], lw=1.45, label="P change")
+            ax.plot(x, y, color="#404040", lw=1.25, alpha=0.75, zorder=3)
+            for event in range(1, 11):
+                index = event - 1
+                marker = "D" if event == 1 else ("s" if event == 2 else "o")
+                marker_size = 7.0 if event == 1 else (6.4 if event == 2 else 5.8)
+                ax.errorbar(
+                    x[index], y[index], xerr=x_sem[index], yerr=y_sem[index],
+                    fmt=marker, ms=marker_size, color=event_colors[index], mec="0.20", mew=0.55,
+                    ecolor=CALCIUM_COLORS[calcium], elinewidth=0.85, capsize=2.2, alpha=0.95, zorder=4,
+                )
+                ax.annotate(f"A{event}", (x[index], y[index]), xytext=(3, 3),
+                            textcoords="offset points", fontsize=6.2, color=event_colors[index])
+
+            n_boutons = int(condition_rows["Boutons"].iloc[0])
+            n_fibers = int(condition_rows["Fibers"].iloc[0])
+            ax.set_title(f"{frequency} Hz — {calcium} Ca²⁺\n{n_boutons} boutons, {n_fibers} fibers; A1 P̂={p1:.2f}", fontsize=9.5)
+            ax.set_xlim(0, reference_x_max)
+            ax.set_ylim(0, reference_y_max)
+            ax.spines["top"].set_visible(False)
+            ax.spines["right"].set_visible(False)
+            ax.grid(False)
+            if row_index == 1:
+                ax.set_xlabel(f"Mean response (% of {COMMON_REFERENCE_LABEL})")
+            if column_index == 0:
+                ax.set_ylabel(f"Variance / mean (% of {COMMON_REFERENCE_LABEL})")
+            if row_index == 0 and column_index == 0:
+                ax.legend(frameon=False, fontsize=7, loc="upper right")
+
+    reference_figure.suptitle(
+        f"Fig. S16 — Fano–mean trajectories normalized to {COMMON_REFERENCE_LABEL}",
+        fontsize=12, fontweight="bold",
+    )
+    reference_figure.text(0.5, 0.952, "Error bars show ±SEM from fiber-level bootstrap resampling",
+                          ha="center", va="top", fontsize=8, color="0.30")
+    reference_figure.tight_layout(rect=[0, 0, 1, 0.95])
+    reference_pdf = OUTPUT_DIR / f"FigS16_all_conditions_normalized_to_{COMMON_REFERENCE_FILE_TAG}.pdf"
+    reference_png = OUTPUT_DIR / f"FigS16_all_conditions_normalized_to_{COMMON_REFERENCE_FILE_TAG}.png"
+    reference_figure.savefig(reference_pdf, dpi=300, bbox_inches="tight", facecolor="white", transparent=False)
+    reference_figure.savefig(reference_png, dpi=220, bbox_inches="tight", facecolor="white", transparent=False)
+    plt.show()
+
+    # One pooled view of all six conditions in the selected common
+    # reference system.  It deliberately omits error bars for legibility.
+    all_condition_colors = {
+        condition: plt.cm.tab10(index)
+        for index, condition in enumerate(
+            [(20, "1.5 mM"), (20, "2.5 mM"), (20, "4 mM"),
+             (50, "1.5 mM"), (50, "2.5 mM"), (50, "4 mM")]
+        )
+    }
+    pooled_figure, pooled_ax = plt.subplots(figsize=(7.4, 6.3), facecolor="white")
+    pooled_figure.patch.set_facecolor("white")
+    for frequency in (20, 50):
+        for calcium in calcium_order:
+            _, x, y, _, _ = reference_normalized[(frequency, calcium)]
+            color = all_condition_colors[(frequency, calcium)]
+            pooled_ax.plot(x, y, color=color, lw=1.65, alpha=0.90,
+                           label=f"{frequency} Hz — {calcium} Ca²⁺")
+            pooled_ax.scatter(x, y, s=28, color=color, edgecolor="0.20", linewidths=0.45, zorder=3)
+    pooled_ax.set_xlim(0, reference_x_max)
+    pooled_ax.set_ylim(0, reference_y_max)
+    pooled_ax.set_xlabel(f"Mean response (% of {COMMON_REFERENCE_LABEL})")
+    pooled_ax.set_ylabel(f"Variance / mean (% of {COMMON_REFERENCE_LABEL})")
+    pooled_ax.spines["top"].set_visible(False)
+    pooled_ax.spines["right"].set_visible(False)
+    pooled_ax.grid(False)
+    pooled_ax.legend(frameon=False, fontsize=8, loc="upper left")
+    pooled_figure.suptitle(
+        f"Fig. S16 — All Fano–mean trajectories normalized to {COMMON_REFERENCE_LABEL}",
+        fontsize=12, fontweight="bold",
+    )
+    pooled_figure.tight_layout(rect=[0, 0, 1, 0.96])
+    pooled_pdf = OUTPUT_DIR / f"FigS16_all_six_conditions_common_{COMMON_REFERENCE_FILE_TAG}_no_errorbars.pdf"
+    pooled_png = OUTPUT_DIR / f"FigS16_all_six_conditions_common_{COMMON_REFERENCE_FILE_TAG}_no_errorbars.png"
+    pooled_figure.savefig(pooled_pdf, dpi=300, bbox_inches="tight", facecolor="white", transparent=False)
+    pooled_figure.savefig(pooled_png, dpi=220, bbox_inches="tight", facecolor="white", transparent=False)
+    plt.show()
+
+    # Frequency-separated view: each calcium trajectory is normalized to its
+    # own A1, so this isolates within-condition trajectory shape.
+    comparison_figure, comparison_axes = plt.subplots(
+        1, 2, figsize=(11.5, 5.6), sharex=True, sharey=True, facecolor="white"
+    )
+    comparison_figure.patch.set_facecolor("white")
+    for ax, frequency in zip(comparison_axes, (20, 50)):
+        for calcium in calcium_order:
+            condition_rows = summary[
+                (summary["Frequency_Hz"] == frequency) & (summary["Calcium"] == calcium)
+            ].sort_values("Event")
+            x = condition_rows["Mean_percent_A1"].to_numpy(dtype=float)
+            y = condition_rows["Fano_percent_A1"].to_numpy(dtype=float)
+            x_sem = condition_rows["Mean_percent_SEM"].to_numpy(dtype=float)
+            y_sem = condition_rows["Fano_percent_SEM"].to_numpy(dtype=float)
+            p1 = float(condition_rows["Median_MLE_P_A1_excluding_cap20"].iloc[0])
+            line_x, q_line, n_line, p_line = expected_lines(p1, x_max)
+            ax.plot(line_x, q_line, color=MPFA_REFERENCE_COLORS["Q"], lw=0.95, alpha=0.70, zorder=1)
+            ax.plot(line_x, n_line, color=MPFA_REFERENCE_COLORS["N"], lw=0.95, alpha=0.70, zorder=1)
+            ax.plot(line_x, p_line, color=MPFA_REFERENCE_COLORS["P"], lw=1.00, alpha=0.70, zorder=1)
+            ax.plot(x, y, color=CALCIUM_COLORS[calcium], lw=1.45, alpha=0.85,
+                    label=f"{calcium} Ca²⁺", zorder=3)
+            for event in range(1, 11):
+                index = event - 1
+                marker = "D" if event == 1 else ("s" if event == 2 else "o")
+                marker_size = 7.0 if event == 1 else (6.4 if event == 2 else 5.8)
+                ax.errorbar(
+                    x[index], y[index], xerr=x_sem[index], yerr=y_sem[index],
+                    fmt=marker, ms=marker_size, color=event_colors[index], mec="0.20", mew=0.55,
+                    ecolor=CALCIUM_COLORS[calcium], elinewidth=0.85, capsize=2.2,
+                    alpha=0.95, zorder=4,
+                )
+        ax.set_title(f"{frequency} Hz", fontsize=11, fontweight="bold")
+        ax.set_xlim(0, x_max)
+        ax.set_ylim(0, y_max)
+        ax.set_xlabel("Mean response (% of own A1)")
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        ax.grid(False)
+    comparison_axes[0].set_ylabel("Variance / mean (% of own A1)")
+    condition_legend = comparison_axes[0].legend(frameon=False, fontsize=8, loc="upper left", title="Condition")
+    comparison_axes[0].add_artist(condition_legend)
+    comparison_axes[0].legend(
+        handles=[
+            Line2D([0], [0], color=MPFA_REFERENCE_COLORS["Q"], lw=1.2, label="Q change"),
+            Line2D([0], [0], color=MPFA_REFERENCE_COLORS["N"], lw=1.2, label="N change"),
+            Line2D([0], [0], color=MPFA_REFERENCE_COLORS["P"], lw=1.2, label="P change"),
+        ],
+        frameon=False, fontsize=8, loc="upper right", title="Prediction",
+    )
+    comparison_figure.suptitle(
+        "Fig. S16 — Fano–mean trajectories with within-condition A1 normalization",
+        fontsize=12, fontweight="bold",
+    )
+    comparison_figure.text(0.5, 0.93,
+                           "Each trajectory is normalized to its own A1; error bars show ±SEM",
+                           ha="center", va="top", fontsize=8, color="0.30")
+    comparison_figure.tight_layout(rect=[0, 0, 1, 0.91])
+    comparison_pdf = OUTPUT_DIR / "FigS16_calcium_trajectories_by_frequency_own_A1_reference.pdf"
+    comparison_png = OUTPUT_DIR / "FigS16_calcium_trajectories_by_frequency_own_A1_reference.png"
+    comparison_figure.savefig(comparison_pdf, dpi=300, bbox_inches="tight", facecolor="white", transparent=False)
+    comparison_figure.savefig(comparison_png, dpi=220, bbox_inches="tight", facecolor="white", transparent=False)
+    plt.show()
+
+    # Frequency-pooled comparison: calcium conditions are referenced to the
+    # low-calcium A1 measured at their own stimulation frequency.
+    frequency_normalized = {}
+    frequency_x_max = 0.0
+    frequency_y_max = 0.0
+    for frequency in (20, 50):
+        frequency_reference = summary[
+            (summary["Frequency_Hz"] == frequency)
+            & (summary["Calcium"] == "1.5 mM")
+            & (summary["Event"] == 1)
+        ]
+        if len(frequency_reference) != 1:
+            raise ValueError(f"Expected exactly one {frequency} Hz, 1.5 mM A1 normalization reference.")
+        reference_mean = float(frequency_reference["Bouton_mean_average"].iloc[0])
+        reference_fano = float(frequency_reference["Fano_of_bouton_averages"].iloc[0])
+        if reference_mean <= 0 or reference_fano <= 0:
+            raise ValueError(f"The {frequency} Hz, 1.5 mM A1 reference must have positive mean and Fano values.")
+        for calcium in calcium_order:
+            condition_rows = summary[
+                (summary["Frequency_Hz"] == frequency) & (summary["Calcium"] == calcium)
+            ].sort_values("Event")
+            own_mean_a1 = float(condition_rows["Bouton_mean_average"].iloc[0])
+            own_fano_a1 = float(condition_rows["Fano_of_bouton_averages"].iloc[0])
+            x = 100.0 * condition_rows["Bouton_mean_average"].to_numpy(dtype=float) / reference_mean
+            y = 100.0 * condition_rows["Fano_of_bouton_averages"].to_numpy(dtype=float) / reference_fano
+            x_sem = condition_rows["Mean_percent_SEM"].to_numpy(dtype=float) * own_mean_a1 / reference_mean
+            y_sem = condition_rows["Fano_percent_SEM"].to_numpy(dtype=float) * own_fano_a1 / reference_fano
+            frequency_normalized[(frequency, calcium)] = (condition_rows, x, y, x_sem, y_sem)
+            frequency_x_max = max(frequency_x_max, float(np.nanmax(x + x_sem)))
+            frequency_y_max = max(frequency_y_max, float(np.nanmax(y + y_sem)))
+
+    frequency_figure, frequency_axes = plt.subplots(
+        1, 2, figsize=(11.5, 5.6), sharex=True, sharey=True, facecolor="white"
+    )
+    frequency_figure.patch.set_facecolor("white")
+    for ax, frequency in zip(frequency_axes, (20, 50)):
+        for calcium in calcium_order:
+            condition_rows, x, y, x_sem, y_sem = frequency_normalized[(frequency, calcium)]
+            p1 = float(condition_rows["Median_MLE_P_A1_excluding_cap20"].iloc[0])
+            line_x = np.linspace(0, frequency_x_max, 400)
+            q_line = y[0] * line_x / x[0]
+            n_line = np.full_like(line_x, y[0])
+            if np.isfinite(p1) and 0 < p1 < 1:
+                p_line = y[0] * (1.0 - p1 * line_x / x[0]) / (1.0 - p1)
+                p_line[p_line < 0] = np.nan
+            else:
+                p_line = np.full_like(line_x, np.nan)
+            ax.plot(line_x, q_line, color=MPFA_REFERENCE_COLORS["Q"], lw=0.95, alpha=0.70, zorder=1)
+            ax.plot(line_x, n_line, color=MPFA_REFERENCE_COLORS["N"], lw=0.95, alpha=0.70, zorder=1)
+            ax.plot(line_x, p_line, color=MPFA_REFERENCE_COLORS["P"], lw=1.00, alpha=0.70, zorder=1)
+            ax.plot(x, y, color=CALCIUM_COLORS[calcium], lw=1.45, alpha=0.85,
+                    label=f"{calcium} Ca²⁺", zorder=3)
+            for event in range(1, 11):
+                index = event - 1
+                marker = "D" if event == 1 else ("s" if event == 2 else "o")
+                marker_size = 7.0 if event == 1 else (6.4 if event == 2 else 5.8)
+                ax.errorbar(
+                    x[index], y[index], xerr=x_sem[index], yerr=y_sem[index],
+                    fmt=marker, ms=marker_size, color=event_colors[index], mec="0.20", mew=0.55,
+                    ecolor=CALCIUM_COLORS[calcium], elinewidth=0.85, capsize=2.2,
+                    alpha=0.95, zorder=4,
+                )
+        ax.set_title(f"{frequency} Hz", fontsize=11, fontweight="bold")
+        ax.set_xlim(0, frequency_x_max)
+        ax.set_ylim(0, frequency_y_max)
+        ax.set_xlabel("Mean response (% of frequency-matched 1.5 mM A1)")
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        ax.grid(False)
+    frequency_axes[0].set_ylabel("Variance / mean (% of frequency-matched 1.5 mM A1)")
+    frequency_condition_legend = frequency_axes[0].legend(
+        frameon=False, fontsize=8, loc="upper left", title="Condition"
+    )
+    frequency_axes[0].add_artist(frequency_condition_legend)
+    frequency_axes[0].legend(
+        handles=[
+            Line2D([0], [0], color=MPFA_REFERENCE_COLORS["Q"], lw=1.2, label="Q change"),
+            Line2D([0], [0], color=MPFA_REFERENCE_COLORS["N"], lw=1.2, label="N change"),
+            Line2D([0], [0], color=MPFA_REFERENCE_COLORS["P"], lw=1.2, label="P change"),
+        ],
+        frameon=False, fontsize=8, loc="upper right", title="Prediction",
+    )
+    frequency_figure.suptitle(
+        "Fig. S16 — Fano–mean trajectories with frequency-matched A1 normalization",
+        fontsize=12, fontweight="bold",
+    )
+    frequency_figure.text(0.5, 0.93,
+                          "20 Hz and 50 Hz panels use their respective 1.5 mM A1 references; error bars show ±SEM",
+                          ha="center", va="top", fontsize=8, color="0.30")
+    frequency_figure.tight_layout(rect=[0, 0, 1, 0.91])
+    frequency_pdf = OUTPUT_DIR / "FigS16_calcium_trajectories_frequency_matched_A1_reference.pdf"
+    frequency_png = OUTPUT_DIR / "FigS16_calcium_trajectories_frequency_matched_A1_reference.png"
+    frequency_figure.savefig(frequency_pdf, dpi=300, bbox_inches="tight", facecolor="white", transparent=False)
+    frequency_figure.savefig(frequency_png, dpi=220, bbox_inches="tight", facecolor="white", transparent=False)
     plt.show()
 
     map_table = bootstrap_mpfa_maps(trials, q_value=QUANTAL_Q, n_boot=200)
@@ -564,7 +879,7 @@ def run():
         "For every bouton and event, trial mean and noise-corrected trial variance were estimated first.",
         "Bouton-level means and variances were then averaged; trials were never pooled across boutons.",
         "The plotted Fano estimate is mean(bouton variances) / mean(bouton means).",
-        "Both axes are normalized to the corresponding A1 population estimate.",
+        "In the primary six-panel figure, both axes are normalized to the corresponding A1 population estimate.",
         "Error bars are ±1 bootstrap SEM; fiber-level resampling accounts for boutons nested within fibers.", "",
         "Expected normalized trajectories:",
         "Q-only: y=x.",
@@ -580,7 +895,9 @@ def run():
     ]
     text_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     print(
-        f"Saved: {pdf}\nSaved: {png}\nSaved: {map_pdf}\nSaved: {map_png}\n"
+        f"Saved: {pdf}\nSaved: {png}\nSaved: {reference_pdf}\nSaved: {reference_png}\n"
+        f"Saved: {pooled_pdf}\nSaved: {pooled_png}\nSaved: {comparison_pdf}\nSaved: {comparison_png}\n"
+        f"Saved: {frequency_pdf}\nSaved: {frequency_png}\nSaved: {map_pdf}\nSaved: {map_png}\n"
         f"Saved: {sensitivity_pdf}\nSaved: {sensitivity_png}\n"
         f"Saved: {workbook}\nSaved: {text_path}"
     )
