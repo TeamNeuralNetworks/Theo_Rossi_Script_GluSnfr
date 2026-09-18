@@ -8,7 +8,7 @@ Controls run before this wiring:
 - features / trials / null / traces reproduce the old files to ~1e-14.
 - `target` matches the old join **exactly** on the PCA cohort (0 disagreements).
 - `sex` and `date` are the manifest's (deliberately more complete: +179 sexed
-  boutons, +130 six-digit-dated recordings) — **Fig S8 and some n-day counts will
+  boutons, +130 six-digit-dated recordings) — **Fig S7 and some n-day counts will
   change** from the published version (you chose to adopt these).
 
 Apply each edit, then re-run that cell (and the cells that depend on it) to confirm.
