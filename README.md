@@ -1,5 +1,7 @@
 # iGluSnFR response fitting and train analysis
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21554049.svg)](https://doi.org/10.5281/zenodo.21554049)
+
 Python tools and notebooks for fitting impulse-like transients and extracting individual responses from overlapping event trains. The methods were developed here for iGluSnFR recordings, but the model library and template-matching approach are also applicable to signals with comparable event-driven kinetics, including EPSCs, IPSCs, calcium-indicator transients, and other fluorescent sensor responses.
 
 This repository currently brings together three main resources:
@@ -22,7 +24,13 @@ Théo Rossi¹, Anthime Perrot¹, Aline Huber¹, Bernard Poulain¹, Frédéric Do
 
 The repository contains analysis code and supporting material used to study bouton-to-bouton diversity in glutamate release and short-term plasticity along individual cerebellar parallel fibers.
 
-The associated dataset is available through the [Zenodo preview record](https://zenodo.org/records/21554049?preview=1&token=eyJhbGciOiJIUzUxMiIsImlhdCI6MTc4NDk3OTIzMywiZXhwIjoxNzk4NzYxNTk5fQ.eyJpZCI6IjE1YjQxOTkxLWNjYWItNGYxYi1iMWJkLWM3YWY3NGVhYTAwOSIsImRhdGEiOnt9LCJyYW5kb20iOiJmZWNjZGU3ODAxMTRkZGE2YzQ5YTViYTExYzllNGE1NCJ9.i04CNJeKI5esuCIyY0Xg3bk-u2W-f_sWcAxJZno5oIICfJKwi2KY2ZIfmKCOhSKKGUGvk8QoXaN-kwyueDRwGA).
+The associated dataset is deposited on Zenodo:
+[10.5281/zenodo.21554049](https://doi.org/10.5281/zenodo.21554049)
+([preview record](https://zenodo.org/records/21554049?preview=1&token=eyJhbGciOiJIUzUxMiIsImlhdCI6MTc4NDk3OTIzMywiZXhwIjoxNzk4NzYxNTk5fQ.eyJpZCI6IjE1YjQxOTkxLWNjYWItNGYxYi1iMWJkLWM3YWY3NGVhYTAwOSIsImRhdGEiOnt9LCJyYW5kb20iOiJmZWNjZGU3ODAxMTRkZGE2YzQ5YTViYTExYzllNGE1NCJ9.i04CNJeKI5esuCIyY0Xg3bk-u2W-f_sWcAxJZno5oIICfJKwi2KY2ZIfmKCOhSKKGUGvk8QoXaN-kwyueDRwGA)
+while the record is embargoed/unpublished — the DOI link will resolve directly
+once it goes live).
+
+**New here and just want to regenerate the paper figures?** See [`QUICKSTART.md`](QUICKSTART.md).
 
 ## What is in the repository?
 
@@ -122,8 +130,9 @@ pip install -r requirements.txt
 
 ## Data location
 
-The analysis demos locate the dataset through the `GLUSNFR_DATA_ROOT`
-environment variable. Set it to the directory containing the extracted data:
+Everything in this repository — the demo scripts and `Support_figure.ipynb` —
+locates data through the same `GLUSNFR_DATA_ROOT` environment variable. Set it
+to the directory that contains the extracted data:
 
 ```powershell
 $env:GLUSNFR_DATA_ROOT = "C:\path\to\PPR_DATA_FINAL"
@@ -134,8 +143,19 @@ export GLUSNFR_DATA_ROOT="/path/to/PPR_DATA_FINAL"
 ```
 
 Alternatively, extract or copy the dataset to `PPR_DATA_FINAL/` at the
-repository root. Output and manifest paths are derived from that root, so the
-code does not require machine-specific path edits.
+repository root (the default when the environment variable isn't set). Output
+and manifest paths are derived from that root, so the code does not require
+machine-specific path edits.
+
+The Zenodo deposit only ships the consolidated `release/` subfolder (converted
+CSVs — see [`dataset_tools/SCHEMA.md`](dataset_tools/SCHEMA.md)), so extracting
+it into `PPR_DATA_FINAL/` is enough to run `Support_figure.ipynb` and the other
+paper-support notebooks. The `Feature_extraction`/`Model_Calibration` demo
+scripts instead read the pre-conversion raw recordings (per-condition `.xlsx`
+files under `PPR_DATA_FINAL/<condition>/`), which are **not** part of the
+public deposit (see §"Regenerating" in the schema doc); those demos are meant
+to be run against your own raw recordings, organized the same way. For a
+step-by-step walkthrough, see [`QUICKSTART.md`](QUICKSTART.md).
 
 To inspect the registered models:
 

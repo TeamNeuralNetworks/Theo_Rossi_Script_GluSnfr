@@ -41,6 +41,7 @@ release/
   trials.csv            # 1 row / (recording, trial)
   null_amps.csv         # 1 row / (recording, trial): null distribution
   traces.csv            # long: 1 row / (recording, sample): time_s, dff
+  f0.csv                # 1 row / (recording, trial): pre-stimulus baseline fluorescence (F0)
   saturation_amps.csv   # supplementary saturation experiment (amplitudes)
   saturation_traces.csv # supplementary saturation experiment (long traces)
   run_settings.json     # settings + environment + export date (provenance)
@@ -57,7 +58,17 @@ The former `ID_and_sex.csv` and `Target_WT_pooled.xlsx` are folded into the mani
 
 ## 3. Column dictionary
 
-### `metadata/boutons.csv` (manifest)
+Headers below are named after the *working data root* layout the pipeline reads
+from and writes to (`metadata/`, `derived/`) — see §2 for how each one maps onto
+the flat `release/*.csv` files actually shipped in the Zenodo deposit. In short:
+`derived/boutons.csv` → `release/boutons.csv`, `derived/trials.csv` →
+`release/trials.csv`, `derived/null_amps.csv` → `release/null_amps.csv`,
+`derived/traces.csv` → `release/traces.csv`. `metadata/boutons.csv` (the manifest
+before metrics are merged in) is internal to the working data root and is **not**
+shipped separately — `release/boutons.csv` already is that manifest enriched
+with the metrics.
+
+### `metadata/boutons.csv` (manifest, working data root only — not shipped)
 | column | meaning |
 |---|---|
 | `uid` | canonical recording id (primary key) |
@@ -92,6 +103,10 @@ nnls_null_amps_json` (the null amplitudes as a JSON list).
 
 ### `derived/traces.csv`  (grain: recording × sample; long format)
 `uid, condition, time_s, dff` — replaces the wide `summary_traces` + `summary_times`.
+
+### `release/f0.csv`  (grain: recording × trial)
+`uid, trial_col, F0` — pre-stimulus baseline fluorescence used to normalize each
+trial's trace to ΔF/F0.
 
 ## 4. Zenodo deposit
 

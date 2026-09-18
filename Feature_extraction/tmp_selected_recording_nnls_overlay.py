@@ -1,4 +1,5 @@
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -14,7 +15,7 @@ if str(REPO_ROOT) not in sys.path:
 from Feature_extraction.extract_metrics import extract_metrics
 
 
-DATA_ROOT = Path(r"C:\Users\Antoine.Valera\Desktop\Publication_test")
+DATA_ROOT = Path(os.environ.get("GLUSNFR_DATA_ROOT", str(REPO_ROOT / "PPR_DATA_FINAL")))
 RELEASE_DIR = DATA_ROOT / "release"
 MANIFEST = RELEASE_DIR / "boutons.csv"
 PRESET_NAME = "iglusnfr_optimized"
