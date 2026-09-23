@@ -18,8 +18,11 @@ Steps performed:
            models that leave a systematic positive bias near the peak time.
     4. Summarize the metrics in a table sorted by Gaussianity (Jarque–Bera).
 
-Update ``XLSX_PATH`` and ``OUT_DIR`` to match your data. The output CSV makes
-it easy to inspect or plot the metrics externally.
+Update ``TARGET_LEGACY_ID`` and ``OUT_DIR`` to match your data. The recording is
+loaded from the well-organized raw stage (release/raw/<uid>.csv +
+release/boutons_manifest.csv), resolved by legacy_id/uid via
+dataset_tools.raw_loader - never from the private per-condition .xlsx tree. The
+output CSV makes it easy to inspect or plot the metrics externally.
 """
 
 from __future__ import annotations
@@ -39,6 +42,7 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from Feature_extraction.extract_metrics import extract_metrics
+from dataset_tools import raw_loader
 
 
 # ---------------------------------------------------------------------------
@@ -48,11 +52,8 @@ from Feature_extraction.extract_metrics import extract_metrics
 DATA_ROOT = os.path.abspath(os.environ.get(
     "GLUSNFR_DATA_ROOT", os.path.join(REPO_ROOT, "PPR_DATA_FINAL")
 ))
-XLSX_PATH = os.path.join(
-    DATA_ROOT,
-    "Theo_4Ca",
-    "20211125_linescan1_20Hz_10pulses_4mMCa_bouton1_traces_converted.xlsx",
-)
+TARGET_LEGACY_ID = "20211125_linescan1_20Hz_10pulses_4mMCa_bouton1_traces_converted"
+TARGET_CONDITION = "Theo_4Ca"  # only used to disambiguate; set to None otherwise
 OUT_DIR = os.path.join(DATA_ROOT, "Testout")
 
 # Event models to compare. Add or remove entries as needed. Each tuple contains
@@ -349,16 +350,15 @@ def plot_comparison(diagnostics: List[ResidualDiagnostics], out_dir: str) -> str
 
 
 def main() -> None:
-    if not os.path.exists(XLSX_PATH):
-        raise FileNotFoundError(
-            "Update XLSX_PATH to point to a valid Excel file before running."
-        )
-
     os.makedirs(OUT_DIR, exist_ok=True)
 
-    df = pd.read_excel(XLSX_PATH, sheet_name=0, engine="openpyxl")
-    time_raw = pd.to_numeric(df.iloc[:, -1], errors="coerce").to_numpy(float)
-    trials_raw = df.iloc[:, :-1].apply(pd.to_numeric, errors="coerce").to_numpy(float)
+    manifest = raw_loader.load_manifest(DATA_ROOT)
+    row = raw_loader.resolve_recording(
+        manifest, legacy_id=TARGET_LEGACY_ID, condition=TARGET_CONDITION,
+    )
+    raw = raw_loader.load_raw_csv(DATA_ROOT, row["uid"])
+    time_raw = raw.time_s
+    trials_raw = raw.values  # no average-column dropping here (matches prior behavior)
 
     valid = np.isfinite(time_raw)
     time_s = time_raw[valid]

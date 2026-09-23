@@ -36,9 +36,7 @@ recordings with different settings.
      ```
 
    Both `Support_figure.ipynb` and the `Feature_extraction`/`Model_Calibration`
-   demo scripts read this same variable, so you only need to set it once. (Only
-   `Support_figure.ipynb` and the other paper-support notebooks can run from
-   the public Zenodo deposit alone — see the note below.)
+   demo scripts read this same variable, so you only need to set it once.
 
 5. **Run the notebook.** Open
    [`Support_figure.ipynb`](Support_figure.ipynb) in Jupyter or VS Code, select
@@ -49,13 +47,14 @@ recordings with different settings.
    and [`docs/nnls_lecture/NNLS_Lecture_Demo.ipynb`](docs/nnls_lecture/NNLS_Lecture_Demo.ipynb)
    are self-contained and don't require the dataset.
 
-**Scope note:** the Zenodo deposit ships only the *converted* recordings
-(`release/*.csv`) — not the original raw per-condition `.xlsx` files or the
-`.tif` microscopy stacks (see `SCHEMA.md` §4). That's sufficient to reproduce
-every figure. It is **not** sufficient to run the `Feature_extraction`/
-`Model_Calibration` demo scripts, which extract pulse amplitudes from raw
-recordings — those demos expect the pre-conversion `.xlsx` tree and are meant
-to be run against your own raw data (next section).
+**Scope note:** the Zenodo deposit ships the *converted* recordings
+(`release/*.csv`, including `release/raw/<uid>.csv` and
+`release/boutons_manifest.csv`) — not the original raw per-condition `.xlsx`
+files or the `.tif` microscopy stacks (see `SCHEMA.md` §4). That's sufficient
+both to reproduce every figure **and** to run the `Feature_extraction`/
+`Model_Calibration` demo scripts, since those read `release/raw/` + the
+manifest, not the private `.xlsx` tree. You only need your own raw recordings
+if you want to *add* data or regenerate `release/` from scratch (next section).
 
 ## How do I re-extract data differently?
 
@@ -63,34 +62,42 @@ Use this if you want to change extraction settings (fitting model, template
 options, thresholds, ...) and regenerate the derived tables, rather than just
 reproducing the published figures.
 
-This requires your own raw recordings, organized as
-`<DATA_ROOT>/<condition>/<recording>.xlsx` (one subfolder per experimental
-condition) — the layout `dataset_tools/build_manifest.py` expects. This raw
-tree is not part of the Zenodo deposit.
+**Case A — you only have the public deposit, just want different settings.**
+`release/` already has everything the demo scripts need
+(`release/raw/<uid>.csv` + `release/boutons_manifest.csv`), so no raw data or
+manifest-building step is required:
 
-1. **Extract pulse-by-pulse metrics** with your chosen options, either for one
-   file ([`Feature_extraction/demo_single_file.py`](Feature_extraction/demo_single_file.py))
-   or the whole dataset
+1. Point `GLUSNFR_DATA_ROOT` at your extracted `release/`'s parent folder, as
+   above.
+2. Edit the `options={}` dict / preset name and re-run the extraction, either
+   for one recording
+   ([`Feature_extraction/demo_single_file.py`](Feature_extraction/demo_single_file.py)
+   — set `TARGET_LEGACY_ID` or `TARGET_UID` to the recording you want, looked
+   up in `release/boutons_manifest.csv`) or the whole dataset
    ([`Feature_extraction/demo_batch_process.py`](Feature_extraction/demo_batch_process.py)).
-   Set `GLUSNFR_DATA_ROOT` as above and edit the `options={}` dict / preset
-   name in the demo to match the extraction you want. Set `WRITE_TIDY=True` in
-   `demo_batch_process.py` to write the tidy tables straight into
-   `<DATA_ROOT>/release/`, or keep the legacy `summary_*` outputs and convert
-   them in a separate step (next).
-
-2. **Rebuild the manifest and consolidated tables** from the raw folders and
-   your extraction outputs:
-   ```bash
-   python dataset_tools/build_manifest.py   --data-root <DATA_ROOT>
-   python dataset_tools/reorganize_raw.py   --data-root <DATA_ROOT> --out <DATA_ROOT>/release
-   python dataset_tools/convert_saturation.py --xlsx <DATA_ROOT>/Saturation_data.xlsx --out <DATA_ROOT>/release
-   python dataset_tools/consolidate.py --data-root <DATA_ROOT> \
-          --summary-dir <dir with summary_*> --out <DATA_ROOT>/release
-   ```
-   See [`dataset_tools/SCHEMA.md`](dataset_tools/SCHEMA.md) §5 for what each
-   step produces and how the columns are defined.
-
-3. **Re-run `Support_figure.ipynb`** against the regenerated `release/`
-   folder — no notebook changes needed, since it reads through
+   `demo_batch_process.py` has `WRITE_TIDY=True` by default, so it writes the
+   tidy tables straight into `<DATA_ROOT>/release/` in the same run — no
+   separate consolidation step needed.
+3. Re-run `Support_figure.ipynb` against the regenerated `release/` folder —
+   no notebook changes needed, since it reads through
    `dataset_tools/release_io.py` the same way regardless of how `release/`
    was produced.
+
+**Case B — you have your own private raw recordings to add.** These need to
+become "well-organized raw" first, via the one dedicated converter, before any
+extraction script touches them:
+
+```bash
+# writes release/boutons_manifest.csv
+python dataset_tools/build_manifest.py   --data-root <DATA_ROOT>
+# writes release/raw/<uid>.csv + release/f0.csv, and the saturation tables
+python dataset_tools/reorganize_raw.py   --data-root <DATA_ROOT> --out <DATA_ROOT>/release
+python dataset_tools/convert_saturation.py --xlsx <DATA_ROOT>/Saturation_data.xlsx --out <DATA_ROOT>/release
+```
+
+Your raw recordings need to be organized as `<DATA_ROOT>/<condition>/<recording>.xlsx`
+(one subfolder per experimental condition) for `build_manifest.py` to find them.
+See [`dataset_tools/SCHEMA.md`](dataset_tools/SCHEMA.md) §5 for what each step
+produces and how the columns are defined. Once this has run, proceed as in
+Case A — the extraction scripts don't know or care whether `release/raw/` came
+from the Zenodo deposit or your own conversion.

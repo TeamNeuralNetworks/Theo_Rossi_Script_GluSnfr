@@ -8,9 +8,12 @@ reorganize_raw.py - Copy the raw per-bouton recordings into a flat Zenodo layout
 The workbook's 'Traces DF_F0' sheet is NOT stored: it equals (raw - F0)/F0 exactly
 (verified to ~1e-16), so ΔF/F0 is reconstructed on demand from raw + f0.
 
-Non-destructive. Usage:
+Non-destructive. Reads the metrics-free manifest written by build_manifest.py
+(`<data-root>/release/boutons_manifest.csv`) to know which raw files to convert.
+
+Usage:
     python reorganize_raw.py --data-root "<PPR_DATA_FINAL>"
-    # raw .xlsx in a backup, manifest in the release:
+    # raw .xlsx in a backup, manifest already consolidated with metrics:
     python reorganize_raw.py --data-root "<work>" --source-root "<...- Copy>" \
                              --manifest "<work>/release/boutons.csv" --out "<work>/release"
 """
@@ -61,12 +64,12 @@ def main():
     ap.add_argument("--source-root", default=None,
                     help="where the raw .xlsx live (default: <data-root>)")
     ap.add_argument("--manifest", default=None,
-                    help="manifest path (default: <data-root>/metadata/boutons.csv)")
+                    help="manifest path (default: <data-root>/release/boutons_manifest.csv)")
     ap.add_argument("--out", default=None, help="output root (default: <data-root>/release)")
     args = ap.parse_args()
 
     source_root = args.source_root or args.data_root
-    manifest = args.manifest or os.path.join(args.data_root, "metadata", "boutons.csv")
+    manifest = args.manifest or os.path.join(args.data_root, "release", "boutons_manifest.csv")
     out_root = args.out or os.path.join(args.data_root, "release")
     os.makedirs(os.path.join(out_root, "raw"), exist_ok=True)
 

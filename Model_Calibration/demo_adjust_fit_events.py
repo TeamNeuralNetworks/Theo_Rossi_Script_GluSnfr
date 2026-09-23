@@ -1,7 +1,5 @@
 import os
 import sys
-import glob
-import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import numpy as np
 import pandas as pd
@@ -14,6 +12,7 @@ if REPO_ROOT not in sys.path:
 
 from Feature_extraction.extract_metrics import extract_metrics
 from smoothing import build_median_recut_waveform
+from dataset_tools import raw_loader
 
 # Configuration parameters
 TRAIN_START_S = 0.5
@@ -27,65 +26,46 @@ SAMPLE_HZ = 1000.0
 MAX_WORKERS = 24
 EVENT_INDEX = None  # Set to 0 for event 1, 2 for event 3, etc. Use None for all events
 
-# Input directory handling
-# You can override the default input directory in three ways (precedence high→low):
-#  1. Pass a path as the first CLI argument when running this script
-#        python demo_adjust_fit_events.py "C:\\path\\to\\folder"
-#  2. Set environment variable GLUSNFR_IN_DIR
-#        (Windows) set GLUSNFR_IN_DIR=C:\\path\\to\\folder
+# Input condition handling
+# Recordings are loaded from the well-organized raw stage (release/raw/<uid>.csv +
+# release/boutons_manifest.csv) via dataset_tools.raw_loader, filtered by condition -
+# never from the private per-condition .xlsx tree.
+# You can override the default condition in three ways (precedence high→low):
+#  1. Pass a condition name as the first CLI argument when running this script
+#        python demo_adjust_fit_events.py Theo_4Ca
+#  2. Set environment variable GLUSNFR_IN_CONDITION
+#        (Windows) set GLUSNFR_IN_CONDITION=Theo_4Ca
 #  3. Set GLUSNFR_DATA_ROOT, or place PPR_DATA_FINAL in the repository root
 DATA_ROOT = os.path.abspath(os.environ.get(
     "GLUSNFR_DATA_ROOT", os.path.join(REPO_ROOT, "PPR_DATA_FINAL")
 ))
-DEFAULT_IN_DIR = os.path.join(DATA_ROOT, "Theo_1_5Ca")
+DEFAULT_CONDITION = "Theo_1_5Ca"
 
-def _resolve_input_dir_from_argv(argv) -> str | None:
-    """Return the first positional CLI argument that is an existing directory.
+def _resolve_condition_from_argv(argv) -> str | None:
+    """Return the first positional CLI argument that isn't a flag.
 
     Skips any arguments starting with '-' (e.g., Jupyter's '--f=kernel.json').
     """
     for a in argv[1:]:  # skip script name
         if not a or a.startswith('-'):
             continue
-        ap = os.path.abspath(a)
-        if os.path.isdir(ap):
-            return ap
+        return a
     return None
 
-def _resolve_input_dir(cli_arg: str | None) -> str:
-    # Prefer an explicitly passed valid directory
+def _resolve_condition(cli_arg: str | None) -> str:
+    # Prefer an explicitly passed condition
     if cli_arg and not cli_arg.startswith('-'):
-        c = os.path.abspath(cli_arg)
-        if os.path.isdir(c):
-            return c
-    # Scan remaining argv for a usable directory (handles Jupyter invocation)
-    scan = _resolve_input_dir_from_argv(sys.argv)
+        return cli_arg
+    # Scan remaining argv (handles Jupyter invocation)
+    scan = _resolve_condition_from_argv(sys.argv)
     if scan:
         return scan
     # Environment variable override
-    env_dir = os.environ.get("GLUSNFR_IN_DIR")
-    if env_dir and os.path.isdir(env_dir):
-        return env_dir
+    env_cond = os.environ.get("GLUSNFR_IN_CONDITION")
+    if env_cond:
+        return env_cond
     # Fallback default
-    return DEFAULT_IN_DIR
-
-
-def _is_valid_xlsx(path: str) -> bool:
-    """Check if file is a valid Excel file."""
-    try:
-        with zipfile.ZipFile(path) as z:
-            return '[Content_Types].xml' in z.namelist()
-    except Exception:
-        return False
-
-
-def _load_time_trials(xlsx_path: str):
-    """Load time and trial data from Excel file."""
-    df = pd.read_excel(xlsx_path, sheet_name=0, engine="openpyxl")
-    t_raw = pd.to_numeric(df.iloc[:, -1], errors='coerce').to_numpy(float)
-    X = df.iloc[:, :-1].apply(pd.to_numeric, errors='coerce').to_numpy(float)
-    ok = np.isfinite(t_raw)
-    return t_raw[ok], X[ok, :]
+    return DEFAULT_CONDITION
 
 
 def _clean_trials(X: np.ndarray) -> np.ndarray:
@@ -96,13 +76,12 @@ def _clean_trials(X: np.ndarray) -> np.ndarray:
     return X[:, col_ok]
 
 
-def _file_to_resampled_trace(xlsx_path: str, t_grid: np.ndarray):
-    """Process a single Excel file and return resampled trace."""
+def _file_to_resampled_trace(uid: str, t_grid: np.ndarray):
+    """Process a single recording (release/raw/<uid>.csv) and return resampled trace."""
     try:
-        if not _is_valid_xlsx(xlsx_path):
-            return None
-            
-        t, X = _load_time_trials(xlsx_path)
+        raw = raw_loader.load_raw_csv(DATA_ROOT, uid)
+        ok = np.isfinite(raw.time_s)
+        t, X = raw.time_s[ok], raw.values[ok, :]
         X = _clean_trials(X)
         
         # Extract metrics from the data
@@ -153,51 +132,53 @@ def _file_to_resampled_trace(xlsx_path: str, t_grid: np.ndarray):
         return r
         
     except Exception as e:
-        print(f"Error processing {xlsx_path}: {e}")
+        print(f"Error processing {uid}: {e}")
         return None
 
 
-def process_folder(input_dir: str, max_workers: int = None):
-    """Process all Excel files in a folder and create summary plot."""
-    
+def process_folder(condition: str, max_workers: int = None):
+    """Process all recordings for a condition and create summary plot."""
+
     # Create time grid for resampling
     t_grid = np.arange(
         -PRE_MS/1000.0,
         POST_MS/1000.0 + 1e-12,
         1.0/SAMPLE_HZ
     )
-    
-    # Find all valid Excel files
-    xlsx_files = [p for p in glob.glob(os.path.join(input_dir, "*.xlsx")) if _is_valid_xlsx(p)]
-    print(f"Found {len(xlsx_files)} valid Excel files in {input_dir}")
-    
-    if not xlsx_files:
-        print("No valid Excel files found!")
+
+    # Find all recordings for this condition via the manifest
+    manifest = raw_loader.load_manifest(DATA_ROOT)
+    rows = raw_loader.iter_condition_rows(manifest, [condition])
+    uids = list(rows["uid"])
+    print(f"Found {len(uids)} recordings in manifest for condition '{condition}'")
+
+    if not uids:
+        print("No recordings found for this condition!")
         return None
-    
+
     # Process files in parallel using threads
     traces_resampled = []
     workers = max_workers or MAX_WORKERS
-    
+
     print(f"Processing files with {workers} workers...")
-    
+
     with ThreadPoolExecutor(max_workers=workers) as executor:
         # Submit all jobs
         future_to_file = {
-            executor.submit(_file_to_resampled_trace, file_path, t_grid): file_path 
-            for file_path in xlsx_files
+            executor.submit(_file_to_resampled_trace, uid, t_grid): uid
+            for uid in uids
         }
-        
+
         # Collect results
         for future in as_completed(future_to_file):
-            file_path = future_to_file[future]
+            uid = future_to_file[future]
             result = future.result()
-            
+
             if result is not None and np.any(np.isfinite(result)):
                 traces_resampled.append(result)
-                print(f"✓ {os.path.basename(file_path)} -> Total: {len(traces_resampled)}")
+                print(f"✓ {uid} -> Total: {len(traces_resampled)}")
             else:
-                print(f"✗ Skipped {os.path.basename(file_path)}")
+                print(f"✗ Skipped {uid}")
     
     if not traces_resampled:
         print("No valid traces found!")
@@ -247,11 +228,11 @@ def process_folder(input_dir: str, max_workers: int = None):
 
 
 if __name__ == "__main__":
-    # Resolve input directory (CLI arg > env var > default)
-    cli_dir = sys.argv[1] if len(sys.argv) > 1 else None
-    IN_DIR = _resolve_input_dir(cli_dir)
-    print(f"Using input directory: {IN_DIR}")
-    results = process_folder(IN_DIR, max_workers=MAX_WORKERS)
+    # Resolve input condition (CLI arg > env var > default)
+    cli_cond = sys.argv[1] if len(sys.argv) > 1 else None
+    IN_CONDITION = _resolve_condition(cli_cond)
+    print(f"Using condition: {IN_CONDITION}")
+    results = process_folder(IN_CONDITION, max_workers=MAX_WORKERS)
     
     if results:
         print(f"\nProcessing complete! Processed {results['n_files']} files.")

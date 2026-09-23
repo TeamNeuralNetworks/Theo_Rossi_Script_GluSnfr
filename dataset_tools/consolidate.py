@@ -3,7 +3,7 @@ consolidate.py - Collapse the 6 legacy output files + the metadata manifest into
 4 tidy CSVs keyed by the canonical `uid`, ready for the Zenodo `derived/` folder.
 
 Inputs  (in <DATA_ROOT>):
-    metadata/boutons.csv                  (manifest; run build_manifest.py first)
+    release/boutons_manifest.csv          (manifest; run build_manifest.py first)
     summary.csv                           (per-bouton metrics)
     summary_trials.xlsx                   (per-trial amplitudes / thresholds)
     summary_trials_nnls_null.xlsx         (per-trial null distribution)
@@ -54,8 +54,9 @@ def _to_uid(df, key, cond_col, id_col):
 
 
 # Manifest metadata columns (everything that is NOT a computed metric). Selecting
-# these keeps consolidation idempotent even when the manifest is release/boutons.csv
-# (which already carries metrics from a previous run).
+# these keeps consolidation idempotent even when the manifest passed in is
+# release/boutons.csv (which already carries metrics from a previous run) rather
+# than the metrics-free release/boutons_manifest.csv.
 META_COLS = ["uid", "base_uid", "condition", "legacy_id", "file", "date", "fibre",
              "section", "bouton", "frequency_hz", "ca_mM", "baseline_s", "n_pulses",
              "sex", "target"]
@@ -142,12 +143,12 @@ def main():
     ap.add_argument("--summary-dir", default=None,
                     help="dir containing summary*.csv/xlsx (default: <data-root>)")
     ap.add_argument("--manifest", default=None,
-                    help="manifest path (default: <data-root>/metadata/boutons.csv)")
+                    help="manifest path (default: <data-root>/release/boutons_manifest.csv)")
     ap.add_argument("--out", default=None, help="output dir (default: <data-root>/derived)")
     args = ap.parse_args()
 
     summary_dir = args.summary_dir or args.data_root
-    manifest = args.manifest or os.path.join(args.data_root, "metadata", "boutons.csv")
+    manifest = args.manifest or os.path.join(args.data_root, "release", "boutons_manifest.csv")
     out_dir = args.out or os.path.join(args.data_root, "derived")
     consolidate(summary_dir, manifest, out_dir)
 

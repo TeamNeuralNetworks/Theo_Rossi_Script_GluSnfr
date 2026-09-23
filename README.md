@@ -147,15 +147,19 @@ repository root (the default when the environment variable isn't set). Output
 and manifest paths are derived from that root, so the code does not require
 machine-specific path edits.
 
-The Zenodo deposit only ships the consolidated `release/` subfolder (converted
-CSVs — see [`dataset_tools/SCHEMA.md`](dataset_tools/SCHEMA.md)), so extracting
-it into `PPR_DATA_FINAL/` is enough to run `Support_figure.ipynb` and the other
-paper-support notebooks. The `Feature_extraction`/`Model_Calibration` demo
-scripts instead read the pre-conversion raw recordings (per-condition `.xlsx`
-files under `PPR_DATA_FINAL/<condition>/`), which are **not** part of the
-public deposit (see §"Regenerating" in the schema doc); those demos are meant
-to be run against your own raw recordings, organized the same way. For a
-step-by-step walkthrough, see [`QUICKSTART.md`](QUICKSTART.md).
+The Zenodo deposit ships the consolidated `release/` subfolder (converted
+CSVs — see [`dataset_tools/SCHEMA.md`](dataset_tools/SCHEMA.md)), and extracting
+it into `PPR_DATA_FINAL/` is enough to run everything in this repository:
+`Support_figure.ipynb` and the other paper-support notebooks read the
+metrics-enriched `release/boutons.csv`/`trials.csv`/`null_amps.csv`/`traces.csv`,
+while the `Feature_extraction`/`Model_Calibration` demo scripts read the
+well-organized `release/raw/<uid>.csv` recordings and `release/boutons_manifest.csv`
+— the same public folder, just the pre-metrics half of it. Nothing in the
+published code needs the private per-condition `.xlsx` tree; that tree is only
+ever touched by `dataset_tools/build_manifest.py` and `reorganize_raw.py`,
+which regenerate `release/` from your own raw recordings if you have them (see
+§"Regenerating" in the schema doc). For a step-by-step walkthrough, see
+[`QUICKSTART.md`](QUICKSTART.md).
 
 To inspect the registered models:
 

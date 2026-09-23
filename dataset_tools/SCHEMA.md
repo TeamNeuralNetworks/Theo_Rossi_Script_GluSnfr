@@ -37,6 +37,7 @@ provenance JSON and this doc), raw recordings renamed to `<uid>.csv`:
 
 ```
 release/
+  boutons_manifest.csv  # 1 row / recording: identifiers + params + biology, no metrics
   boutons.csv           # 1 row / recording: metadata (sex, target, freq, Ca...) + all metrics
   trials.csv            # 1 row / (recording, trial)
   null_amps.csv         # 1 row / (recording, trial): null distribution
@@ -50,25 +51,20 @@ release/
     <uid>.csv           # renamed raw recordings (time_s, trial_*, average)
 ```
 
-The **input manifest** `metadata/boutons.csv` (identifiers + params + biology, no
-metrics) is kept separately in the working data root as the source of truth the
-pipeline reads; `release/boutons.csv` is that manifest enriched with the metrics.
-The former `ID_and_sex.csv` and `Target_WT_pooled.xlsx` are folded into the manifest
-(`sex`, `target` columns) and are not shipped separately.
+The **input manifest** `release/boutons_manifest.csv` (identifiers + params +
+biology, no metrics) is the source of truth every extraction/fitting script reads,
+alongside `release/raw/` — together these two are the "well-organized raw" stage:
+everything needed to re-run extraction, without the private per-condition `.xlsx`
+tree. `release/boutons.csv` is that same manifest enriched with the metrics once
+extraction has run. Both are shipped as part of the deposit (§4). The former
+`ID_and_sex.csv` and `Target_WT_pooled.xlsx` are folded into the manifest (`sex`,
+`target` columns) and are not shipped separately.
 
 ## 3. Column dictionary
 
-Headers below are named after the *working data root* layout the pipeline reads
-from and writes to (`metadata/`, `derived/`) — see §2 for how each one maps onto
-the flat `release/*.csv` files actually shipped in the Zenodo deposit. In short:
-`derived/boutons.csv` → `release/boutons.csv`, `derived/trials.csv` →
-`release/trials.csv`, `derived/null_amps.csv` → `release/null_amps.csv`,
-`derived/traces.csv` → `release/traces.csv`. `metadata/boutons.csv` (the manifest
-before metrics are merged in) is internal to the working data root and is **not**
-shipped separately — `release/boutons.csv` already is that manifest enriched
-with the metrics.
+All tables below are shipped as the flat `release/*.csv` files listed in §2.
 
-### `metadata/boutons.csv` (manifest, working data root only — not shipped)
+### `release/boutons_manifest.csv` (manifest)
 | column | meaning |
 |---|---|
 | `uid` | canonical recording id (primary key) |
@@ -87,21 +83,21 @@ with the metrics.
 | `sex` | animal sex (where annotated) |
 | `target` | postsynaptic target identity: PC / IN / UN |
 
-### `derived/boutons.csv`
+### `release/boutons.csv`
 All manifest columns **plus** the per-bouton metrics (already merged — no manual join):
 `AMP1..AMP10` (corrected ΔF/F0), `AMP1_UNCORR..AMP10_UNCORR`, `PPR2/1..PPR10/1`,
 `%Fail1..%Fail3`, `NOISE_THR_MEDIAN`, `measurement` (SAVGOL).
 
-### `derived/trials.csv`  (grain: recording × trial)
+### `release/trials.csv`  (grain: recording × trial)
 `uid, condition, legacy_id, trial, trial_input_col_1based, status, F0, thr_shared,
 noise_level, baseline_null_{mean,median}_{including,excluding}_zero,
 AMP1_CORR..AMP10_CORR, AMP1_UNCORR..AMP10_UNCORR, AMP1`.
 
-### `derived/null_amps.csv`  (grain: recording × trial)
+### `release/null_amps.csv`  (grain: recording × trial)
 `uid, condition, legacy_id, trial, trial_input_col_1based, status, nnls_null_n,
 nnls_null_amps_json` (the null amplitudes as a JSON list).
 
-### `derived/traces.csv`  (grain: recording × sample; long format)
+### `release/traces.csv`  (grain: recording × sample; long format)
 `uid, condition, time_s, dff` — replaces the wide `summary_traces` + `summary_times`.
 
 ### `release/f0.csv`  (grain: recording × trial)
@@ -123,18 +119,23 @@ Notes:
 
 ```bash
 # 1. manifest (input source of truth) from the raw folders + sex/target annexes
+#    -> writes <DATA_ROOT>/release/boutons_manifest.csv
 python dataset_tools/build_manifest.py   --data-root <DATA_ROOT>
 
-# 2. renamed raw recordings + supplementary saturation tables
+# 2. renamed raw recordings (release/raw/<uid>.csv), f0.csv (baseline fluorescence),
+#    and supplementary saturation tables
 python dataset_tools/reorganize_raw.py   --data-root <DATA_ROOT> --out <DATA_ROOT>/release
 python dataset_tools/convert_saturation.py --xlsx <DATA_ROOT>/Saturation_data.xlsx --out <DATA_ROOT>/release
 
-# 3. the four tidy tables (either re-run the pipeline with WRITE_TIDY=True, or
-#    convert existing summary_* outputs directly):
+# 3. extraction, reading only from release/raw/ + release/boutons_manifest.csv
+#    (Feature_extraction/demo_batch_process.py, WRITE_TIDY=True) writes the four
+#    tidy tables straight into release/ -- or convert existing summary_* outputs
+#    directly:
 python dataset_tools/consolidate.py --data-root <DATA_ROOT> \
        --summary-dir <dir with summary_*> --out <DATA_ROOT>/release
 ```
 `consolidate.py` converts the *existing* canonical outputs, so the tables are
 byte-identical to the published results (verified: max |Δ| = 9e-16 on the metrics).
 A full pipeline run (`demo_batch_process.py`, `WRITE_TIDY=True`) writes the same
-tables straight into `release/`.
+tables straight into `release/`, reading recordings from `release/raw/` rather than
+the private `.xlsx` tree.

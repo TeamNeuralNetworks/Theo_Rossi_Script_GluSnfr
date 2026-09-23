@@ -1,8 +1,12 @@
 """
 build_manifest.py - Generate the master per-bouton metadata manifest.
 
-Produces `<DATA_ROOT>/metadata/boutons.csv`: one row per raw recording, keyed by a
-clean canonical id, carrying all identifiers, experimental parameters, and biology.
+Produces `<DATA_ROOT>/release/boutons_manifest.csv`: one row per raw recording, keyed
+by a clean canonical id, carrying all identifiers, experimental parameters, and
+biology. Lives inside `release/`, alongside `release/raw/` (written by
+reorganize_raw.py) — together they are the "well-organized raw" stage that
+Feature_extraction/Model_Calibration scripts load for extraction, kept separate from
+the metrics-enriched `release/boutons.csv` produced later by consolidate.py.
 
 This manifest is the single source of truth. It replaces ID_and_sex.csv,
 Target_WT_pooled.xlsx, and the hardcoded ISI/baseline lookup dicts in
@@ -103,10 +107,16 @@ def main():
     args = ap.parse_args()
 
     man = build(args.data_root)
-    out_dir = os.path.join(args.data_root, "metadata")
+    out_dir = os.path.join(args.data_root, "release")
     os.makedirs(out_dir, exist_ok=True)
-    out = os.path.join(out_dir, "boutons.csv")
+    out = os.path.join(out_dir, "boutons_manifest.csv")
     man.to_csv(out, index=False)
+
+    stale = os.path.join(args.data_root, "metadata", "boutons.csv")
+    if os.path.exists(stale):
+        print(f"[info] Found an old-location manifest at {stale} (from a "
+              f"pre-restructuring run). It is no longer read by this pipeline; "
+              f"safe to delete.")
 
     print(f"[export] wrote {out}  ({len(man)} rows)")
     print(f"  unique uid: {man['uid'].nunique()}  | physical boutons: {man['base_uid'].nunique()}")

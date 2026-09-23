@@ -23,16 +23,18 @@ DATA_ROOT = os.path.abspath(os.environ.get(
 ))
 OUT_DIR = os.path.join(DATA_ROOT, "FINALOUT_CLEAN_SAVGOL_FAILS_NEW_3")
 
-# Per-bouton manifest (metadata/boutons.csv). When present it is the authoritative
-# source of frequency / baseline / n_pulses; the lookup dicts below are a fallback.
-# Generate it with: python dataset_tools/build_manifest.py --data-root <DATA_ROOT>
-MANIFEST_PATH = os.path.join(DATA_ROOT, "metadata", "boutons.csv")
-
 # Clean, flat, Zenodo-ready output (the consolidated tidy tables land here).
 RELEASE_DIR = os.path.join(DATA_ROOT, "release")
 
+# Per-bouton manifest (release/boutons_manifest.csv, the metrics-free manifest
+# written by build_manifest.py). When present it is the authoritative source of
+# frequency / baseline / n_pulses; the lookup dicts below are a fallback.
+# Generate it with: python dataset_tools/build_manifest.py --data-root <DATA_ROOT>
+MANIFEST_PATH = os.path.join(RELEASE_DIR, "boutons_manifest.csv")
+
 # The pipeline runs from the release layout: recordings in release/raw/<uid>.csv,
-# driven by the manifest release/boutons.csv (uid, condition, legacy_id, params).
+# driven by the manifest (release/boutons_manifest.csv, or release/boutons.csv as a
+# fallback once metrics have already been merged into it).
 RAW_DIR = os.path.join(RELEASE_DIR, "raw")
 RELEASE_MANIFEST = os.path.join(RELEASE_DIR, "boutons.csv")
 
@@ -55,7 +57,7 @@ SHOW_PLOTS = False
 
 # --- Consolidated tidy output ---
 # When True, also write <OUT_DIR>/derived/{boutons,trials,null_amps,traces}.csv
-# (the Zenodo-ready tidy tables, merged with metadata/boutons.csv). The legacy
+# (the Zenodo-ready tidy tables, merged with release/boutons_manifest.csv). The legacy
 # summary_* files are still written so an output-folder diff stays value-only.
 WRITE_TIDY = True
 

@@ -2,12 +2,14 @@
 Adjust and visualize fit model by recutting, aligning, and averaging events.
 
 Supports:
-- Single file (.xlsx)
-- Single folder (process all .xlsx)
-- Multiple folders (batch)
+- Single recording (uid or legacy_id from release/boutons_manifest.csv)
+- Single condition (process every recording in that condition)
+- Multiple conditions/recordings (batch)
 
 For each dataset, the script:
-- Loads time and trials (last column is time; others are trials)
+- Loads time and trials from release/raw/<uid>.csv (all non-time columns are
+  trials, including any "average" column - matches the pipeline's prior xlsx
+  behavior of treating every non-time column as a trial)
 - Runs the streamlined pipeline (`extract_metrics`) to get the average trace
   and its fitted model (`yhat_avg`)
 - Re-cuts windows around all or a subset of events (with optional peak
@@ -24,8 +26,9 @@ Usage (CLI):
       --out-dir C:\\out --save
 
 Notes:
-- INPUT may be a file (.xlsx) or a folder. When a folder is passed, all
-  .xlsx files within are processed.
+- INPUT may be a uid, a legacy_id, or a condition name (looked up in
+  release/boutons_manifest.csv). A condition name expands to every recording
+  in that condition.
 - The overlayed model is derived from the pipeline’s average-trace fit
   (`yhat_avg`) to reflect the current fitting model.
 """
@@ -34,13 +37,10 @@ from __future__ import annotations
 
 import os
 import sys
-import glob
-import zipfile
 import argparse
 from typing import List, Tuple, Optional
 
 import numpy as np
-import pandas as pd
 import matplotlib.pyplot as plt
 
 # Ensure the repository root is on sys.path when running from this subfolder
@@ -54,35 +54,47 @@ from smoothing import (
     build_median_recut_figure,
     fit_template_decay,
 )
+from dataset_tools import raw_loader
+
+DATA_ROOT = os.path.abspath(os.environ.get(
+    "GLUSNFR_DATA_ROOT", os.path.join(REPO_ROOT, "PPR_DATA_FINAL")
+))
+RELEASE_DIR = os.path.join(DATA_ROOT, "release")
 
 
 # -------------------------
 # Helpers
 # -------------------------
 
-def _is_valid_xlsx(path: str) -> bool:
-    try:
-        with zipfile.ZipFile(path) as z:
-            return '[Content_Types].xml' in z.namelist()
-    except Exception:
-        return False
-
-
-def _load_time_trials_from_xlsx(xlsx_path: str) -> Tuple[np.ndarray, np.ndarray]:
-    """Load time and trials from an Excel file (sheet 0).
-
-    Time is taken from the last column; trials are all preceding columns.
-    Non-numeric entries are coerced to NaN and dropped row-wise via the time mask.
-    """
-    df = pd.read_excel(xlsx_path, sheet_name=0, engine="openpyxl")
-    if df.shape[1] < 2:
-        raise ValueError(f"Expected ≥2 columns (data + time) in {xlsx_path}")
-    t_raw = pd.to_numeric(df.iloc[:, -1], errors='coerce').to_numpy(float)
-    X = df.iloc[:, :-1].apply(pd.to_numeric, errors='coerce').to_numpy(float)
-    ok = np.isfinite(t_raw)
-    time = t_raw[ok]
-    trials = X[ok, :]
-    return time, trials
+def _resolve_tokens_to_uids(tokens: List[str], manifest) -> List[str]:
+    """Resolve CLI tokens (uid, legacy_id, or condition) to a flat, deduplicated
+    list of uids, expanding a condition token to every recording in it."""
+    uids: List[str] = []
+    for tok in tokens:
+        if (manifest["uid"] == tok).any():
+            uids.append(tok)
+            continue
+        leg_rows = manifest[manifest["legacy_id"] == tok]
+        if len(leg_rows) == 1:
+            uids.append(str(leg_rows.iloc[0]["uid"]))
+            continue
+        if len(leg_rows) > 1:
+            conditions = leg_rows["condition"].tolist()
+            print(f"[skip] legacy_id={tok!r} is ambiguous across conditions "
+                  f"{conditions}; pass the uid instead")
+            continue
+        cond_rows = manifest[manifest["condition"] == tok]
+        if len(cond_rows) > 0:
+            uids.extend(str(u) for u in cond_rows["uid"].tolist())
+            continue
+        print(f"[skip] Not a uid, legacy_id, or condition: {tok}")
+    seen = set()
+    out = []
+    for u in uids:
+        if u not in seen:
+            seen.add(u)
+            out.append(u)
+    return out
 
 
 def _parse_events_spec(spec: Optional[str], n_pulses: int) -> List[int]:
@@ -275,7 +287,7 @@ def _resample_to_grid(t_src: np.ndarray, y_src: np.ndarray, t_ref: np.ndarray) -
 # -------------------------
 
 def process_file(
-    xlsx_path: str,
+    uid: str,
     *,
     train_start: float,
     isi: float,
@@ -292,19 +304,18 @@ def process_file(
     out_dir: Optional[str] = None,
     save: bool = False,
 ) -> Optional[str]:
-    """Process a single Excel file and optionally save a figure.
-
-    Returns path to saved figure if save=True and success, otherwise None.
+    """Process a single recording (release/raw/<uid>.csv) and optionally save a
+    figure. Returns path to saved figure if save=True and success, otherwise None.
     """
-    if not _is_valid_xlsx(xlsx_path):
-        print(f"[skip] Not a valid .xlsx package: {xlsx_path}")
-        return None
-
     try:
-        time, trials = _load_time_trials_from_xlsx(xlsx_path)
+        manifest = raw_loader.load_manifest(DATA_ROOT)
+        row = raw_loader.resolve_recording(manifest, uid=uid)
+        raw = raw_loader.load_raw_csv(DATA_ROOT, uid)
     except Exception as e:
-        print(f"[skip] Failed to read Excel: {xlsx_path} -> {e}")
+        print(f"[skip] Failed to load {uid}: {e}")
         return None
+    ok = np.isfinite(raw.time_s)
+    time, trials = raw.time_s[ok], raw.values[ok, :]
 
     peak_cfg = _normalize_peak_recenter(peak_recenter)
 
@@ -349,16 +360,16 @@ def process_file(
     )
 
     if t_rel is None or med is None:
-        print(f"[warn] No recut median computed for {xlsx_path}")
+        print(f"[warn] No recut median computed for {uid}")
         return None
 
     # Build figure with overlay
-    base = os.path.splitext(os.path.basename(xlsx_path))[0]
+    base = str(row["legacy_id"])
     title = _figure_title(base, events_spec or "all", peak_cfg)
     fig = build_median_recut_figure(t_rel, med, fit_curve=med_model, title=title)
 
     if save and fig is not None:
-        out_dir = out_dir or os.path.dirname(xlsx_path)
+        out_dir = out_dir or os.path.join(RELEASE_DIR, "adjust_fit_model_out")
         os.makedirs(out_dir, exist_ok=True)
         out_path = os.path.join(out_dir, f"{base}_adjust_fit.png")
         try:
@@ -367,7 +378,7 @@ def process_file(
             print(f"[ok] Saved: {out_path}")
             return out_path
         except Exception as e:
-            print(f"[warn] Failed to save figure for {xlsx_path}: {e}")
+            print(f"[warn] Failed to save figure for {uid}: {e}")
     else:
         try:
             plt.show(block=False); plt.pause(0.05)
@@ -381,7 +392,7 @@ def process_file(
 # -------------------------
 
 def process_folder(
-    in_dir: str,
+    condition: str,
     *,
     train_start: float,
     isi: float,
@@ -401,17 +412,18 @@ def process_folder(
     sample_hz: float = 1000.0,
     save: bool = True,
 ) -> List[str]:
-    """Process all .xlsx files in a folder; return list of saved figure paths."""
-    in_dir = os.path.abspath(in_dir)
-    out_dir = out_dir or in_dir
+    """Process every recording in a condition; return list of saved figure paths."""
+    out_dir = out_dir or os.path.join(RELEASE_DIR, "adjust_fit_model_out")
     peak_cfg = _normalize_peak_recenter(peak_recenter)
+    manifest = raw_loader.load_manifest(DATA_ROOT)
+    uids = raw_loader.iter_condition_rows(manifest, [condition])["uid"].tolist()
     paths = []
     agg_traces = []
     agg_trel = None
-    for xlsx_path in glob.glob(os.path.join(in_dir, "*.xlsx")):
+    for uid in uids:
         if not aggregate:
             out_path = process_file(
-                xlsx_path,
+                uid,
                 train_start=train_start, isi=isi, n_pulses=n_pulses,
                 events_spec=events_spec, peak_recenter=peak_cfg,
                 pre_ms=pre_ms, post_ms=post_ms,
@@ -425,7 +437,9 @@ def process_folder(
         else:
             # Aggregate: compute median recut per file (without drawing), then combine
             try:
-                time, trials = _load_time_trials_from_xlsx(xlsx_path)
+                raw = raw_loader.load_raw_csv(DATA_ROOT, uid)
+                ok = np.isfinite(raw.time_s)
+                time, trials = raw.time_s[ok], raw.values[ok, :]
             except Exception:
                 continue
             # basic extract for stim times
@@ -476,7 +490,7 @@ def process_folder(
         ax.plot(t_grid * 1000.0, avg_all, color='tab:blue', linewidth=2.0, label='Average')
         ax.axvline(0.0, color='k', linestyle=':', linewidth=1.0)
         ax.set_xlabel('Time (ms)'); ax.set_ylabel('ΔF (median)')
-        ax.set_title(_figure_title(os.path.basename(in_dir), events_spec or 'all', peak_cfg))
+        ax.set_title(_figure_title(condition, events_spec or 'all', peak_cfg))
         ax.legend(loc='best')
 
         # If overlay mode is requested, prefer showing without saving
@@ -488,7 +502,7 @@ def process_folder(
         else:
             try:
                 os.makedirs(out_dir, exist_ok=True)
-                out_path = os.path.join(out_dir, f"{os.path.basename(in_dir)}_aggregate_overlay.png")
+                out_path = os.path.join(out_dir, f"{condition}_aggregate_overlay.png")
                 fig.tight_layout(); fig.savefig(out_path, dpi=150)
                 plt.close(fig)
                 paths.append(out_path)
@@ -518,18 +532,23 @@ def process_inputs(
     sample_hz: float = 1000.0,
     save: bool = True,
 ) -> List[str]:
-    """Process a list of inputs (files or folders). Returns saved figure paths."""
+    """Process a list of inputs (uid, legacy_id, or condition tokens, looked up in
+    release/boutons_manifest.csv). Returns saved figure paths."""
     peak_cfg = _normalize_peak_recenter(peak_recenter)
+    manifest = raw_loader.load_manifest(DATA_ROOT)
+    uids = _resolve_tokens_to_uids(inputs, manifest)
     saved = []
     if aggregate:
-    # Aggregate across all inputs (files and folders)
+    # Aggregate across all resolved recordings
         agg_trel = None
         agg_traces = []
-        label = "aggregate"
-        def _collect_from_file(file_path: str):
+        label = inputs[0] if len(inputs) == 1 else "aggregate"
+        def _collect_from_uid(uid: str):
             nonlocal agg_trel, agg_traces
             try:
-                time, trials = _load_time_trials_from_xlsx(file_path)
+                raw = raw_loader.load_raw_csv(DATA_ROOT, uid)
+                ok = np.isfinite(raw.time_s)
+                time, trials = raw.time_s[ok], raw.values[ok, :]
             except Exception:
                 return
             res = extract_metrics(
@@ -555,14 +574,8 @@ def process_inputs(
                 agg_trel = t_rel
             agg_traces.append(_resample_to_grid(t_rel, med, agg_trel))
 
-        for inp in inputs:
-            if os.path.isdir(inp):
-                label = os.path.basename(inp) if len(inputs) == 1 else "aggregate"
-                for xlsx_path in glob.glob(os.path.join(inp, "*.xlsx")):
-                    if xlsx_path.lower().endswith('.xlsx'):
-                        _collect_from_file(xlsx_path)
-            elif os.path.isfile(inp) and inp.lower().endswith('.xlsx'):
-                _collect_from_file(inp)
+        for uid in uids:
+            _collect_from_uid(uid)
         if agg_traces and agg_trel is not None:
             # Build uniform grid at sample_hz and overlay all + mean
             pre_s = float(pre_ms) / 1000.0
@@ -593,7 +606,7 @@ def process_inputs(
                     pass
             else:
                 try:
-                    out_dir_final = out_dir or (inputs[0] if os.path.isdir(inputs[0]) else os.path.dirname(inputs[0]))
+                    out_dir_final = out_dir or os.path.join(RELEASE_DIR, "adjust_fit_model_out")
                     os.makedirs(out_dir_final, exist_ok=True)
                     out_path = os.path.join(out_dir_final, f"{label}_aggregate_overlay.png")
                     fig.tight_layout(); fig.savefig(out_path, dpi=150)
@@ -602,35 +615,19 @@ def process_inputs(
                 except Exception:
                     pass
         return saved
-    for inp in inputs:
-        if os.path.isdir(inp):
-            saved.extend(
-                process_folder(
-                    inp,
-                    train_start=train_start, isi=isi, n_pulses=n_pulses,
-                    events_spec=events_spec, peak_recenter=peak_cfg,
-                    pre_ms=pre_ms, post_ms=post_ms,
-                    normalize_dff=normalize_dff, bleach=bleach,
-                    use_all_trials=use_all_trials,
-                    single_event_window=single_event_window, guard_ms=guard_ms,
-                    out_dir=out_dir, save=save,
-                )
-            )
-        elif os.path.isfile(inp) and inp.lower().endswith('.xlsx'):
-            out_path = process_file(
-                inp,
-                train_start=train_start, isi=isi, n_pulses=n_pulses,
-                events_spec=events_spec, peak_recenter=peak_cfg,
-                pre_ms=pre_ms, post_ms=post_ms,
-                normalize_dff=normalize_dff, bleach=bleach,
-                use_all_trials=use_all_trials,
-                single_event_window=single_event_window, guard_ms=guard_ms,
-                out_dir=out_dir, save=save,
-            )
-            if out_path:
-                saved.append(out_path)
-        else:
-            print(f"[skip] Not a folder or .xlsx file: {inp}")
+    for uid in uids:
+        out_path = process_file(
+            uid,
+            train_start=train_start, isi=isi, n_pulses=n_pulses,
+            events_spec=events_spec, peak_recenter=peak_cfg,
+            pre_ms=pre_ms, post_ms=post_ms,
+            normalize_dff=normalize_dff, bleach=bleach,
+            use_all_trials=use_all_trials,
+            single_event_window=single_event_window, guard_ms=guard_ms,
+            out_dir=out_dir, save=save,
+        )
+        if out_path:
+            saved.append(out_path)
     return saved
 
 
@@ -643,7 +640,7 @@ def _build_argparser() -> argparse.ArgumentParser:
         description="Recut/align events, average them, and overlay the current fitted model.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p.add_argument("inputs", nargs="+", help="File (.xlsx) and/or folder paths")
+    p.add_argument("inputs", nargs="+", help="uid, legacy_id, and/or condition names (release/boutons_manifest.csv)")
     p.add_argument("--train-start", type=float, default=0.5, help="First stimulus time (s)")
     p.add_argument("--isi", type=float, default=0.05, help="Inter-stimulus interval (s)")
     p.add_argument("--n-pulses", type=int, default=10, help="Number of pulses in the train")
@@ -655,7 +652,7 @@ def _build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--post-ms", type=float, default=200.0, help="Post-stimulus window (ms)")
     p.add_argument("--no-dff", action="store_true", help="Disable ΔF/F0 normalization")
     p.add_argument("--no-bleach", action="store_true", help="Disable bleach correction")
-    p.add_argument("--out-dir", type=str, default=None, help="Output directory for figures (defaults to input folder)")
+    p.add_argument("--out-dir", type=str, default=None, help="Output directory for figures (defaults to release/adjust_fit_model_out)")
     p.add_argument("--save", action="store_true", help="Save figures instead of showing interactively")
     p.add_argument("--use-all-trials", action="store_true", help="Recut using all trials (event x trial snippets) for a cleaner median")
     p.add_argument("--single-event-window", action="store_true", help="Truncate post window to before next stimulus (use guard-ms margin)")

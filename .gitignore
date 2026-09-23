@@ -4,3 +4,4 @@ __pycache__/
 _tmp_*.npz
 extract_metrics_gui/validation_output/
 .claude/settings.local.json
+/PPR_DATA_FINAL/

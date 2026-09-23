@@ -20,6 +20,7 @@ Usage in the notebook:
 """
 import json
 import os
+from pathlib import Path
 import numpy as np
 import pandas as pd
 
@@ -30,9 +31,24 @@ _METRIC_EXTRA = ("NOISE_THR_MEDIAN", "measurement")
 
 
 def _dir():
-    if RELEASE_DIR is None:
-        raise RuntimeError("release_io.RELEASE_DIR is not set")
-    return str(RELEASE_DIR)
+    global RELEASE_DIR
+    if RELEASE_DIR is not None and (Path(RELEASE_DIR) / "boutons.csv").is_file():
+        return str(RELEASE_DIR)
+
+    candidates = []
+    env_root = os.environ.get("GLUSNFR_DATA_ROOT")
+    if env_root:
+        candidates.append(Path(env_root) / "release")
+    candidates.extend([
+        Path.cwd() / "PPR_DATA_FINAL" / "release",
+        Path.home() / "Desktop" / "Publication_test" / "release",
+    ])
+    for candidate in candidates:
+        if (candidate / "boutons.csv").is_file():
+            RELEASE_DIR = candidate
+            return str(candidate)
+
+    raise FileNotFoundError("Could not find release/boutons.csv. Set GLUSNFR_DATA_ROOT to the publication data root.")
 
 
 def manifest():

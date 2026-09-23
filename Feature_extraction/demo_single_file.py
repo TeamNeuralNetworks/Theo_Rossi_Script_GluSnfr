@@ -23,95 +23,61 @@ DATA_ROOT = os.path.abspath(os.environ.get(
 ))
 OUT_DIR = os.path.join(DATA_ROOT, "Testout")
 
+# Recordings are loaded from the well-organized raw stage (release/raw/<uid>.csv +
+# release/boutons_manifest.csv), resolved by uid or legacy_id via dataset_tools.raw_loader
+# - never from the private per-condition .xlsx tree.
+
 # --- File list: uncomment to process multiple files in one run ---
 # When FILES is set (not None), the script loops over all entries.
-# When FILES is None, it processes the single TARGET_FILE below.
+# When FILES is None, it processes the single TARGET_LEGACY_ID below.
+# Entries are legacy_id values (the old raw filename stem, without ".xlsx") or uid
+# values (<base_uid>__<condition>) from release/boutons_manifest.csv.
 FILES = [
-    "250128_Fibre2_Bouton_5.xlsx",
-    "250305_Fibre4_Bouton_4.xlsx",
-    "20190801_linescan1_20Hz_10pulses_2.5mMCa_bouton3_traces_converted.xlsx",
-    "20191017_linescan3_50Hz_10pulses_2.5mMCa_bouton1_traces_converted.xlsx",
-    "20191017_linescan3_50Hz_10pulses_2.5mMCa_bouton2_traces_converted.xlsx",
-    "20191017_linescan3_50Hz_10pulses_2.5mMCa_bouton4_traces_converted.xlsx",
-    "20201022_linescan1_50Hz_10pulses_2.5mMCa_bouton1_traces_converted.xlsx",
-    "20201022_linescan1_50Hz_10pulses_2.5mMCa_bouton2_traces_converted.xlsx",
-    "20201022_linescan1_50Hz_10pulses_2.5mMCa_bouton4_traces_converted.xlsx",
-    "20201030_linescan2_50Hz_10pulses_2.5mMCa_bouton3_traces_converted.xlsx",
-    "20210128_linescan5_20Hz_10pulses_2.5mMCa_bouton2_traces_converted.xlsx",
-    "20210512_linescan2_50Hz_10pulses_2.5mMCa_bouton6_traces_converted.xlsx",
-    "20210518_linescan1_50Hz_10pulses_2.5mMCa_bouton1_traces_converted.xlsx",
-    "20210518_linescan1_50Hz_10pulses_2.5mMCa_bouton2_traces_converted.xlsx",
-    "20210722_linescan3_50Hz_10pulses_1.5mMCa_bouton3_traces_converted.xlsx",
-    "20210722_linescan3_50Hz_10pulses_1.5mMCa_bouton12_traces_converted.xlsx",
-    "20220726_linescan5_50Hz_10pulses_1.5mMCa_bouton2_traces_converted.xlsx",
-    "20220726_linescan5_50Hz_10pulses_4mMCa_bouton2_traces_converted.xlsx",
-    "20220726_linescan6_50Hz_10pulses_4mMCa_bouton1_traces_converted.xlsx",
+    "250128_Fibre2_Bouton_5",
+    "250305_Fibre4_Bouton_4",
+    "20190801_linescan1_20Hz_10pulses_2.5mMCa_bouton3_traces_converted",
+    "20191017_linescan3_50Hz_10pulses_2.5mMCa_bouton1_traces_converted",
+    "20191017_linescan3_50Hz_10pulses_2.5mMCa_bouton2_traces_converted",
+    "20191017_linescan3_50Hz_10pulses_2.5mMCa_bouton4_traces_converted",
+    "20201022_linescan1_50Hz_10pulses_2.5mMCa_bouton1_traces_converted",
+    "20201022_linescan1_50Hz_10pulses_2.5mMCa_bouton2_traces_converted",
+    "20201022_linescan1_50Hz_10pulses_2.5mMCa_bouton4_traces_converted",
+    "20201030_linescan2_50Hz_10pulses_2.5mMCa_bouton3_traces_converted",
+    "20210128_linescan5_20Hz_10pulses_2.5mMCa_bouton2_traces_converted",
+    "20210512_linescan2_50Hz_10pulses_2.5mMCa_bouton6_traces_converted",
+    "20210518_linescan1_50Hz_10pulses_2.5mMCa_bouton1_traces_converted",
+    "20210518_linescan1_50Hz_10pulses_2.5mMCa_bouton2_traces_converted",
+    "20210722_linescan3_50Hz_10pulses_1.5mMCa_bouton3_traces_converted",
+    "20210722_linescan3_50Hz_10pulses_1.5mMCa_bouton12_traces_converted",
+    "20220726_linescan5_50Hz_10pulses_1.5mMCa_bouton2_traces_converted",
+    "20220726_linescan5_50Hz_10pulses_4mMCa_bouton2_traces_converted",
+    "20220726_linescan6_50Hz_10pulses_4mMCa_bouton1_traces_converted",
 ]
 
 
 
-# --- Select condition and file ---
-# If CONDITION is empty/None, the script will search all folders for TARGET_FILE
-CONDITION = ""  # Leave empty to auto-detect from file location
-#TARGET_FILE = "20191017_linescan3_50Hz_10pulses_2.5mMCa_bouton2_traces_converted.xlsx"
-#TARGET_FILE = "20210722_linescan3_50Hz_10pulses_1.5mMCa_bouton12_traces_converted.xlsx"
-#TARGET_FILE = "20210512_linescan2_50Hz_10pulses_2.5mMCa_bouton1_traces_converted.xlsx"
-TARGET_FILE = "20220726_linescan5_50Hz_10pulses_4mMCa_bouton2_traces_converted.xlsx"
-TARGET_FILE = "20220726_linescan5_50Hz_10pulses_1.5mMCa_bouton2_traces_converted.xlsx"
+# --- Select recording ---
+# If CONDITION is empty/None, resolved via the manifest; set it only to disambiguate
+# a legacy_id that matches more than one condition.
+CONDITION = ""
+#TARGET_LEGACY_ID = "20191017_linescan3_50Hz_10pulses_2.5mMCa_bouton2_traces_converted"
+#TARGET_LEGACY_ID = "20210722_linescan3_50Hz_10pulses_1.5mMCa_bouton12_traces_converted"
+#TARGET_LEGACY_ID = "20210512_linescan2_50Hz_10pulses_2.5mMCa_bouton1_traces_converted"
+TARGET_LEGACY_ID = "20220726_linescan5_50Hz_10pulses_4mMCa_bouton2_traces_converted"
+TARGET_LEGACY_ID = "20220726_linescan5_50Hz_10pulses_1.5mMCa_bouton2_traces_converted"
 
 
 # --- Select analysis preset ---
 PRESET_NAME = 'iglusnfr_optimized'  # Options: 'iglusnfr_optimized', 'double_exp', 'single_exp_fixed_8ms'
 
-# --- Manual overrides (set to None to use lookup tables) ---
+# --- Manual overrides (set to None to use the manifest) ---
 OVERRIDE_ISI = None         # e.g., 0.02 for 50Hz, 0.05 for 20Hz
 OVERRIDE_BASELINE = None    # e.g., 0.498 or 0.998
 OVERRIDE_N_PULSES = None    # e.g., 10
 
-# =============================================================================
-#                         CONDITION LOOKUP TABLES
-# =============================================================================
-# These define default ISI and baseline for each folder. Override above if needed.
-
-ALL_CONDITIONS = [
-    # --- 20Hz conditions (ISI=0.05s) ---
-    "Stability_Before",      # baseline 0.998
-    "Stability_After",       # baseline 0.998
-    "Stability_Before_05",   # baseline 0.498
-    "Stability_After_05",    # baseline 0.498
-    "Theo_4Ca",              # baseline 0.498
-    "Theo_1_5Ca",            # baseline 0.498
-    "WT_Theo",               # baseline 0.498
-    "WT_Theo_1scd",          # baseline 0.998
-    "WT_Anthime",            # baseline 0.998
-    "SynII",                 # baseline 0.998
-    
-    # --- 50Hz conditions (ISI=0.02s) ---
-    "Theo_1_5_50Hz",         # baseline 0.498
-    "Theo_2_5_50Hz",         # baseline 0.498
-    "Theo_4_50Hz",           # baseline 0.498
-]
-
-DEFAULT_ISI =                   0.05        # 20Hz
-DEFAULT_BASELINE =              0.998
-DEFAULT_N_PULSES =              10
-
-ISI_BY_CONDITION = {
-    "Theo_1_5_50Hz":            0.02,
-    "Theo_2_5_50Hz":            0.02,
-    "Theo_4_50Hz":              0.02,
-}
-
-BASELINE_BY_CONDITION = {
-    "Stability_Before_05":      0.498,
-    "Stability_After_05":       0.498,
-    "Theo_4Ca":                 0.498,
-    "Theo_1_5Ca":               0.498,
-    "WT_Theo":                  0.498,
-    "Theo_1_5_50Hz":            0.498,
-    "Theo_2_5_50Hz":            0.498,
-    "Theo_4_50Hz":              0.498,
-}
+# Fixed pulse-column count for the output summary table (independent of any one
+# recording's resolved n_pulses).
+DEFAULT_N_PULSES = 10
 
 # =============================================================================
 #                         ANALYSIS OPTIONS PRESETS
@@ -238,6 +204,7 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from Feature_extraction.extract_metrics import extract_metrics
+from dataset_tools import raw_loader
 
 def _ensure_columns(df, ordered_cols):
     """Ensure all columns exist (fill missing with NaN) and reorder; extras follow at the end."""
@@ -299,37 +266,41 @@ def _threshold_value(corr_arr, uncorr_arr, idx: int) -> float:
     return float(min(vals)) if vals else np.nan
 
 
-# --- Auto-detect condition from filename ---
-def _find_condition(data_root, conditions, filename):
-    """Search all condition folders for filename, return condition name or None."""
-    for cond in conditions:
-        if os.path.isfile(os.path.join(data_root, cond, filename)):
-            return cond
-    return None
-
 # --- Build file list to process ---
 if FILES is not None:
     _file_list = list(FILES)
 else:
-    _file_list = [TARGET_FILE]
+    _file_list = [TARGET_LEGACY_ID]
+
+_manifest = raw_loader.load_manifest(DATA_ROOT)
 
 _errors = []
-for _file_idx, TARGET_FILE in enumerate(_file_list):
-    CONDITION = ""  # reset per file so auto-detect works
+for _file_idx, TARGET_LEGACY_ID in enumerate(_file_list):
+    CONDITION_HINT = CONDITION or None  # only used to disambiguate
 
-    # --- Resolve parameters (use overrides if set, otherwise lookup) ---
-    if not CONDITION:
-        CONDITION = _find_condition(DATA_ROOT, ALL_CONDITIONS, TARGET_FILE)
-        if not CONDITION:
-            print(f"[SKIP] '{TARGET_FILE}' not found in any condition folder")
-            _errors.append(TARGET_FILE)
+    # --- Resolve the recording via the manifest ---
+    try:
+        _row = raw_loader.resolve_recording(
+            _manifest, legacy_id=TARGET_LEGACY_ID, condition=CONDITION_HINT,
+        )
+    except KeyError:
+        try:
+            _row = raw_loader.resolve_recording(_manifest, uid=TARGET_LEGACY_ID)
+        except KeyError as e:
+            print(f"[SKIP] '{TARGET_LEGACY_ID}': {e}")
+            _errors.append(TARGET_LEGACY_ID)
             continue
 
-    ISI = OVERRIDE_ISI if OVERRIDE_ISI is not None else ISI_BY_CONDITION.get(CONDITION, DEFAULT_ISI)
-    START = OVERRIDE_BASELINE if OVERRIDE_BASELINE is not None else BASELINE_BY_CONDITION.get(CONDITION, DEFAULT_BASELINE)
-    N_PULSES = OVERRIDE_N_PULSES if OVERRIDE_N_PULSES is not None else DEFAULT_N_PULSES
+    CONDITION = str(_row["condition"])
 
-    xlsx_path = os.path.join(DATA_ROOT, CONDITION, TARGET_FILE)
+    # --- Resolve parameters (use overrides if set, otherwise the manifest) ---
+    _params = raw_loader.resolved_params(
+        _row, override_isi=OVERRIDE_ISI, override_baseline=OVERRIDE_BASELINE,
+        override_n_pulses=OVERRIDE_N_PULSES,
+    )
+    ISI = _params["isi"]
+    START = _params["baseline_s"]
+    N_PULSES = _params["n_pulses"]
 
     # --- Compute ISI-dependent parameters ---
     ISI_MS = ISI * 1000.0
@@ -343,7 +314,8 @@ for _file_idx, TARGET_FILE in enumerate(_file_list):
     if len(_file_list) > 1:
         print(f"  [{_file_idx+1}/{len(_file_list)}]")
     print(f"  Condition:  {CONDITION}")
-    print(f"  File:       {TARGET_FILE}")
+    print(f"  uid:        {_row['uid']}")
+    print(f"  legacy_id:  {_row['legacy_id']}")
     print(f"  ISI:        {ISI_MS:.0f}ms ({1/ISI:.0f}Hz)")
     print(f"  Baseline:   {START:.3f}s")
     print(f"  N pulses:   {N_PULSES}")
@@ -357,11 +329,12 @@ for _file_idx, TARGET_FILE in enumerate(_file_list):
         raise ValueError(f"Unknown preset '{PRESET_NAME}'. Available: {list(options_presets)}")
     options = options_presets[PRESET_NAME]
 
-    # --- Load data ---
+    # --- Load data (release/raw/<uid>.csv via the manifest-resolved row) ---
     os.makedirs(OUT_DIR, exist_ok=True)
-    df = pd.read_excel(xlsx_path, sheet_name=0, engine="openpyxl")
-    _time = pd.to_numeric(df.iloc[:, -1], errors='coerce').to_numpy(float)
-    _all_before_time = df.iloc[:, :-1].apply(pd.to_numeric, errors='coerce').to_numpy(float)
+    _raw = raw_loader.load_raw_csv(DATA_ROOT, _row["uid"])
+    _time = _raw.time_s
+    _all_before_time = _raw.values
+    _n_cols_total = 1 + _all_before_time.shape[1]
 
     # Auto-detect and skip the average column (penultimate = mean of preceding columns)
     _has_avg_col = False
@@ -386,9 +359,9 @@ for _file_idx, TARGET_FILE in enumerate(_file_list):
     time = _time[valid]
     trials = _trials[valid, :]
 
-    print(f"[debug] Excel has {df.shape[1]} total columns -> {trials.shape[1]} trial columns{' + 1 avg' if _has_avg_col else ''} + 1 time column")
+    print(f"[debug] Raw file has {_n_cols_total} total columns -> {trials.shape[1]} trial columns{' + 1 avg' if _has_avg_col else ''} + 1 time column")
 
-    base = os.path.splitext(os.path.basename(xlsx_path))[0]
+    base = str(_row["legacy_id"])
 
     # =============================================================================
     #                              RUN ANALYSIS

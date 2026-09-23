@@ -31,7 +31,7 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
 DATA_ROOT = os.path.abspath(os.environ.get(
     "GLUSNFR_DATA_ROOT", os.path.join(REPO_ROOT, "PPR_DATA_FINAL")
 ))
-DEFAULT_INPUT_DIR = os.path.join(DATA_ROOT, "WT_Anthime")  # Default data directory
+DEFAULT_CONDITION = "WT_Anthime"  # Default condition, looked up in the manifest
 
 # Time windows and fitting parameters
 ANALYSIS_TIME_START_MS = -5      # Start of analysis window (ms)
@@ -61,44 +61,37 @@ BASELINE_FRACTION = 0.25         # Fraction of trace to use for baseline (if no 
 # DATA LOADING (from original notebook)
 # =============================================================================
 
-def _scan_argv_for_dir(argv) -> str | None:
+def _scan_argv_for_condition(argv) -> str | None:
     for a in argv[1:]:
         if not a or a.startswith('-'):
             continue
-        ap = os.path.abspath(a)
-        if os.path.isdir(ap):
-            return ap
+        return a
     return None
 
-def _resolve_input_dir(cli_arg: str | None) -> str:
-    """Resolve input directory with precedence: positional existing dir > CLI arg (if valid) > GLUSNFR_IN_DIR env > global setting."""
-    # If a specific CLI arg provided and valid
+def _resolve_condition(cli_arg: str | None) -> str:
+    """Resolve the condition with precedence: CLI arg > GLUSNFR_IN_CONDITION env > default."""
     if cli_arg and not cli_arg.startswith('-'):
-        ap = os.path.abspath(cli_arg)
-        if os.path.isdir(ap):
-            return ap
-    # Otherwise scan remaining argv for a directory (handles Jupyter injected flags)
-    scan = _scan_argv_for_dir(sys.argv)
+        return cli_arg
+    # Otherwise scan remaining argv (handles Jupyter injected flags)
+    scan = _scan_argv_for_condition(sys.argv)
     if scan:
         return scan
-    env_dir = os.environ.get("GLUSNFR_IN_DIR")
-    if env_dir and os.path.isdir(env_dir):
-        return env_dir
-    # Use global setting as final fallback
-    if os.path.isdir(DEFAULT_INPUT_DIR):
-        return DEFAULT_INPUT_DIR
-    raise ValueError(f"No valid input directory found. Tried: (1) CLI argument, (2) GLUSNFR_IN_DIR env variable, (3) DEFAULT_INPUT_DIR='{DEFAULT_INPUT_DIR}'")
+    env_cond = os.environ.get("GLUSNFR_IN_CONDITION")
+    if env_cond:
+        return env_cond
+    return DEFAULT_CONDITION
 
-def load_calcium_data(input_dir: str | None = None, *, verbose: bool = True):
+def load_calcium_data(condition: str | None = None, *, verbose: bool = True):
     """Load data using the same approach as the original notebook.
 
     Parameters
     ----------
-    input_dir : str | None
-        Optional explicit directory of .xlsx files. If None, resolve using
-        CLI/env/default precedence handled by caller (or resolved here if still None).
+    condition : str | None
+        Optional condition name, looked up in release/boutons_manifest.csv. If
+        None, resolve using CLI/env/default precedence handled by caller (or
+        resolved here if still None).
     verbose : bool
-        If True, print diagnostic information about discovered files.
+        If True, print diagnostic information about discovered recordings.
     """
     
     # Add likely source folders so the demo module is importable
@@ -115,28 +108,28 @@ def load_calcium_data(input_dir: str | None = None, *, verbose: bool = True):
     try:
         # Import the demo module - must be available via package path
         demo = importlib.import_module('Model_Calibration.demo_adjust_fit_events')
-        
-        # Determine which input directory to use
-        if input_dir is None:
-            # Must have resolve function in demo module
-            if hasattr(demo, "_resolve_input_dir"):
-                input_dir = demo._resolve_input_dir(None)  # type: ignore[attr-defined]
-            elif hasattr(demo, "DEFAULT_IN_DIR"):
-                input_dir = getattr(demo, "DEFAULT_IN_DIR")
-            else:
-                raise ValueError("Demo module must provide either '_resolve_input_dir' function or 'DEFAULT_IN_DIR' attribute")
 
-        print(f"Using data directory: {input_dir}")
+        # Determine which condition to use
+        if condition is None:
+            # Must have resolve function in demo module
+            if hasattr(demo, "_resolve_condition"):
+                condition = demo._resolve_condition(None)  # type: ignore[attr-defined]
+            elif hasattr(demo, "DEFAULT_CONDITION"):
+                condition = getattr(demo, "DEFAULT_CONDITION")
+            else:
+                raise ValueError("Demo module must provide either '_resolve_condition' function or 'DEFAULT_CONDITION' attribute")
+
+        print(f"Using condition: {condition}")
 
         # Basic diagnostics before processing
-        import glob as _glob
-        xlsx_pattern = os.path.join(input_dir, "*.xlsx")
-        xlsx_files = _glob.glob(xlsx_pattern)
+        from dataset_tools import raw_loader as _raw_loader
+        _manifest = _raw_loader.load_manifest(DATA_ROOT)
+        _rows = _raw_loader.iter_condition_rows(_manifest, [condition])
         if verbose:
-            print(f"Scanning directory: {input_dir}")
-            print(f"Found {len(xlsx_files)} .xlsx files (pattern: {xlsx_pattern})")
-            if len(xlsx_files) == 0:
-                print("No .xlsx files detected. Check that the path is correct or override with CLI arg or GLUSNFR_IN_DIR.")
+            print(f"Scanning manifest for condition: {condition}")
+            print(f"Found {len(_rows)} recordings in manifest for condition '{condition}'")
+            if len(_rows) == 0:
+                print("No recordings found. Check that the condition name is correct or override with CLI arg or GLUSNFR_IN_CONDITION.")
 
         # Process the folder with configured settings
         # Override demo module's stimulus timing with our settings
@@ -152,7 +145,7 @@ def load_calcium_data(input_dir: str | None = None, *, verbose: bool = True):
             print(f"Overriding demo module stimulus timing: TRAIN_START_S={TRAIN_START_S}, ISI_S={ISI_S}, N_PULSES={N_PULSES}")
             
             RESULTS = demo.process_folder(
-                input_dir,
+                condition,
                 max_workers=getattr(demo, "MAX_WORKERS", MAX_WORKERS)
             )
         finally:
@@ -180,9 +173,9 @@ def load_calcium_data(input_dir: str | None = None, *, verbose: bool = True):
             return RESULTS
         else:
             raise ValueError(
-                "No results returned from demo module. Possible causes: (1) directory has no valid Excel files, "
-                "(2) files failed validation (corrupt or not OOXML .xlsx), (3) all files skipped during processing. "
-                "Override the input directory via CLI or GLUSNFR_IN_DIR."
+                "No results returned from demo module. Possible causes: (1) the condition has no recordings in the "
+                "manifest, (2) release/raw/<uid>.csv files are missing for that condition, (3) all recordings were "
+                "skipped during processing. Override the condition via CLI or GLUSNFR_IN_CONDITION."
             )
             
     except ImportError as e:
@@ -643,15 +636,15 @@ def main():
     # CLI: optional directory arg + event model choice
     import argparse as _argparse
     ap = _argparse.ArgumentParser(description="Event model fitting demo")
-    ap.add_argument('input', nargs='?', default=None, help='Optional input directory')
+    ap.add_argument('input', nargs='?', default=None, help='Optional condition name')
     ap.add_argument('--event-model', default='both', choices=['cooperative','double_exp','both','auto'], help='Underlying event model')
     # Be tolerant of Jupyter/IPython extra args like --f=...
     args, _unknown = ap.parse_known_args(sys.argv[1:])
-    cli_dir = args.input
-    input_dir = _resolve_input_dir(cli_dir)
+    cli_condition = args.input
+    condition = _resolve_condition(cli_condition)
 
     # Load data
-    RESULTS = load_calcium_data(input_dir)
+    RESULTS = load_calcium_data(condition)
 
     # Preprocess data
     time_analysis, traces_array, y_avg, avg_noise = preprocess_data(RESULTS)
