@@ -4,13 +4,13 @@
 
 Python tools and notebooks for fitting impulse-like transients and extracting individual responses from overlapping event trains. The methods were developed here for iGluSnFR recordings, but the model library and template-matching approach are also applicable to signals with comparable event-driven kinetics, including EPSCs, IPSCs, calcium-indicator transients, and other fluorescent sensor responses.
 
-This repository currently brings together three main resources:
+This repository brings together three main resources:
 
 1. a library of event-fitting models;
 2. a tool for extracting responses from stimulus trains by non-negative template matching;
 3. analysis and explanatory notebooks supporting the associated cerebellar parallel-fiber study.
 
-The analysis code is under active simplification. The notebooks linked below provide the clearest overview of the current methods and intended workflow.
+The notebooks linked below provide the clearest overview of the methods and workflow.
 
 ![Overview of the repository, from kinetic models to response-train extraction and paper-support analyses](docs/readme_assets/repository_overview.svg)
 
@@ -20,15 +20,20 @@ The analysis code is under active simplification. The notebooks linked below pro
 
 **Bouton-Specific Diversity of Glutamate Release from Single Parallel Fiber Axons in the Cerebellum**
 
-Théo Rossi¹, Anthime Perrot¹, Aline Huber¹, Bernard Poulain¹, Frédéric Doussau¹*, Antoine M. Valera¹* and Philippe Isope¹*
+Théo Rossi¹§, Anthime Perrot¹, Aline Huber¹, Bernard Poulain¹, Frédéric Doussau¹\*, Antoine M. Valera¹\* and Philippe Isope¹\*✝
+
+¹ Institut des Neurosciences Cellulaires et Intégratives, CNRS, Université de Strasbourg, 67084 Strasbourg, France<br>
+\* Co-supervised the study<br>
+✝ Correspondence: philippe.isope@unistra.fr<br>
+§ Present address: Department of Neurobiology, Northwestern University, Evanston, IL 60208, USA
 
 The repository contains analysis code and supporting material used to study bouton-to-bouton diversity in glutamate release and short-term plasticity along individual cerebellar parallel fibers.
 
-The associated dataset is deposited on Zenodo:
+## Data availability
+
+The dataset is not included in this repository. It is deposited separately on Zenodo under the reserved DOI
 [10.5281/zenodo.21554049](https://doi.org/10.5281/zenodo.21554049)
-([preview record](https://zenodo.org/records/21554049?preview=1&token=eyJhbGciOiJIUzUxMiIsImlhdCI6MTc4NDk3OTIzMywiZXhwIjoxNzk4NzYxNTk5fQ.eyJpZCI6IjE1YjQxOTkxLWNjYWItNGYxYi1iMWJkLWM3YWY3NGVhYTAwOSIsImRhdGEiOnt9LCJyYW5kb20iOiJmZWNjZGU3ODAxMTRkZGE2YzQ5YTViYTExYzllNGE1NCJ9.i04CNJeKI5esuCIyY0Xg3bk-u2W-f_sWcAxJZno5oIICfJKwi2KY2ZIfmKCOhSKKGUGvk8QoXaN-kwyueDRwGA)
-while the record is embargoed/unpublished — the DOI link will resolve directly
-once it goes live).
+(the link will resolve once the record is published). See [Data location](#data-location) below for where to extract it.
 
 **New here and just want to regenerate the paper figures?** See [`QUICKSTART.md`](QUICKSTART.md).
 

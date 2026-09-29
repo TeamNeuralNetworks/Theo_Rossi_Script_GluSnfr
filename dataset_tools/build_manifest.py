@@ -16,6 +16,8 @@ strings never have to be matched by hand again.
 
 Usage:
     python build_manifest.py --data-root "<path to PPR_DATA_FINAL>"
+    # raw .xlsx quarantined in their own subfolder, release/ built in the parent:
+    python build_manifest.py --data-root "<parent>" --source-root "<parent>/MESSY RAW DATA"
 """
 import argparse
 import os
@@ -44,10 +46,15 @@ def _base_uid_of(stem):
     return base_uid(parse_id(str(stem).strip()))
 
 
-def build(data_root: str) -> pd.DataFrame:
+def build(data_root: str, source_root: str = None) -> pd.DataFrame:
+    """Scan `source_root` (default: `data_root`) for the raw per-condition
+    folders and annex files. `data_root` only matters for where the caller
+    later writes `release/`; the manifest's `file` column stays relative to
+    `source_root`, matching reorganize_raw.py's `--source-root` convention."""
+    source_root = source_root or data_root
     rows = []
     for cond in ALL_CONDITIONS:
-        folder = os.path.join(data_root, cond)
+        folder = os.path.join(source_root, cond)
         if not os.path.isdir(folder):
             print(f"[warn] missing condition folder: {folder}")
             continue
@@ -75,7 +82,7 @@ def build(data_root: str) -> pd.DataFrame:
     man = pd.DataFrame(rows)
 
     # --- merge sex (keyed by condition + physical bouton) ---
-    sex_path = os.path.join(data_root, "ID_and_sex.csv")
+    sex_path = os.path.join(source_root, "ID_and_sex.csv")
     if os.path.exists(sex_path):
         sex = pd.read_csv(sex_path)
         sex["base_uid"] = sex["ID"].map(_base_uid_of)
@@ -86,7 +93,7 @@ def build(data_root: str) -> pd.DataFrame:
         man["sex"] = pd.NA
 
     # --- merge target cell identity PC/IN/UN (keyed by physical bouton) ---
-    tgt_path = os.path.join(data_root, "Target_WT_pooled.xlsx")
+    tgt_path = os.path.join(source_root, "Target_WT_pooled.xlsx")
     if os.path.exists(tgt_path):
         tgt = pd.read_excel(tgt_path).iloc[:, :2].copy()
         tgt.columns = ["legacy", "target"]
@@ -104,10 +111,15 @@ def build(data_root: str) -> pd.DataFrame:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--data-root", required=True)
+    ap.add_argument("--source-root", default=None,
+                    help="where the raw .xlsx (and ID_and_sex.csv/Target_WT_pooled.xlsx "
+                         "annexes) live (default: <data-root>)")
+    ap.add_argument("--out", default=None, help="output root (default: <data-root>/release)")
     args = ap.parse_args()
 
-    man = build(args.data_root)
-    out_dir = os.path.join(args.data_root, "release")
+    source_root = args.source_root or args.data_root
+    man = build(args.data_root, source_root=source_root)
+    out_dir = args.out or os.path.join(args.data_root, "release")
     os.makedirs(out_dir, exist_ok=True)
     out = os.path.join(out_dir, "boutons_manifest.csv")
     man.to_csv(out, index=False)

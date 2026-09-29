@@ -12,9 +12,8 @@ recordings with different settings.
    consolidated CSV tables described in
    [`dataset_tools/SCHEMA.md`](dataset_tools/SCHEMA.md).
 
-2. **Code** — clone or download this repository at the tagged release linked
-   from the Zenodo record (the `main`/`prepublication` branch may have moved
-   on since the deposit was minted).
+2. **Code** — clone or download this repository (for exact reproduction of
+   the published figures, use the tagged release linked from the Zenodo record).
 
 3. **Python environment**
    ```bash

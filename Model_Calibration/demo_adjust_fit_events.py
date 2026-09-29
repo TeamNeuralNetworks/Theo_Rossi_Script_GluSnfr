@@ -35,9 +35,9 @@ EVENT_INDEX = None  # Set to 0 for event 1, 2 for event 3, etc. Use None for all
 #        python demo_adjust_fit_events.py Theo_4Ca
 #  2. Set environment variable GLUSNFR_IN_CONDITION
 #        (Windows) set GLUSNFR_IN_CONDITION=Theo_4Ca
-#  3. Set GLUSNFR_DATA_ROOT, or place PPR_DATA_FINAL in the repository root
+#  3. Set GLUSNFR_DATA_ROOT, or use the default local publication release root
 DATA_ROOT = os.path.abspath(os.environ.get(
-    "GLUSNFR_DATA_ROOT", os.path.join(REPO_ROOT, "PPR_DATA_FINAL")
+    "GLUSNFR_DATA_ROOT", os.path.join(os.path.expanduser("~"), "Desktop", "FINAL PUBLICATION TEST PROCESS")
 ))
 DEFAULT_CONDITION = "Theo_1_5Ca"
 

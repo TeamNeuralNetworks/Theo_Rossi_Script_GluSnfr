@@ -17,6 +17,7 @@ from Feature_extraction.extract_metrics import extract_metrics
 
 def _default_data_root():
     candidates = (
+        Path.home() / "Desktop" / "FINAL PUBLICATION TEST PROCESS",
         REPO_ROOT / "PPR_DATA_FINAL",
         Path.home() / "Desktop" / "Publication_test",
     )
@@ -329,4 +330,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
